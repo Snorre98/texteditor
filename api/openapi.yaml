@@ -1,0 +1,651 @@
+openapi: 3.0.3
+info:
+  title: Writing Assistant Engine API
+  description: >
+    The academic writing-assistant engine's REST/SSE surface (ADR-0017). Typed
+    non-streaming routes are codegen'd with ogen; the `/turn` SSE stream is
+    hand-framed in the API server (ADR-0031) and is marked x-ogen-raw-response so
+    ogen hands the handler the raw http.ResponseWriter.
+  version: 0.1.0
+
+servers:
+  - url: http://127.0.0.1:9100
+
+paths:
+  /health:
+    get:
+      operationId: getHealth
+      summary: Liveness check
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Health'
+
+  /models:
+    get:
+      operationId: listModels
+      summary: Discover the servable fleet (ADR-0018)
+      responses:
+        '200':
+          description: model list + live state
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Model'
+
+  /models/{name}/start:
+    post:
+      operationId: startModel
+      parameters:
+        - $ref: '#/components/parameters/Name'
+      responses:
+        '200':
+          description: started (up)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LiveStateResponse'
+
+  /models/{name}/stop:
+    post:
+      operationId: stopModel
+      parameters:
+        - $ref: '#/components/parameters/Name'
+      responses:
+        '200':
+          description: stopped (idempotent)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LiveStateResponse'
+
+  /models/{name}/provision:
+    post:
+      operationId: provisionModel
+      parameters:
+        - $ref: '#/components/parameters/Name'
+      responses:
+        '202':
+          description: accepted (async download)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProvisionResponse'
+
+  /models/{name}/status:
+    get:
+      operationId: getModelStatus
+      parameters:
+        - $ref: '#/components/parameters/Name'
+      responses:
+        '200':
+          description: live state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LiveStateResponse'
+
+  /modes:
+    get:
+      operationId: listModes
+      responses:
+        '200':
+          description: modes
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Mode'
+
+  /tools:
+    get:
+      operationId: listTools
+      responses:
+        '200':
+          description: tools
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ToolDef'
+
+  /documents:
+    post:
+      operationId: openDocument
+      summary: Open/create a document by path; returns its surrogate id
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OpenDocumentRequest'
+      responses:
+        '200':
+          description: document id
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Document'
+
+  /documents/{id}/blocks:
+    get:
+      operationId: getBlocks
+      parameters:
+        - $ref: '#/components/parameters/DocumentID'
+      responses:
+        '200':
+          description: block tree
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Block'
+
+  /documents/{id}/edits:
+    post:
+      operationId: applyEdit
+      parameters:
+        - $ref: '#/components/parameters/DocumentID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BlockEdit'
+      responses:
+        '200':
+          description: revision (candidate staged)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Revision'
+
+  /documents/{id}/commits:
+    post:
+      operationId: commitDocument
+      parameters:
+        - $ref: '#/components/parameters/DocumentID'
+      responses:
+        '200':
+          description: committed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Revision'
+
+  /documents/{id}/history:
+    get:
+      operationId: getHistory
+      parameters:
+        - $ref: '#/components/parameters/DocumentID'
+      responses:
+        '200':
+          description: revisions
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Revision'
+
+  /documents/{id}/diff:
+    get:
+      operationId: getDiff
+      parameters:
+        - $ref: '#/components/parameters/DocumentID'
+        - name: base
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: rev
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: word edits
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/WordEdit'
+
+  /documents/{id}/blocks/{bid}/candidates:
+    get:
+      operationId: getCandidates
+      parameters:
+        - $ref: '#/components/parameters/DocumentID'
+        - $ref: '#/components/parameters/BlockID'
+      responses:
+        '200':
+          description: open candidates for one block
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Candidate'
+
+  /turn:
+    post:
+      operationId: startTurn
+      summary: Run one agent turn (SSE stream)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Task'
+      responses:
+        '200':
+          description: SSE event stream (token/candidate/diff/done/error)
+          content:
+            text/event-stream:
+              x-ogen-raw-response: true
+              schema:
+                $ref: '#/components/schemas/Event'
+
+  /sessions:
+    get:
+      operationId: listSessions
+      parameters:
+        - name: documentId
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: sessions for a document
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Session'
+    post:
+      operationId: createSession
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateSessionRequest'
+      responses:
+        '200':
+          description: created-or-resumed session
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Session'
+
+  /sessions/{id}/messages:
+    get:
+      operationId: getSessionMessages
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: message history
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Message'
+
+components:
+  parameters:
+    Name:
+      name: name
+      in: path
+      required: true
+      schema:
+        type: string
+    DocumentID:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+    BlockID:
+      name: bid
+      in: path
+      required: true
+      schema:
+        type: string
+
+  schemas:
+    Health:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [ok]
+
+    Capabilities:
+      type: object
+      required: [contextLength, thinkingMode, supportsSystemPrompt]
+      properties:
+        contextLength:
+          type: integer
+        thinkingMode:
+          type: boolean
+        supportsSystemPrompt:
+          type: boolean
+
+    SamplingParams:
+      type: object
+      properties:
+        temperature:
+          type: number
+        maxTokens:
+          type: integer
+
+    Model:
+      type: object
+      required: [name, baseUrl]
+      properties:
+        name:
+          type: string
+        baseUrl:
+          type: string
+        capabilities:
+          $ref: '#/components/schemas/Capabilities'
+        modeTags:
+          type: array
+          items:
+            type: string
+        liveState:
+          type: string
+          enum: [up, down, starting, stopping, provisioning, unknown]
+
+    LiveStateResponse:
+      type: object
+      required: [name, state]
+      properties:
+        name:
+          type: string
+        state:
+          type: string
+          enum: [up, down, starting, stopping, provisioning, unknown]
+
+    ProvisionResponse:
+      type: object
+      required: [provisionID]
+      properties:
+        provisionID:
+          type: string
+
+    Mode:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+        systemPrompt:
+          type: string
+        defaultModel:
+          type: string
+        toolAllowlist:
+          type: array
+          items:
+            type: string
+        params:
+          $ref: '#/components/schemas/SamplingParams'
+        maxSteps:
+          type: integer
+        agentic:
+          type: boolean
+        kind:
+          type: string
+        preamble:
+          type: string
+        toolCalling:
+          type: string
+          enum: [native, router]
+
+    ToolDef:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+        description:
+          type: string
+        parameters:
+          type: object
+
+    OpenDocumentRequest:
+      type: object
+      required: [path]
+      properties:
+        path:
+          type: string
+
+    Document:
+      type: object
+      required: [id, path, rootBlockId]
+      properties:
+        id:
+          type: string
+        path:
+          type: string
+        rootBlockId:
+          type: string
+        updatedAt:
+          type: integer
+          format: int64
+
+    Block:
+      type: object
+      required: [id, kind, position, text]
+      properties:
+        id:
+          type: string
+        parentId:
+          type: string
+        kind:
+          type: string
+          enum: [paragraph, heading, list_item, code_fence, blockquote, table]
+        position:
+          type: integer
+        text:
+          type: string
+        hash:
+          type: string
+
+    Guard:
+      type: object
+      required: [blockId, hash]
+      properties:
+        blockId:
+          type: string
+        hash:
+          type: string
+
+    BlockEdit:
+      type: object
+      required: [blockId, text]
+      properties:
+        blockId:
+          type: string
+        text:
+          type: string
+        guards:
+          type: array
+          items:
+            $ref: '#/components/schemas/Guard'
+
+    Revision:
+      type: object
+      properties:
+        id:
+          type: string
+        message:
+          type: string
+        timestamp:
+          type: integer
+          format: int64
+
+    WordEdit:
+      type: object
+      required: [blockId]
+      properties:
+        blockId:
+          type: string
+        insertions:
+          type: array
+          items:
+            type: string
+        deletions:
+          type: array
+          items:
+            type: string
+
+    Candidate:
+      type: object
+      properties:
+        blockId:
+          type: string
+        text:
+          type: string
+        baseId:
+          type: string
+
+    Selection:
+      type: object
+      properties:
+        blockId:
+          type: string
+
+    TurnOptions:
+      type: object
+      properties:
+        temperature:
+          type: number
+        model:
+          type: string
+
+    Task:
+      type: object
+      required: [sessionId, modeName, documentId, userInput]
+      properties:
+        sessionId:
+          type: string
+        modeName:
+          type: string
+        documentId:
+          type: string
+        userInput:
+          type: string
+        selection:
+          $ref: '#/components/schemas/Selection'
+        options:
+          $ref: '#/components/schemas/TurnOptions'
+
+    Message:
+      type: object
+      required: [role, content]
+      properties:
+        role:
+          type: string
+          enum: [user, assistant, tool]
+        content:
+          type: string
+        timestamp:
+          type: integer
+          format: int64
+
+    Session:
+      type: object
+      required: [id, documentId]
+      properties:
+        id:
+          type: string
+        documentId:
+          type: string
+        anchorBlockId:
+          type: string
+        modeType:
+          type: string
+        title:
+          type: string
+        tokenBudget:
+          type: integer
+        createdAt:
+          type: integer
+          format: int64
+        updatedAt:
+          type: integer
+          format: int64
+
+    CreateSessionRequest:
+      type: object
+      required: [documentId]
+      properties:
+        documentId:
+          type: string
+        anchorBlockId:
+          type: string
+        modeType:
+          type: string
+
+    # SSE event vocabulary (ADR-0017 §6). Each event is turnId-tagged. The client
+    # codegens (Hey API + openapi-to-rust) consume these as typed SSE decoders.
+    Event:
+      type: object
+      required: [turnId, type]
+      properties:
+        turnId:
+          type: string
+        type:
+          type: string
+          enum: [token, meter, candidate, diff, done, error, backpressure]
+        data:
+          type: object
+          additionalProperties: true
+
+    TokenEvent:
+      type: object
+      properties:
+        turnId:
+          type: string
+        text:
+          type: string
+
+    DoneEvent:
+      type: object
+      properties:
+        turnId:
+          type: string
+        degraded:
+          type: boolean
+        usedModel:
+          type: string
+
+    ErrorEvent:
+      type: object
+      properties:
+        turnId:
+          type: string
+        code:
+          type: string
+        message:
+          type: string

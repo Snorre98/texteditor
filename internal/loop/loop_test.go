@@ -31,9 +31,9 @@ func (s stubMode) Get(name string) (dto.Mode, error) {
 
 type stubTools struct{ defs []dto.ToolDef }
 
-func (s stubTools) Register(dto.ToolDef) error            { return nil }
-func (s stubTools) List() []dto.ToolDef                    { return s.defs }
-func (s stubTools) AllowlistFor(dto.Mode) []dto.ToolDef    { return s.defs }
+func (s stubTools) Register(dto.ToolDef) error          { return nil }
+func (s stubTools) List() []dto.ToolDef                 { return s.defs }
+func (s stubTools) AllowlistFor(dto.Mode) []dto.ToolDef { return s.defs }
 
 type stubExecutor struct{}
 
@@ -42,15 +42,17 @@ func (stubExecutor) Invoke(string, json.RawMessage) (json.RawMessage, error) { r
 type stubAssembler struct{}
 
 func (stubAssembler) Assemble(_ context.Context, in dto.AssemblerInput) (dto.Payload, dto.Breakdown, error) {
-	return dto.Payload{}, dto.Breakdown{SystemPrompt: 10, User: 4}, nil
+	return dto.Payload{Request: dto.Request{ModelName: "gemma4-12b"}}, dto.Breakdown{SystemPrompt: 10, User: 4}, nil
 }
 
-type stubProvider struct{ stream func(ctx context.Context, emit func(dto.RawEvent)) error }
+type stubProvider struct {
+	stream func(ctx context.Context, emit func(dto.RawEvent)) error
+}
 
-func (s stubProvider) Chat(context.Context, dto.Target, dto.SamplingParams) (dto.Completion, error) {
+func (s stubProvider) Chat(context.Context, dto.Target, dto.Request) (dto.Completion, error) {
 	return dto.Completion{}, nil
 }
-func (s stubProvider) Stream(ctx context.Context, t dto.Target, p dto.SamplingParams, emit func(dto.RawEvent)) error {
+func (s stubProvider) Stream(ctx context.Context, t dto.Target, r dto.Request, emit func(dto.RawEvent)) error {
 	return s.stream(ctx, emit)
 }
 func (stubProvider) Embed(context.Context, dto.Target, string) ([]float32, error) { return nil, nil }
@@ -60,25 +62,25 @@ type stubFleet struct {
 	err error
 }
 
-func (s stubFleet) ListModels() ([]dto.Model, error)        { return nil, nil }
+func (s stubFleet) ListModels() ([]dto.Model, error)                        { return nil, nil }
 func (s stubFleet) Resolve(string, dto.ResolveOpts) (dto.Resolution, error) { return s.res, s.err }
-func (s stubFleet) Status(string) (dto.LiveState, error)    { return dto.LiveUp, nil }
-func (s stubFleet) Start(string) error                       { return nil }
-func (s stubFleet) Stop(string) error                        { return nil }
-func (s stubFleet) Provision(context.Context, string) (string, error) { return "", nil }
+func (s stubFleet) Status(string) (dto.LiveState, error)                    { return dto.LiveUp, nil }
+func (s stubFleet) Start(string) error                                      { return nil }
+func (s stubFleet) Stop(string) error                                       { return nil }
+func (s stubFleet) Provision(context.Context, string) (string, error)       { return "", nil }
 
 type stubDoc struct{}
 
-func (stubDoc) Open(string) (string, error)                  { return "", nil }
-func (stubDoc) Save(dto.Document) error                      { return nil }
-func (stubDoc) Blocks(string) ([]dto.Block, error)           { return nil, nil }
+func (stubDoc) Open(string) (string, error)        { return "", nil }
+func (stubDoc) Save(dto.Document) error            { return nil }
+func (stubDoc) Blocks(string) ([]dto.Block, error) { return nil, nil }
 func (stubDoc) ApplyEdit(context.Context, string, dto.BlockEdit) (dto.Revision, error) {
 	return dto.Revision{}, nil
 }
-func (stubDoc) Commit(string, string) error                  { return nil }
+func (stubDoc) Commit(string, string) error                         { return nil }
 func (stubDoc) Diff(string, string, string) ([]dto.WordEdit, error) { return nil, nil }
-func (stubDoc) History(string) ([]dto.Revision, error)       { return nil, nil }
-func (stubDoc) Candidates(string, string) ([]dto.Candidate, error) { return nil, nil }
+func (stubDoc) History(string) ([]dto.Revision, error)              { return nil, nil }
+func (stubDoc) Candidates(string, string) ([]dto.Candidate, error)  { return nil, nil }
 
 type stubRetriever struct{ chunks []dto.Chunk }
 
@@ -91,9 +93,9 @@ func (s stubSessions) ListByDocument(string) ([]dto.Session, error) { return nil
 func (stubSessions) Create(string, *string, string) (dto.Session, error) {
 	return dto.Session{}, nil
 }
-func (stubSessions) Resume(string) (dto.Session, error)           { return dto.Session{}, nil }
-func (stubSessions) Append(string, dto.Message) error             { return nil }
-func (s stubSessions) History(string) ([]dto.Message, error)      { return s.hist, nil }
+func (stubSessions) Resume(string) (dto.Session, error)      { return dto.Session{}, nil }
+func (stubSessions) Append(string, dto.Message) error        { return nil }
+func (s stubSessions) History(string) ([]dto.Message, error) { return s.hist, nil }
 
 type stubMeter struct {
 	mu     sync.Mutex

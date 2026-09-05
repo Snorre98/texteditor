@@ -12,11 +12,11 @@ import (
 const ReservedRequestToolName = "request_tool"
 
 var (
-	ErrDuplicate       = errors.New("tool already registered")
-	ErrReservedName    = errors.New("tool name is reserved (request_tool)")
-	ErrUnregistered    = errors.New("tool is not registered")
-	ErrToolNoHandler   = errors.New("tool has no handler")
-	ErrUnknownTool     = errors.New("unknown tool")
+	ErrDuplicate     = errors.New("tool already registered")
+	ErrReservedName  = errors.New("tool name is reserved (request_tool)")
+	ErrUnregistered  = errors.New("tool is not registered")
+	ErrToolNoHandler = errors.New("tool has no handler")
+	ErrUnknownTool   = errors.New("unknown tool")
 )
 
 type registry struct {

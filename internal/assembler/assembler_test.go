@@ -21,10 +21,14 @@ func TestAssembleDeterministic(t *testing.T) {
 			},
 			ToolAllowlist: []string{"edit_markdown"},
 		},
-		ToolSchemas: []dto.JSONSchema{json.RawMessage(`{"type":"object"}`)},
-		History:     []dto.Message{{Role: "user", Content: "earlier"}, {Role: "assistant", Content: "reply"}},
-		RAGChunks:   []dto.Chunk{{BlockID: "b1", Text: "a source passage here"}},
-		UserInput:   "fix this sentence",
+		ModelName: "gemma4-12b",
+		Params:    dto.SamplingParams{Temperature: 0.3, MaxTokens: 100},
+		Tools: []dto.ToolDef{
+			{Name: "edit_markdown", Description: "edits a block", Parameters: json.RawMessage(`{"type":"object"}`)},
+		},
+		History:   []dto.Message{{Role: "user", Content: "earlier"}, {Role: "assistant", Content: "reply"}},
+		RAGChunks: []dto.Chunk{{BlockID: "b1", Text: "a source passage here"}},
+		UserInput: "fix this sentence",
 	}
 
 	p1, b1, err := a.Assemble(context.Background(), in)
@@ -39,8 +43,14 @@ func TestAssembleDeterministic(t *testing.T) {
 	if b1 != b2 {
 		t.Fatalf("breakdown not deterministic: %+v vs %+v", b1, b2)
 	}
-	if string(p1.Request) != string(p2.Request) {
-		t.Fatalf("payload not deterministic:\n%s\n%s", p1.Request, p2.Request)
+	if p1.Request.ModelName != p2.Request.ModelName || len(p1.Request.Messages) != len(p2.Request.Messages) {
+		t.Fatalf("request not deterministic")
+	}
+	if p1.Request.ModelName != "gemma4-12b" {
+		t.Fatalf("request model = %q", p1.Request.ModelName)
+	}
+	if len(p1.Request.Tools) != 1 || p1.Request.Tools[0].Name != "edit_markdown" {
+		t.Fatalf("request tools = %+v", p1.Request.Tools)
 	}
 
 	// Breakdown components sum positively where present.
@@ -75,7 +85,7 @@ func TestAssembleTruncatesHistoryAndRag(t *testing.T) {
 		},
 		History: []dto.Message{
 			{Role: "user", Content: "aaaaaaaaaaaaaaaaaaaa"}, // oldest, large
-			{Role: "assistant", Content: "ok"},               // newest
+			{Role: "assistant", Content: "ok"},              // newest
 		},
 		RAGChunks: []dto.Chunk{
 			{BlockID: "b1", Text: "tiny"},

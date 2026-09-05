@@ -17,6 +17,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"texteditor/internal/sqlmigrate"
 	"texteditor/internal/textformatter"
 	"texteditor/shared/dto"
 )
@@ -57,15 +58,20 @@ type GuardFailure struct {
 // (ADR-0016 §9). It depends on the textformatter leaf (ADR-0029 §6) and is NOT a
 // pure leaf.
 type store struct {
-	db            *sql.DB
-	tf            textformatter.Interface
-	gitRoot       string // parent dir for per-document git repos
-	worktreeRoot  string // single dir holding each doc's canonical file
-	workfileName  string // the fixed filename inside each worktree (per doc file is named by id)
+	db           *sql.DB
+	tf           textformatter.Interface
+	gitRoot      string // parent dir for per-document git repos
+	worktreeRoot string // single dir holding each doc's canonical file
+	workfileName string // the fixed filename inside each worktree (per doc file is named by id)
 
 	mu    sync.Mutex
 	hists map[string]*historyStore // per-document git history (ADR-0020 §2)
 	locks map[string]*sync.Mutex   // per-document edit serialization (ADR-0026 §4)
+}
+
+// Migrate applies the app.db schema (exposed for the composition root).
+func Migrate(ctx context.Context, db *sql.DB) error {
+	return sqlmigrate.Migrate(ctx, db, appSchema)
 }
 
 // NewStore opens a Document store over the supplied app.db. gitDir is the

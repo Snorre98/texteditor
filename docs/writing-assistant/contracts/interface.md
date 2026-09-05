@@ -28,7 +28,8 @@ embeds a sibling module's package type.
 | `Resolution`, `LiveState` | Fleet | 1 |
 | `Chunk` | Retriever, Chunker, Assembler | 3, 4, 5 |
 | `Message` | Session store, Assembler, `Payload` | 0b |
-| `JSONSchema` | `ToolDef`, `AssemblerInput` | 0b |
+| `Request` | Assembler (`Payload`), Provider | 5, 2 |
+| `JSONSchema` | `ToolDef` | 0b |
 | `Document` | Document store | 0b |
 | `Block` | Document store, Chunker | 0b |
 | `BlockEdit`, `Revision`, `Candidate`, `WordEdit` | Document store | 9 |
@@ -169,16 +170,23 @@ type RawEvent struct {           // unframed, un-attributed
 }
 
 type ProviderGateway interface {
-    Chat(ctx context.Context, target Target, params SamplingParams) (Completion, error)
-    Stream(ctx context.Context, target Target, params SamplingParams, emit func(RawEvent)) error
+    Chat(ctx context.Context, target Target, req Request) (Completion, error)
+    Stream(ctx context.Context, target Target, req Request, emit func(RawEvent)) error
     Embed(ctx context.Context, target Target, text string) ([]float32, error)
 }
 ```
 
-Semantics: the Provider takes an **already-resolved `Target`** (never a name) and is
-a pure REST/SSE leaf. It emits **only raw `token`/`done`/`error`**; attribution is
+Semantics: the Provider takes an **already-resolved `Target`** (never a name) plus
+an **already-assembled `Request`** (the `Payload.Request` from §5) and is a pure
+REST/SSE leaf. It emits **only raw `token`/`done`/`error`**; attribution is
 downstream (the assembler + meter). Retry/backoff and per-server `-np 1`
 serialization are hidden internals.
+
+(Amended at A5: `Chat`/`Stream` now carry `Request` — the assembled messages,
+tools, serving model name, and merged params. This closes the earlier §2/§5 gap
+where neither `Target` nor `SamplingParams` could carry the assembled payload to
+the Provider. The Provider renders `Request` to the OpenAI-compatible wire format
+and owns nothing upstream.)
 
 ## 3. Retriever (Go interface)
 
@@ -242,7 +250,9 @@ type TextFormatter interface {
 ```go
 type AssemblerInput struct {
     Mode        Mode
-    ToolSchemas []JSONSchema
+    ModelName   string        // the actually-resolved serving model (usedName)
+    Params      SamplingParams // merged effective params
+    Tools       []ToolDef     // the mode's allowlisted tools, in splices order
     RAGChunks   []Chunk
     History     []Message
     UserInput   string
@@ -252,9 +262,16 @@ type Breakdown struct { // deterministic approximation, documented unit
     SystemPrompt, Tools, Rag, History, User, Thinking int
 }
 
+type Request struct {     // the fully-assembled provider request (pure DTO)
+    ModelName       string         // the resolved serving model
+    Messages        []Message      // system + history + rag + user, in order
+    Tools           []ToolDef      // spliced function definitions
+    EffectiveParams SamplingParams // merged defaults ← mode.params ← overrides
+}
+
 type Payload struct {
-    Messages []Message        // the assembled request body
-    Request  json.RawMessage  // provider-ready request (undocumented internals stay private)
+    Messages []Message // the assembled message list
+    Request  Request   // the provider-ready request handed verbatim to the Provider
 }
 
 type ContextAssembler interface {
@@ -263,6 +280,12 @@ type ContextAssembler interface {
 ```
 
 Pure: same inputs → same payload/breakdown. It does **not** call the Retriever.
+
+(Amended at A5: `AssemblerInput` now carries the resolved `ModelName`, merged
+`Params`, and `Tools []ToolDef` (not `[]JSONSchema`); `Payload.Request` is the typed
+`Request` DTO, not a `json.RawMessage`. The assembler produces the complete
+request — messages, tools, serving model, merged params — which the loop hands
+verbatim to `Provider.Chat`/`Stream`, closing the §2 gap.)
 
 ## 6. Token metering (Go)
 
@@ -505,7 +528,8 @@ type EventBus interface {
 Source ADR-0007 (verbs) + ADR-0025 (transport). The **control daemon** in
 `macos-dev-config` exposes the verbs over HTTP; `serve.sh` remains the CLI
 executor the daemon wraps. The engine's Fleet gateway consumes **only** the
-daemon's HTTP contract.
+daemon's HTTP contract. The precise paths and JSON shapes for that contract are
+pinned in `contracts/daemon-http.md` (REST projection of the table below).
 
 | Verb | Input | Output | Idempotent? |
 |---|---|---|---|

@@ -65,8 +65,8 @@ type retriever struct {
 	chunkTokens int
 
 	mu      sync.Mutex
-	dim     int    // learned/cached embedding dimension
-	schemaN bool   // schema migrated at least once
+	dim     int  // learned/cached embedding dimension
+	schemaN bool // schema migrated at least once
 }
 
 // New returns a Retriever over an index.db. chunkTokens is the RAG token lever

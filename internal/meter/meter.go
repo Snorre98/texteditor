@@ -74,13 +74,13 @@ func (m *meter) Attribute(ctx context.Context, turnID, sessionID, model string, 
 	}
 
 	out := dto.AttributedBreakdown{
-		SystemPrompt:    scaled[0],
-		Tools:           scaled[1],
-		Rag:             scaled[2],
-		History:         scaled[3],
-		User:            scaled[4],
-		Thinking:        thinking,
-		ThinkingApprox:  approx,
+		SystemPrompt:   scaled[0],
+		Tools:          scaled[1],
+		Rag:            scaled[2],
+		History:        scaled[3],
+		User:           scaled[4],
+		Thinking:       thinking,
+		ThinkingApprox: approx,
 	}
 
 	if err := m.persist(ctx, turnID, sessionID, model, out); err != nil {
@@ -123,9 +123,9 @@ func scalePrompt(b dto.Breakdown, total int) [5]int {
 func (m *meter) persist(ctx context.Context, turnID, sessionID, model string, a dto.AttributedBreakdown) error {
 	ts := time.Now().UnixMilli()
 	rows := []struct {
-		component         string
+		component          string
 		prompt, completion int
-		approx            int
+		approx             int
 	}{
 		{"system", a.SystemPrompt, 0, 0},
 		{"tools", a.Tools, 0, 0},
@@ -153,14 +153,14 @@ func (m *meter) persist(ctx context.Context, turnID, sessionID, model string, a 
 // meterEvent renders the single meter event emitted per turn.
 func meterEvent(turnID string, a dto.AttributedBreakdown, completion int) dto.Event {
 	data, _ := json.Marshal(map[string]interface{}{
-		"system":       a.SystemPrompt,
-		"tools":        a.Tools,
-		"rag":          a.Rag,
-		"history":      a.History,
-		"user":         a.User,
-		"thinking":     a.Thinking,
+		"system":         a.SystemPrompt,
+		"tools":          a.Tools,
+		"rag":            a.Rag,
+		"history":        a.History,
+		"user":           a.User,
+		"thinking":       a.Thinking,
 		"thinkingApprox": a.ThinkingApprox,
-		"completion":   completion,
+		"completion":     completion,
 	})
 	return dto.Event{TurnID: turnID, Type: "meter", Data: data}
 }

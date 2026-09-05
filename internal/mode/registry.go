@@ -46,11 +46,11 @@ type ValidationInput struct {
 
 // Typed validation errors (ADR-0019 §2).
 var (
-	ErrSchemaInvalid        = errors.New("schema-invalid: a mode file failed its JSON Schema")
-	ErrUnknownModel         = errors.New("mode-refs-unknown-model: defaultModel not in the fleet manifest")
-	ErrUnreachableNoTag     = errors.New("mode-unreachable-no-tag: mode name appears in no model's modeTags")
-	ErrUnknownTool          = errors.New("mode-refs-unknown-tool: toolAllowlist entry is not a registered tool")
-	ErrNotFound             = errors.New("mode not found")
+	ErrSchemaInvalid    = errors.New("schema-invalid: a mode file failed its JSON Schema")
+	ErrUnknownModel     = errors.New("mode-refs-unknown-model: defaultModel not in the fleet manifest")
+	ErrUnreachableNoTag = errors.New("mode-unreachable-no-tag: mode name appears in no model's modeTags")
+	ErrUnknownTool      = errors.New("mode-refs-unknown-tool: toolAllowlist entry is not a registered tool")
+	ErrNotFound         = errors.New("mode not found")
 )
 
 // ValidationError wraps one validation failure with context.

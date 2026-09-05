@@ -44,17 +44,17 @@ type Emitter interface {
 
 // Deps holds the loop's injected dependencies (the composition root wires these).
 type Deps struct {
-	Modes      mode.Interface
-	Tools      tool.Registry
-	Executor   tool.Executor
-	Assembler  assembler.Interface
-	Provider   provider.Interface
-	Fleet      fleet.Interface
-	Doc        document.Interface
-	Retriever  retriever.Interface
-	Sessions   session.Interface
-	Meter      meter.Interface
-	Bus        Emitter
+	Modes     mode.Interface
+	Tools     tool.Registry
+	Executor  tool.Executor
+	Assembler assembler.Interface
+	Provider  provider.Interface
+	Fleet     fleet.Interface
+	Doc       document.Interface
+	Retriever retriever.Interface
+	Sessions  session.Interface
+	Meter     meter.Interface
+	Bus       Emitter
 }
 
 // loop is the concrete Agent loop.
@@ -103,20 +103,21 @@ func (l *loop) runTurn(ctx context.Context, turnID string, task dto.Task) {
 		chunks, _ = l.d.Retriever.Query(ctx, task.UserInput, 3)
 	}
 
-	toolSchemas := toolSchemasFor(l.d.Tools, m)
+	tools := toolsFor(l.d.Tools, m)
 
 	payload, breakdown, err := l.d.Assembler.Assemble(ctx, dto.AssemblerInput{
-		Mode:        m,
-		ToolSchemas: toolSchemas,
-		RAGChunks:   chunks,
-		History:     history,
-		UserInput:   task.UserInput,
+		Mode:      m,
+		ModelName: res.UsedName,
+		Params:    res.EffectiveParams,
+		Tools:     tools,
+		RAGChunks: chunks,
+		History:   history,
+		UserInput: task.UserInput,
 	})
 	if err != nil {
 		l.emit(turnID, dto.Event{Type: "error", Data: errorData(err)})
 		return
 	}
-	_ = payload
 
 	// answering: stream, forward tokens, then meter + persist.
 	target := dto.Target{BaseURL: res.Model.BaseURL, Capabilities: res.Model.Capabilities}
@@ -132,7 +133,7 @@ func (l *loop) runTurn(ctx context.Context, turnID string, task dto.Task) {
 			l.emit(turnID, dto.Event{Type: "error", Data: raw.Data})
 		}
 	}
-	if err := l.d.Provider.Stream(ctx, target, res.EffectiveParams, emit); err != nil {
+	if err := l.d.Provider.Stream(ctx, target, payload.Request, emit); err != nil {
 		l.emit(turnID, dto.Event{Type: "error", Data: errorData(err)})
 		return
 	}
@@ -151,15 +152,10 @@ func (l *loop) emit(turnID string, ev dto.Event) {
 	l.d.Bus.Emit(ev)
 }
 
-// toolSchemasFor returns the mode's allowlisted tool schemas (in allowlist order,
-// so the payload order matches the meter).
-func toolSchemasFor(reg tool.Registry, m mode.Mode) []dto.JSONSchema {
-	defs := reg.AllowlistFor(m)
-	out := make([]dto.JSONSchema, 0, len(defs))
-	for _, d := range defs {
-		out = append(out, d.Parameters)
-	}
-	return out
+// toolSchemasFor returns the mode's allowlisted tools (in allowlist order, so the
+// payload order matches the meter).
+func toolsFor(reg tool.Registry, m mode.Mode) []dto.ToolDef {
+	return reg.AllowlistFor(m)
 }
 
 func parseDone(raw dto.RawEvent, counts *dto.ProviderCounts) {

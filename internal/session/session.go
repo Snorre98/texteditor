@@ -3,12 +3,14 @@
 package session
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"time"
 
 	"github.com/google/uuid"
 
+	"texteditor/internal/sqlmigrate"
 	"texteditor/shared/dto"
 )
 
@@ -35,6 +37,11 @@ type store struct {
 // New returns a Session store over an already-migrated sessions.db.
 func New(db *sql.DB) SessionStore {
 	return &store{db: db}
+}
+
+// Migrate applies the sessions.db schema (exposed for the composition root).
+func Migrate(ctx context.Context, db *sql.DB) error {
+	return sqlmigrate.Migrate(ctx, db, sessionsSchema)
 }
 
 // Create is create-or-resume: a (document_id, anchor_block_id) pair maps to at

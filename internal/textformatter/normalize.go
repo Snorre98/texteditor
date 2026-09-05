@@ -14,15 +14,15 @@ func New() TextFormatter { return formatter{} }
 
 var (
 	// A markdown table separator row aligns (| --- | --- |) or unaligned (|---|).
-	tableRuleRe       = regexp.MustCompile(`^\s*\|?[\s:|-]+\|?\s*$`)
-	trailingWSRe      = regexp.MustCompile(`[ \t]+$`)
-	multiBlankRe      = regexp.MustCompile(`\n{3,}`)
-	leadingBlankRe    = regexp.MustCompile(`^\s+`)
-	trailingBlankRe   = regexp.MustCompile(`\s+$`)
-	fenceLineRe       = regexp.MustCompile("^(`{3,}|~{3,})")
-	listIndentRe      = regexp.MustCompile(`^([ \t]*)([-*+]|\d+[.)])\s+`)
-	listTaskRe        = regexp.MustCompile(`^([ \t]*)([-*+])[ \t]+(\[([ xX]?)\])[ \t]+`)
-	tableSplitRe      = regexp.MustCompile(`\s*\|\s*`)
+	tableRuleRe     = regexp.MustCompile(`^\s*\|?[\s:|-]+\|?\s*$`)
+	trailingWSRe    = regexp.MustCompile(`[ \t]+$`)
+	multiBlankRe    = regexp.MustCompile(`\n{3,}`)
+	leadingBlankRe  = regexp.MustCompile(`^\s+`)
+	trailingBlankRe = regexp.MustCompile(`\s+$`)
+	fenceLineRe     = regexp.MustCompile("^(`{3,}|~{3,})")
+	listIndentRe    = regexp.MustCompile(`^([ \t]*)([-*+]|\d+[.)])\s+`)
+	listTaskRe      = regexp.MustCompile(`^([ \t]*)([-*+])[ \t]+(\[([ xX]?)\])[ \t]+`)
+	tableSplitRe    = regexp.MustCompile(`\s*\|\s*`)
 )
 
 // Normalize returns semantic-preserving canonical whitespace.

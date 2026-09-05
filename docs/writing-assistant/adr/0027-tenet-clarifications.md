@@ -55,7 +55,8 @@ catalog is:
 `Capabilities`, `SamplingParams`, `ContextBudget`, `Mode`, `Model`, `Target`,
 `Resolution`, `LiveState`, `Chunk`, `Message`, `JSONSchema`, `Document`, `Block`,
 `Revision`, `Candidate`, `WordEdit`, `BlockEdit`, `Event`, `RawEvent`, `ToolDef`,
-`Session`, `Payload`, `Breakdown`, `ProviderCounts`, `AttributedBreakdown`.
+`Session`, `Payload`, `Request`, `Breakdown`, `ProviderCounts`,
+`AttributedBreakdown`.
 
 No module may define a boundary type that embeds another module's package types;
 any shared type is promoted to the neutral package rather than imported from a
@@ -69,9 +70,10 @@ Two seams cross a live handle or callback by design, and are documented exceptio
   *stream handle*, not shared mutable state; the `Event` payload is a pure DTO
   (`Data json.RawMessage`). The filter is a consumer-side predicate, not a hook
   into another module's state.
-- **`Provider.Stream(ctx, target, params, emit func(RawEvent))`** — `emit` is a
+- **`Provider.Stream(ctx, target, req, emit func(RawEvent))`** — `emit` is a
   stream *sink* carrying only `RawEvent` DTOs; it grants no access to Provider
-  internals.
+  internals. The `req` argument is the pure `Request` DTO (assembled messages,
+  tools, serving model, merged params), not a live handle (amended at A5).
 
 Both are recorded as named exceptions to "no behavior, no pointers" in
 `contracts/module-boundaries.md` §4. The invariant is unchanged for every other

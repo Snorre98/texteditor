@@ -24,7 +24,7 @@ func TestChat(t *testing.T) {
 	defer s.Close()
 
 	g := NewWithClient(s.Client())
-	c, err := g.Chat(context.Background(), targetOf(s), dto.SamplingParams{Temperature: 0.5, MaxTokens: 100})
+	c, err := g.Chat(context.Background(), targetOf(s), dto.Request{ModelName: "local", EffectiveParams: dto.SamplingParams{Temperature: 0.5, MaxTokens: 100}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -66,7 +66,7 @@ func TestStreamFrames(t *testing.T) {
 
 	g := NewWithClient(s.Client())
 	var events []dto.RawEvent
-	err := g.Stream(context.Background(), targetOf(s), dto.SamplingParams{}, func(ev dto.RawEvent) {
+	err := g.Stream(context.Background(), targetOf(s), dto.Request{ModelName: "local"}, func(ev dto.RawEvent) {
 		events = append(events, ev)
 	})
 	if err != nil {
@@ -93,7 +93,7 @@ func TestRetryOn5xx(t *testing.T) {
 	defer s.Close()
 
 	g := NewWithClient(s.Client())
-	_, err := g.Chat(context.Background(), targetOf(s), dto.SamplingParams{})
+	_, err := g.Chat(context.Background(), targetOf(s), dto.Request{ModelName: "local"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -111,7 +111,7 @@ func TestNoRetryOn4xx(t *testing.T) {
 	defer s.Close()
 
 	g := NewWithClient(s.Client())
-	_, err := g.Chat(context.Background(), targetOf(s), dto.SamplingParams{})
+	_, err := g.Chat(context.Background(), targetOf(s), dto.Request{ModelName: "local"})
 	if err == nil {
 		t.Fatal("expected 4xx error")
 	}

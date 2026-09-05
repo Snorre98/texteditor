@@ -8,7 +8,6 @@ package assembler
 
 import (
 	"context"
-	"encoding/json"
 
 	"texteditor/shared/dto"
 )
@@ -66,8 +65,8 @@ func (assembler) Assemble(_ context.Context, in dto.AssemblerInput) (dto.Payload
 	// Tool schemas spliced as function definitions (their size is metered,
 	// ADR-0011/0019).
 	toolsTokens := 0
-	for _, ts := range in.ToolSchemas {
-		toolsTokens += estimate(string(ts))
+	for _, t := range in.Tools {
+		toolsTokens += estimate(string(t.Parameters))
 	}
 
 	breakdown := dto.Breakdown{
@@ -79,52 +78,26 @@ func (assembler) Assemble(_ context.Context, in dto.AssemblerInput) (dto.Payload
 		Thinking:     0, // thinking is reconciled by the meter (ADR-0024)
 	}
 
-	payload, err := buildRequest(in, messages)
-	if err != nil {
-		return dto.Payload{}, breakdown, err
+	req := dto.Request{
+		ModelName:       in.ModelName,
+		Messages:        messages,
+		Tools:           in.Tools,
+		EffectiveParams: effectiveParams(in.Mode, in.Params),
 	}
 
-	return dto.Payload{Messages: messages, Request: payload}, breakdown, nil
+	return dto.Payload{Messages: messages, Request: req}, breakdown, nil
 }
 
-// buildRequest renders the OpenAI-compatible request body (provider-ready).
-func buildRequest(in dto.AssemblerInput, messages []dto.Message) (json.RawMessage, error) {
-	req := map[string]interface{}{
-		"messages":    toOpenAIMessages(messages),
-		"temperature": in.Mode.Params.Temperature,
-		"max_tokens":  in.Mode.Params.MaxTokens,
+// effectiveParams reflects the merged sampling params the Provider must render.
+// The Fleet gateway already merged manifest defaults ← mode.params ← overrides
+// into the Resolution; the caller passes that merged result via in.Params. When
+// empty (e.g. a stub test path), fall back to the mode's params so the request is
+// never parameter-less.
+func effectiveParams(m dto.Mode, merged dto.SamplingParams) dto.SamplingParams {
+	if merged.Temperature != 0 || merged.MaxTokens != 0 {
+		return merged
 	}
-	if len(in.Mode.ToolAllowlist) > 0 && len(in.ToolSchemas) > 0 {
-		var tools []json.RawMessage
-		for i, name := range in.Mode.ToolAllowlist {
-			schema := json.RawMessage("{}")
-			if i < len(in.ToolSchemas) {
-				schema = in.ToolSchemas[i]
-			}
-			tools = append(tools, toolDef(name, schema))
-		}
-		req["tools"] = tools
-	}
-	return json.Marshal(req)
-}
-
-func toolDef(name string, schema json.RawMessage) json.RawMessage {
-	b, _ := json.Marshal(map[string]interface{}{
-		"type": "function",
-		"function": map[string]interface{}{
-			"name":       name,
-			"parameters": schema,
-		},
-	})
-	return b
-}
-
-func toOpenAIMessages(msgs []dto.Message) []map[string]string {
-	out := make([]map[string]string, 0, len(msgs))
-	for _, m := range msgs {
-		out = append(out, map[string]string{"role": m.Role, "content": m.Content})
-	}
-	return out
+	return m.Params
 }
 
 // truncateHistory returns the newest history messages that fit within maxTokens.

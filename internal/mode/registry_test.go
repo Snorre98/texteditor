@@ -13,10 +13,10 @@ func validInput() ValidationInput {
 	return ValidationInput{
 		Models: []string{"gemma4-12b", "gemma4-26b", "mistral-24b", "llama3.1-8b"},
 		ModelTags: map[string][]string{
-			"gemma4-12b":    {"proofreader"},
-			"gemma4-26b":    {"editor"},
-			"mistral-24b":   {"drafter"},
-			"llama3.1-8b":   {"grammar"},
+			"gemma4-12b":  {"proofreader"},
+			"gemma4-26b":  {"editor"},
+			"mistral-24b": {"drafter"},
+			"llama3.1-8b": {"grammar"},
 		},
 		Tools: []string{"edit_markdown", "retrieve", "read_note", "diff"},
 	}

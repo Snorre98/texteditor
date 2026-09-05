@@ -24,8 +24,8 @@ import (
 
 // ProviderGateway is the Provider gateway public API (interface.md §2).
 type ProviderGateway interface {
-	Chat(ctx context.Context, target dto.Target, params dto.SamplingParams) (dto.Completion, error)
-	Stream(ctx context.Context, target dto.Target, params dto.SamplingParams, emit func(dto.RawEvent)) error
+	Chat(ctx context.Context, target dto.Target, req dto.Request) (dto.Completion, error)
+	Stream(ctx context.Context, target dto.Target, req dto.Request, emit func(dto.RawEvent)) error
 	Embed(ctx context.Context, target dto.Target, text string) ([]float32, error)
 }
 
@@ -68,19 +68,13 @@ func (g *gateway) queueFor(baseURL string) *sync.Mutex {
 	return m
 }
 
-// Chat performs a non-streaming chat completion. NOTE (contract gap, flag for
-// A4): interface.md §2 pins Chat(ctx, target, params) — neither Target nor
-// SamplingParams carries the request messages, yet interface.md §5 produces a
-// "provider-ready" Payload.Request. The assembled messages must reach the
-// Provider; the locked signature does not carry them. Until the interface is
-// amended (see the Meter.Attribute precedent), the body uses a placeholder
-// message and the assembler's Request is spliced downstream of this seam.
-func (g *gateway) Chat(ctx context.Context, target dto.Target, params dto.SamplingParams) (dto.Completion, error) {
-	body := map[string]interface{}{
-		"model":       "local",
-		"temperature": params.Temperature,
-		"max_tokens":  params.MaxTokens,
-	}
+// Chat performs a non-streaming chat completion. It renders the assembled
+// dto.Request to the OpenAI-compatible wire format and posts it. The Provider is
+// a pure transport: the request (messages, tools, model name, merged params) is
+// built upstream by the Context assembler (ADR-0011) and carried intact
+// (interface.md §2/§5; the §2 gap is closed via dto.Request).
+func (g *gateway) Chat(ctx context.Context, target dto.Target, req dto.Request) (dto.Completion, error) {
+	body := renderBody(req, false)
 	raw, err := g.do(ctx, target, "chat/completions", body, false)
 	if err != nil {
 		return dto.Completion{}, err
@@ -90,13 +84,8 @@ func (g *gateway) Chat(ctx context.Context, target dto.Target, params dto.Sampli
 
 // Stream performs a streaming chat completion, emitting one dto.RawEvent per SSE
 // frame (token/done/error). The emitted events are raw and un-attributed.
-func (g *gateway) Stream(ctx context.Context, target dto.Target, params dto.SamplingParams, emit func(dto.RawEvent)) error {
-	body := map[string]interface{}{
-		"model":       "local",
-		"temperature": params.Temperature,
-		"max_tokens":  params.MaxTokens,
-		"stream":      true,
-	}
+func (g *gateway) Stream(ctx context.Context, target dto.Target, req dto.Request, emit func(dto.RawEvent)) error {
+	body := renderBody(req, true)
 	return g.stream(ctx, target, "chat/completions", body, emit)
 }
 
@@ -122,6 +111,46 @@ func (g *gateway) Embed(ctx context.Context, target dto.Target, text string) ([]
 		return nil, errors.New("embed response has no data")
 	}
 	return rsp.Data[0].Embedding, nil
+}
+
+// renderBody renders an assembled dto.Request to the OpenAI-compatible request
+// body. The Provider owns only the wire format; the content (messages, tools,
+// serving model, merged params) arrives fully-assembled from the Context
+// assembler upstream (ADR-0011).
+func renderBody(req dto.Request, stream bool) map[string]interface{} {
+	body := map[string]interface{}{
+		"model":       req.ModelName,
+		"messages":    toOpenAIMessages(req.Messages),
+		"temperature": req.EffectiveParams.Temperature,
+		"max_tokens":  req.EffectiveParams.MaxTokens,
+	}
+	if stream {
+		body["stream"] = true
+	}
+	if len(req.Tools) > 0 {
+		tools := make([]map[string]interface{}, 0, len(req.Tools))
+		for _, t := range req.Tools {
+			tools = append(tools, map[string]interface{}{
+				"type": "function",
+				"function": map[string]interface{}{
+					"name":        t.Name,
+					"description": t.Description,
+					"parameters":  t.Parameters,
+				},
+			})
+		}
+		body["tools"] = tools
+	}
+	return body
+}
+
+// toOpenAIMessages maps assembled messages to the wire {role, content} form.
+func toOpenAIMessages(msgs []dto.Message) []map[string]string {
+	out := make([]map[string]string, 0, len(msgs))
+	for _, m := range msgs {
+		out = append(out, map[string]string{"role": m.Role, "content": m.Content})
+	}
+	return out
 }
 
 // do serializes per-server and performs a non-streaming POST with retry/backoff.
