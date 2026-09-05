@@ -262,6 +262,7 @@ type Mode struct {
     Agentic       bool
     Kind          string  // "model" | "assistant"
     Preamble      string
+    ToolCalling   string  // "native" | "router" (default "native")
 }
 type ContextBudget struct{ MaxHistoryTokens, MaxRagTokens int }
 
@@ -289,6 +290,50 @@ type ToolExecutor interface {
 
 The tool def↔handler bind is the **`name`** (executor owns the private handler map;
 startup cross-check fails with `tool-has-no-handler`).
+
+## 8b. Tool decider (Go, optional)
+
+Wired into the loop only when a mode sets `toolCalling: "router"` (ADR-0028). When
+absent, the loop uses native tool-calling. Types live in `shared`/`dto` (ADR-0027).
+
+```go
+type Decision struct {
+    Name       string          // real tool name (== a ToolDef.Name)
+    Args       json.RawMessage // schema-valid arguments for that tool
+    Confidence float32         // 0..1; < τ ⇒ "no tool, answer now"
+}
+
+type RouterContext struct {    // argument-binding context the loop re-bundles
+    ToolDefs  []ToolDef        // the mode's allowlisted tools (candidate set)
+    Chunks    []Chunk          // retrieved chunks (citation/note provenance for args)
+    Selection *Selection       // the anchored block, when the session is block-scoped
+    History   []Message        // recent conversation (arg context)
+    UserInput string           // the turn's original request
+}
+
+type RouterUsage struct {      // the router call's own metering inputs
+    Breakdown Breakdown        // router prompt's per-component split (reuses ADR-0016 §6)
+    Counts    ProviderCounts   // router provider's exact counts
+}
+
+type RouterResult struct {
+    Decision Decision
+    Usage    RouterUsage
+}
+
+type ToolDecider interface {
+    SignalTool() ToolDef   // the synthetic request_tool definition (not a registered tool)
+    Decide(ctx context.Context, intent string, c RouterContext) (RouterResult, error)
+}
+```
+
+Semantics: `SignalTool` returns the single `request_tool` definition the loop
+splices into the writer's payload in router mode; it is **not** a registered tool
+(no handler) and must not enter the Tool registry. `Decide` is a self-contained call
+(resolves `needle-router` via Fleet, calls Provider internally). `Confidence < τ`
+(or refusal/empty) is a normal result, not an error; a transport failure is a
+labeled error the loop maps to `answering`. The loop routes `result.Usage` to
+`Meter.Attribute`.
 
 ## 9. Document store (Go)
 

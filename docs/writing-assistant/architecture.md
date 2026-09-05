@@ -139,6 +139,7 @@ flowchart TB
         Mode[Mode registry]
         ToolReg[Tool registry]
         ToolExec[Tool executor]
+        Decider[Tool decider]
         Prov[Provider gateway]
         Fleet[Fleet gateway]
         Meter[Token metering]
@@ -166,6 +167,9 @@ flowchart TB
     Loop --> Doc
     Loop --> Ret
     Loop --> Sess
+    Loop --> Decider
+    Decider --> Fleet
+    Decider --> Prov
     Assembler --> Mode
     Assembler --> ToolReg
     Ret --> Fleet
@@ -187,6 +191,7 @@ flowchart TB
 | Mode registry | modes as data | `List`, `Get` | validation, file loading |
 | Tool registry | tool definitions + schemas | `Register`, `List`, `AllowlistFor` | schema validation |
 | Tool executor | tool execution | `Invoke(name, args)` | name-keyed handler map |
+| Tool decider (optional) | tool-intent resolution ("which tool, what args") from a writer's `request_tool` intent | `SignalTool`, `Decide(ctx, intent, c)` | prompt layout, Provider.Chat, τ threshold, `.cact` fingerprint |
 | Context assembler | payload + attribution (pure) | `Assemble(ctx, in) → (Payload, Breakdown)` | layout, truncation, accounting |
 | Token metering | counts + attribution + persistence | `Attribute(ctx, turnID, breakdown, counts)` | scale-to-total, `meter.db` |
 | Retriever | retrieval | `Query(ctx, text, topK)`, `Index(ctx, docID)` | embedding, sqlite-vec KNN, FTS5 |
@@ -206,7 +211,8 @@ process boundaries.
 
 Deferred — generated from source as it lands. Pre-defined seams/interfaces:
 `FleetGateway`, `ProviderGateway`, `Retriever`, `ContextAssembler`,
-`Chunker`, `TokenMeter`, `DocumentStore`, `SessionStore`, `EventBus`
+`Chunker`, `TokenMeter`, `DocumentStore`, `SessionStore`, `EventBus`,
+`ToolDecider` (optional, ADR-0028)
 (see `contracts/interface.md`).
 
 ## 6. Runtime View
@@ -302,6 +308,7 @@ flowchart TB
 | Streaming | SSE typed events + NDJSON fallback; events turnID-correlated — ADR-0012, ADR-0017 |
 | Versioning | git (coarse, commit-per-AI-edit + autosave) + stable UUID block IDs (fine) + candidate side-table — ADR-0004, ADR-0020 |
 | Fleet policy | MoE over dense, 14B+ citation floor, temperature sheet — ADR-0015 |
+| Tool routing | optional `ToolDecider`: writer emits `request_tool`, specialist resolves tool+args; per-mode `toolCalling` toggle; fail-fast sync gate — ADR-0028 |
 | Deployment/security | sidecar spawn dynamic-port-default; localhost bind; Tailscale deny-by-default — ADR-0021 |
 
 ## 9. Architectural Decisions
@@ -337,6 +344,7 @@ Full records in [adr/](adr/). Index:
 | 0025 | Serving control transport: HTTP control daemon wrapping serve.sh | Accepted |
 | 0026 | Sessions as first-class entities (session store, per-session concurrency, budget) | Accepted |
 | 0027 | Locked-service tenet: shared-DTO ownership + stream seams; daemon sole manifest reader | Accepted |
+| 0028 | Tool decider: optional router ("writer signals, specialist decides") | Accepted |
 
 ## 10. Quality Requirements
 
@@ -373,6 +381,7 @@ Each is an SEI general scenario with a concrete response-measure (ADR-0022).
 | versioning.feature | git + block IDs | 0004, 0020 |
 | client-swap.feature | dumb generated clients | 0002, 0013, 0016, 0017, 0023 |
 | sessions.feature | persisted sessions, per-session concurrency + budget | 0026 |
+| tool-routing.feature | writer-signals-router-decides, per-mode toggle, fail-fast gates | 0028 |
 
 ### 10.3 Definition of done (documentation)
 
@@ -395,6 +404,7 @@ The documentation set is complete when:
 | 4 | Fleet policy is hardware-specific | Medium | re-run ADR-0015 on hardware change; archive preserves models |
 | 5 | No auth on local inference servers exposed to LAN | Low | Tailscale ACL deny-by-default + pre-bind gate (ADR-0021) |
 | 6 | Bundled per-family tokenizer (thinking fallback) adds binary size + maintenance | Low | scoped to reasoning-prefix counting, omitting-providers only (ADR-0024) |
+| 7 | The `.cact` router artifact can drift from the tool vocabulary | Medium | `router-tools-stale` startup sync gate (ADR-0028); re-`needle finetune` or switch the mode back to `native` |
 
 ## 12. Glossary
 

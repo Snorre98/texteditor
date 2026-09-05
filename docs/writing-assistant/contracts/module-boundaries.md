@@ -22,6 +22,7 @@ ADR-0025 (control daemon), ADR-0026 (sessions).
 | **Mode registry** (leaf) | declarative modes (persona/model/tools/budget) | `List()`, `Get(name)` | mode file loading (go:embed), validation |
 | **Tool registry** (leaf) | tool definitions + JSON schemas | `Register(tool)`, `List()`, `AllowlistFor(mode)` | schema validation, name-keyed binding metadata |
 | **Tool executor** | tool execution | `Invoke(name, args) → result` | private `map[name]→handler func` |
+| **Tool decider** (optional) | tool-intent resolution ("which tool, what args") from a writer's `request_tool` intent | `SignalTool()`, `Decide(ctx, intent, c) → (RouterResult, error)` | prompt layout, Provider.Chat, confidence threshold τ, `.cact` fingerprint |
 | **Context assembler** (leaf) | the exact token payload + per-component attribution | `Assemble(ctx, in) → (Payload, Breakdown)` | prompt layout, budget truncation, attribution accounting |
 | **Token metering** | counts + attribution + persistence | `Attribute(ctx, turnID, breakdown, counts) → Attributed` | scale-to-total, `meter.db` writes, thinking-token reconciliation (ADR-0024) |
 | **Retriever** | retrieval (semantic + lexical) | `Query(ctx, text, topK) → []Chunk`, `Index(ctx, documentID)` | embedding (via Fleet+Provider), sqlite-vec KNN, FTS5, rerank |
@@ -68,6 +69,7 @@ flowchart LR
         Mode[Mode registry]
         ToolReg[Tool registry]
         ToolExec[Tool executor]
+        Decider[Tool decider]
         Prov[Provider gateway]
         Fleet[Fleet gateway]
         Meter[Token metering]
@@ -99,6 +101,9 @@ flowchart LR
     Loop --> Doc
     Loop --> Retriever
     Loop --> Sess
+    Loop --> Decider
+    Decider --> Fleet
+    Decider --> Prov
     Assembler --> Mode
     Assembler --> ToolReg
     Retriever --> Fleet
@@ -120,6 +125,9 @@ flowchart LR
   `Provider gateway`, and the `Fleet manifest`.
 - The `Retriever` is **not** a leaf (depends on Fleet + Provider for the embed call
   and on the Chunker) — a deliberate consequence of ADR-0016.
+- The `Tool decider` is **not** a leaf (depends on Fleet + Provider to serve the
+  router call) — a Retriever-style consequence, wired only when a mode sets
+  `toolCalling: "router"` (ADR-0028).
 
 ## 3. Public API signatures
 

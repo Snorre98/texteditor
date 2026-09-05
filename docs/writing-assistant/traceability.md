@@ -35,6 +35,7 @@ row: ADR-0001/0016 map to it and to §2/§5.2/§8.
 | 0025 | §3.2, §4, §7, §8 | serving-control | interface, module-boundaries, concurrency-topology | Q2 |
 | 0026 | §5.2, §8 | sessions | data-model, interface, state-machine, concurrency-topology, module-boundaries | Q1 (per-session budget), Q5 |
 | 0027 | §2, §5.2, §8 | serving-control | interface, module-boundaries | Q2 |
+| 0028 | §4, §5.2, §8 | tool-routing | module-boundaries, interface, data-model, failure-semantics, state-machine | Q1 (router metered), Q2 (per-mode toggle), Q5 |
 
 ## Behavior contract ↔ quality scenario coverage
 
@@ -56,6 +57,7 @@ row: ADR-0001/0016 map to it and to §2/§5.2/§8.
 | versioning.feature | 0004, 0020 |
 | client-swap.feature | 0002, 0013, 0016, 0017, 0023 |
 | sessions.feature | 0026 |
+| tool-routing.feature | 0028 |
 
 ## Supersession notes
 

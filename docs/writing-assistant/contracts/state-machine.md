@@ -18,6 +18,7 @@ back to the session.
 |---|---|---|
 | `idle` | phase | no turn in progress |
 | `planning` | phase | building the plan for the task |
+| `deciding` | phase | resolving a `request_tool` intent to a concrete tool (router mode only) |
 | `dispatching` | phase | a tool call is in flight |
 | `observing` | phase | integrating tool results |
 | `answering` | phase | streaming the final answer |
@@ -30,6 +31,9 @@ back to the session.
 |---|---|---|---|
 | (start) | `planning` | `Run(task)` | |
 | `planning` | `dispatching` | plan needs a tool | else → `answering` |
+| `planning` | `deciding` | writer emitted `request_tool` (router mode) | native mode skips straight to `dispatching` |
+| `deciding` | `dispatching` | `Decide` returned `Confidence ≥ τ` | |
+| `deciding` | `answering` | `Confidence < τ` / refusal / transport error | graceful "no tool" |
 | `dispatching` | `observing` | tool returned | via Tool executor `Invoke` |
 | `observing` | `dispatching` | plan needs another tool | bounded by `mode.maxSteps` |
 | `observing` | `answering` | plan complete | |
@@ -41,6 +45,8 @@ back to the session.
 - `mode.maxSteps` bounds the dispatch/observe cycle (bounded per mode, not a global;
   ADR-0019). A non-`agentic` mode (`agentic: false`) has `maxSteps=0`: single-shot,
   no tool loop.
+- `deciding` exists only when `mode.toolCalling == "router"`; the native path's
+  `planning → dispatching` is unchanged (ADR-0028).
 - `answering` is entered exactly once per turn; after `done`/`error` the loop
   returns to `idle`.
 - One turn in flight **per session**; distinct sessions run turns concurrently

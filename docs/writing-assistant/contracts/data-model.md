@@ -152,10 +152,11 @@ dedicated server (each mlx/llama server is itself a daemon).
 | `name` | string | yes | logical name, stable across runners; unique |
 | `daemon` | string | yes | → `daemons[].name` serving this model |
 | `source` | object | yes, except GUI-managed | how to obtain/run it |
-| `source.kind` | string | yes | `hf` \| `gguf` \| `ollama` \| `lmstudio` |
+| `source.kind` | string | yes | `hf` \| `gguf` \| `ollama` \| `lmstudio` \| `needle` |
 | `source.repo` | string | if `hf` | HF repo id |
 | `source.file` | string | if `gguf` | filename under `models/gguf/` |
 | `source.tag` | string | if `ollama` | Ollama tag |
+| `source.fingerprint` | string | if `needle` | tool-set hash the `.cact` was fine-tuned against (ADR-0028) |
 | `capabilities.contextLength` | integer | yes | tokens |
 | `capabilities.thinkingMode` | boolean | yes | emits reasoning tokens |
 | `capabilities.supportsSystemPrompt` | boolean | yes | native `system` role |
@@ -194,6 +195,7 @@ engine repo, versioned + `go:embed`'d, validated at startup.
 | `agentic` | boolean | no | multi-turn tool loop vs single-shot pass |
 | `kind` | string | no | `model` \| `assistant` (reserved) |
 | `preamble` | string | no | spliced before `systemPrompt` |
+| `toolCalling` | string | no | `native` \| `router` (default `native`) |
 
 ### 3.2 Tool
 

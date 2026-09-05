@@ -27,6 +27,10 @@ Retries are **bounded (≤3)**; every failure is recorded in `meter_events`/logs
   no process is spawned.
 - **Lanes conflict** — manifest load fails with `lanes-conflict` naming both entries
   (ADR-0018); this is a startup error, not a runtime one.
+- **Router validation** — a `toolCalling: "router"` mode with no resolvable
+  `needle-router` model fails startup with `mode-refs-router-unavailable`; a
+  `needle-router` whose manifest `source.fingerprint` differs from the engine's
+  tool-set hash fails startup with `router-tools-stale` (ADR-0028).
 
 ## 3. Degrade-to-partial
 
@@ -39,6 +43,10 @@ Retries are **bounded (≤3)**; every failure is recorded in `meter_events`/logs
   proceeds without RAG and records `rag: 0` tokens.
 - **Tool failure** — a failed tool call returns a structured error to the agent
   loop (not a crash); the loop may retry once or continue without the tool.
+- **Tool routing (router mode)** — `Decide` resolves the writer's `request_tool`
+  intent. Confident (`Confidence ≥ τ`) → dispatch. Low-confidence / refusal /
+  empty-call → proceed to `answering` (graceful, not an error). Transport failure →
+  labeled `error` (`router-unreachable`) then `answering` (no retry).
 
 ## 4. Attribution and the thinking-token approximation
 
@@ -63,6 +71,9 @@ Retries are **bounded (≤3)**; every failure is recorded in `meter_events`/logs
 | lanes conflict | startup error, `lanes-conflict` + both entries |
 | start timeout | `error`, code `start-timeout` (60s bound) |
 | unknown tool handler | startup error, `tool-has-no-handler` |
+| router mode with no served Needle | startup error, `mode-refs-router-unavailable` |
+| router fine-tuned against a different tool set | startup error, `router-tools-stale` |
+| router unreachable mid-turn | `error` event, `router-unreachable`, then graceful answer |
 
 ## 6. Invariants
 
