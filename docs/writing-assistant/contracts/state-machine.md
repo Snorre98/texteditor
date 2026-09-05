@@ -1,14 +1,16 @@
 # State machine contracts
 
-Explicit states and transitions for the three stateful units of work. Source ADRs:
+Explicit states and transitions for the stateful units of work. Source ADRs:
 ADR-0002 (loop), ADR-0007 (lifecycle), ADR-0016 (loop is thin; turn is async),
-ADR-0018 (async provision).
+ADR-0018 (async provision), ADR-0026 (sessions).
 
 ## 1. Agent-loop turn
 
 One turn = task → plan → dispatch tool(s) → observe → repeat → answer. Originated
 by `Loop.Run(ctx, task) → (turnID, err)` (async, ADR-0016); every event carries
-`turnID`.
+`turnID`. A turn is **scoped to a session** (`task.SessionID`, ADR-0026); the loop
+reads the session's `History` into the assembler and appends each turn's messages
+back to the session.
 
 ### 1.1 States
 
@@ -41,6 +43,8 @@ by `Loop.Run(ctx, task) → (turnID, err)` (async, ADR-0016); every event carrie
   no tool loop.
 - `answering` is entered exactly once per turn; after `done`/`error` the loop
   returns to `idle`.
+- One turn in flight **per session**; distinct sessions run turns concurrently
+  (ADR-0026). Within a session, at most one turn runs at a time.
 
 ## 2. Serving lifecycle (per model server / daemon)
 
@@ -91,3 +95,17 @@ drives the degrade path:
   and any document mutation (git commit) before the next step begins (ADR-0004).
 - AI edits stage a candidate and commit on accept; manual edits autosave on a
   silence interval (ADR-0020).
+
+## 5. Session (ADR-0026)
+
+A Session is a persisted entity; it has no property state machine beyond
+create/resume, but its relationship to turns is contractual:
+
+- A session owns a message history (`messages`, `sessions.db`) and a cumulative
+  token tally (`meter_events.session_id`).
+- `SessionStore.Resume(id)` / `Create(documentID, anchorBlockID, modeType)` is
+  **create-or-resume**: a `(document_id, anchor_block_id)` pair maps to at most
+  one session.
+- A session's `TokenBudget` (optional) is checked by the Meter each turn; a turn
+  that would cross it surfaces `session-budget-exceeded` (a visible lever, not a
+  hardcode).

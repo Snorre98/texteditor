@@ -4,6 +4,10 @@ Status: Accepted
 
 Supersedes: ADR-0003 (codegen tool selection).
 
+Note: the `/conversations` session endpoints listed below are renamed to
+`/sessions` by ADR-0026 (the endpoint *surface* is unchanged; the resource name
+and backing store change from `ConversationStore` to `SessionStore`).
+
 ## Context
 
 The "single OpenAPI/JSON Schema spec is the contract every client codegens from"
@@ -62,9 +66,10 @@ tools (ogen, Hey API, openapi-to-rust) consume the same spec.
 | GET | `/documents/{id}/diff` | DocumentStore.Diff | word edits |
 | GET | `/documents/{id}/blocks/{bid}/candidates` | DocumentStore.Candidates | |
 | POST | `/turn` → **SSE** | Loop.Run | the core interaction; returns turnID |
-| GET | `/conversations` | ConversationStore.ListConversations | |
-| GET | `/conversations/{id}/messages` | ConversationStore.History | |
-| GET | `/conversations/{id}/meter` | (deferred) | historical meter read-back — deferred until the TUI needs it |
+| GET | `/sessions` | SessionStore.ListByDocument (per document) | supersedes `/conversations` (ADR-0026) |
+| POST | `/sessions` | SessionStore.Create | create-or-resume a session |
+| GET | `/sessions/{id}/messages` | SessionStore.History | supersedes `/conversations/{id}/messages` |
+| GET | `/sessions/{id}/meter` | (deferred) | historical per-session meter read-back — deferred |
 
 `POST /documents {path} → {id, blocks}` opens/creates a document and returns its
 **surrogate id**. All later routes use the opaque `id`.

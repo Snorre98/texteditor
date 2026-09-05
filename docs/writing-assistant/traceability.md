@@ -33,6 +33,7 @@ row: ADR-0001/0016 map to it and to §2/§5.2/§8.
 | 0023 | §3, §7 | client-swap | — | — |
 | 0024 | §8 | token-metering | interface, failure-semantics | Q1 |
 | 0025 | §3.2, §4, §7, §8 | serving-control | interface, module-boundaries, concurrency-topology | Q2 |
+| 0026 | §5.2, §8 | sessions | data-model, interface, state-machine, concurrency-topology, module-boundaries | Q1 (per-session budget), Q5 |
 
 ## Behavior contract ↔ quality scenario coverage
 
@@ -53,6 +54,7 @@ row: ADR-0001/0016 map to it and to §2/§5.2/§8.
 | token-metering.feature | 0011, 0016, 0022, 0024 |
 | versioning.feature | 0004, 0020 |
 | client-swap.feature | 0002, 0013, 0016, 0017, 0023 |
+| sessions.feature | 0026 |
 
 ## Supersession notes
 
@@ -63,6 +65,8 @@ row: ADR-0001/0016 map to it and to §2/§5.2/§8.
 - ADR-0011 → superseded by ADR-0016 (meter scale-to-total) and ADR-0024 (thinking fallback).
 - ADR-0013 → superseded by ADR-0023 (Solid renderer).
 - ADR-0014 → superseded by ADR-0021 (sidecar spawn mechanics).
+- ADR-0016/0017/0020 → *extended* (not reversed) by ADR-0026: the `conversation_id`
+  naming and `messages.db` filename are superseded by `Session`/`sessions.db`.
 
 Superseded ADRs remain in the log, untouched; supersession is recorded in the
 superseding ADR's header and in the §9 index.

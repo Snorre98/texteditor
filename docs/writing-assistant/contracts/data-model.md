@@ -77,21 +77,42 @@ produces it; `Index` rebuilds it). It may denormalize block text.
 |---|---|---|
 | `id` | INTEGER PK | |
 | `ts` | INTEGER | unix epoch ms |
-| `turn_id` | TEXT | groups events into one turn (was `conversation_id`) |
+| `session_id` | TEXT | → `sessions.id` (the owning session) |
+| `turn_id` | TEXT | groups events into one turn |
 | `component` | TEXT | `system` \| `tools` \| `rag` \| `history` \| `user` \| `thinking` |
 | `prompt_tokens` | INTEGER | attributed prompt tokens |
 | `completion_tokens` | INTEGER | attributed completion tokens |
 | `approx` | INTEGER | 1 when the component is a labeled approximation (thinking, ADR-0024) |
 | `model` | TEXT | logical model name actually used (`usedName`) |
 
-### 1.4 `messages.db` — Conversation store
+### 1.4 `sessions.db` — Session store
 
-#### `messages` — conversation history
+Source ADR-0026. Dedicated file (renamed from `messages.db`). Owned by the
+Session store only.
+
+#### `sessions` — session entity
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | TEXT PK | UUID, client-facing identity |
+| `document_id` | TEXT | → `documents.id` |
+| `anchor_block_id` | TEXT NULL | → block id; nil = doc-level chat, set = selection/bubble anchor |
+| `mode_type` | TEXT | persisted per-session persona |
+| `title` | TEXT | human label, auto-derived or user-edited |
+| `token_budget` | INTEGER NULL | optional per-session cumulative-token cap |
+| `created_at` | INTEGER | unix epoch seconds |
+| `updated_at` | INTEGER | unix epoch seconds |
+
+Many `sessions` rows may share one `document_id`. A `(document_id,
+anchor_block_id)` pair is create-or-resume: re-anchoring to the same block
+reopens the same session.
+
+#### `messages` — conversation history (many per session)
 
 | Column | Type | Notes |
 |---|---|---|
 | `id` | INTEGER PK | |
-| `conversation_id` | TEXT | |
+| `session_id` | TEXT | → `sessions.id` (was `conversation_id`) |
 | `role` | TEXT | `user` \| `assistant` \| `tool` |
 | `content` | TEXT | |
 | `ts` | INTEGER | |
@@ -192,5 +213,8 @@ Startup validation failures (typed errors): `mode-refs-unknown-model`,
 - Block IDs are stable UUIDs across edits (ADR-0020).
 - Every `meter_events` row is attributable to exactly one `component`, and a
   `component` set `approx=1` is a labeled approximation, never silent.
+- `sessions.db` is the Session store's single-writer file; `messages.session_id`
+  references a `sessions.id`, and `meter_events.session_id` groups token cost per
+  session (ADR-0026).
 - The fleet manifest is read only by the control daemon (`serve.sh` via the
   daemon); the engine never reads `models.json` directly (ADR-0025).

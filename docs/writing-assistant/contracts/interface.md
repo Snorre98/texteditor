@@ -2,7 +2,7 @@
 
 The seams between modules. Source ADRs: ADR-0016 (module inventory),
 ADR-0018 (fleet manifest), ADR-0020 (storage), ADR-0024 (thinking attribution),
-ADR-0025 (control daemon).
+ADR-0025 (control daemon), ADR-0026 (sessions).
 
 All boundary types are **pure DTOs** — plain data, no behavior, no pointers into
 another module's state, no embedded foreign types (locked-service tenet).
@@ -197,6 +197,7 @@ type TurnOptions struct {
     Model       string   // force a model for this turn (optional)
 }
 type Task struct {
+    SessionID  string      // the owning session (ADR-0026)
     ModeName   string
     DocumentID string
     UserInput  string
@@ -210,7 +211,9 @@ type AgentLoop interface {
 ```
 
 `Run` starts the turn asynchronously; events carry `turnID`. The loop is a thin
-orchestrator owning only the turn state machine (bounded by `mode.maxSteps`).
+orchestrator owning only the turn state machine (bounded by `mode.maxSteps`). It is
+**session-scoped**: it reads `session.History` into the assembler and appends each
+turn's messages back to the session (ADR-0026).
 
 ## 8. Mode registry + Tool registry + Tool executor (Go)
 
@@ -284,15 +287,33 @@ type DocumentStore interface {
 Commit cadence and block identity are ADR-0020 (two paths: AI edit == commit; manual
 edit == autosave snapshot; block IDs == stable UUIDs).
 
-## 10. Conversation store (Go, leaf)
+## 10. Session store (Go, leaf)
+
+Owns a dedicated `sessions.db` (ADR-0026). Source ADR-0026.
 
 ```go
-type ConversationStore interface {
-    Append(ctx context.Context, conversationID string, msg Message) error
-    History(ctx context.Context, conversationID string) ([]Message, error)
-    ListConversations(ctx context.Context) ([]Meta, error)
+type Session struct {
+    ID            string   // UUID, client-facing identity
+    DocumentID    string
+    AnchorBlockID *string  // nil = doc-level chat; set = selection/bubble anchor
+    ModeType      string   // persisted per-session persona
+    Title         string
+    TokenBudget   *int     // optional per-session cumulative-token cap
+    CreatedAt     int64
+    UpdatedAt     int64
+}
+
+type SessionStore interface {
+    ListByDocument(documentID string) ([]Session, error)
+    Create(documentID string, anchorBlockID *string, modeType string) (Session, error)
+    Resume(id string) (Session, error)          // find-or-open an anchored session
+    Append(sessionID string, msg Message) error
+    History(sessionID string) ([]Message, error)
 }
 ```
+
+`Resume(id)` (or `Create` on an existing `(document_id, anchor_block_id)` pair)
+is create-or-resume: re-anchoring to the same block reopens the same session.
 
 ## 11. SSE event bus (Go)
 

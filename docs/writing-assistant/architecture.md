@@ -144,7 +144,7 @@ flowchart TB
         Meter[Token metering]
         Ret[Retriever]
         Chunker[Chunker]
-        Conv[Conversation store]
+        Sess[Session store]
         Doc[Document store]
         Bus[SSE event bus]
     end
@@ -156,7 +156,7 @@ flowchart TB
     API --> Doc
     API --> Mode
     API --> Fleet
-    API --> Conv
+    API --> Sess
     Loop --> Mode
     Loop --> ToolReg
     Loop --> ToolExec
@@ -165,7 +165,7 @@ flowchart TB
     Loop --> Fleet
     Loop --> Doc
     Loop --> Ret
-    Loop --> Conv
+    Loop --> Sess
     Assembler --> Mode
     Assembler --> ToolReg
     Ret --> Fleet
@@ -184,7 +184,7 @@ flowchart TB
 |---|---|---|---|
 | Fleet gateway | model discovery, resolution (merge + gates + fallback), lifecycle | `ListModels`, `Resolve(name, opts) → Resolution`, `Status`, `Start` (blocking), `Stop`, `Provision` (async) | daemon HTTP client, fallback ladder |
 | Provider gateway | OpenAI-compatible REST/SSE calls | `Chat(ctx, target, params)`, `Stream(ctx, target, params, emit)`, `Embed(ctx, target, text)` | retry/backoff, `-np 1` serialization |
-| Agent loop | turn loop (thin orchestrator) | `Run(ctx, task) → (turnID, err)` (async) | turn state machine, dispatch/observe |
+| Agent loop | turn loop (thin orchestrator, session-scoped) | `Run(ctx, task) → (turnID, err)` (async) | turn state machine, dispatch/observe |
 | Mode registry | modes as data | `List`, `Get` | validation, file loading |
 | Tool registry | tool definitions + schemas | `Register`, `List`, `AllowlistFor` | schema validation |
 | Tool executor | tool execution | `Invoke(name, args)` | name-keyed handler map |
@@ -193,8 +193,8 @@ flowchart TB
 | Retriever | retrieval | `Query(ctx, text, topK)`, `Index(ctx, docID)` | embedding, sqlite-vec KNN, FTS5 |
 | Chunker | chunking (pure) | `Chunk(doc, maxTokens)` | splitting algorithm |
 | Document store | document + versions | `Open`, `Save`, `Blocks`, `ApplyEdit`, `Commit`, `Diff`, `History`, `Candidates` | git, block UUIDs, candidate side-table |
-| Conversation store | conversation history | `Append`, `History`, `ListConversations` | `messages.db` |
-| API server | REST/SSE surface (codegen'd) | routes per OpenAPI spec | framing, turnID↔client correlation |
+| Session store | sessions + their messages (one per selection/doc) | `ListByDocument`, `Create`, `Resume`, `Append`, `History` | `sessions.db` |
+| API server | REST/SSE surface (codegen'd) | routes per OpenAPI spec | framing, turnID↔session↔client correlation |
 | SSE event bus | typed event fan-out | `Emit`, `Subscribe` | connection registry, backpressure |
 
 The full module list, precise signatures, and the acyclic dependency graph are
@@ -207,7 +207,7 @@ process boundaries.
 
 Deferred — generated from source as it lands. Pre-defined seams/interfaces:
 `FleetGateway`, `ProviderGateway`, `Retriever`, `ContextAssembler`,
-`Chunker`, `TokenMeter`, `DocumentStore`, `ConversationStore`, `EventBus`
+`Chunker`, `TokenMeter`, `DocumentStore`, `SessionStore`, `EventBus`
 (see `contracts/interface.md`).
 
 ## 6. Runtime View
@@ -336,6 +336,7 @@ Full records in [adr/](adr/). Index:
 | 0023 | OpenTUI renderer: Solid | Accepted |
 | 0024 | Thinking-token attribution: bundled tokenizer fallback | Accepted |
 | 0025 | Serving control transport: HTTP control daemon wrapping serve.sh | Accepted |
+| 0026 | Sessions as first-class entities (session store, per-session concurrency, budget) | Accepted |
 
 ## 10. Quality Requirements
 
@@ -366,11 +367,12 @@ Each is an SEI general scenario with a concrete response-measure (ADR-0022).
 
 | Feature file | Concern | Source ADRs |
 |---|---|---|
-| serving-control.feature | manifest + verbs + provisioning | 0006, 0007, 0008 |
-| provider-hotswap.feature | fallback + citation floor | 0005, 0009, 0015 |
-| token-metering.feature | per-component attribution | 0011 |
-| versioning.feature | git + block IDs | 0004 |
-| client-swap.feature | dumb generated clients | 0002, 0013 |
+| serving-control.feature | manifest + verbs + provisioning | 0006, 0007, 0008, 0018, 0025 |
+| provider-hotswap.feature | fallback + citation floor | 0005, 0009, 0015, 0016, 0019 |
+| token-metering.feature | per-component attribution | 0011, 0016, 0022, 0024 |
+| versioning.feature | git + block IDs | 0004, 0020 |
+| client-swap.feature | dumb generated clients | 0002, 0013, 0016, 0017, 0023 |
+| sessions.feature | persisted sessions, per-session concurrency + budget | 0026 |
 
 ### 10.3 Definition of done (documentation)
 
@@ -407,6 +409,7 @@ The documentation set is complete when:
 | Choke point | the context assembler — the single place where the token payload is built |
 | Block ID | stable UUID identifier for a paragraph/heading/table, enabling fine-grained versioning |
 | Candidate | an unaccepted AI edit, keyed by block ID in a Document-store side-table |
+| Session | a persisted conversation — doc-level or anchored to a block selection; multiple per file, runnable concurrently |
 | Pure DTO | a boundary type with no behavior; the only thing that crosses a module seam (locked-service tenet) |
 | Provision | fetch model weights via the HF API (async, observable) |
 

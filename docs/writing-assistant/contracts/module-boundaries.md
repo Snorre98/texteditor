@@ -8,7 +8,7 @@ REST/HTTP exists only at process boundaries.
 
 Source ADRs: ADR-0001 (base model), ADR-0016 (module inventory + exact APIs),
 ADR-0018 (two-tier fleet manifest), ADR-0019 (mode/tool data), ADR-0020 (storage),
-ADR-0025 (control daemon).
+ADR-0025 (control daemon), ADR-0026 (sessions).
 
 ## 1. Modules
 
@@ -27,7 +27,7 @@ ADR-0025 (control daemon).
 | **Retriever** | retrieval (semantic + lexical) | `Query(ctx, text, topK) → []Chunk`, `Index(ctx, documentID)` | embedding (via Fleet+Provider), sqlite-vec KNN, FTS5, rerank |
 | **Chunker** (leaf) | chunking (paragraph-aligned, size-bounded) | `Chunk(documentBlockTree, maxTokens) → []Chunk` | splitting algorithm |
 | **Document store** | document, blocks, version history | `Open`, `Save`, `Blocks`, `ApplyEdit`, `Commit`, `Diff`, `History`, `Candidates` | git (go-git), block-UUID minting, candidate side-table, word-diff |
-| **Conversation store** (leaf) | conversation history | `Append`, `History`, `ListConversations` | `messages.db` |
+| **Session store** (leaf) | sessions + their messages | `ListByDocument`, `Create`, `Resume`, `Append`, `History` | `sessions.db` |
 | **API server** | the versioned REST/SSE surface (codegen'd) | HTTP routes + SSE endpoints per the OpenAPI spec | framing, validation, turnID↔client correlation |
 | **SSE event bus** | typed event fan-out | `Emit(event)`, `Subscribe(filter) → stream` | connection registry, bounded chans |
 
@@ -74,7 +74,7 @@ flowchart LR
         Retriever[Retriever]
         Chunker[Chunker]
         Doc[Document store]
-        Conv[Conversation store]
+        Sess[Session store]
         Bus[SSE event bus]
     end
     subgraph serving[Serving]
@@ -89,7 +89,7 @@ flowchart LR
     API --> Doc
     API --> Mode
     API --> Fleet
-    API --> Conv
+    API --> Sess
     Loop --> Mode
     Loop --> ToolReg
     Loop --> ToolExec
@@ -98,7 +98,7 @@ flowchart LR
     Loop --> Fleet
     Loop --> Doc
     Loop --> Retriever
-    Loop --> Conv
+    Loop --> Sess
     Assembler --> Mode
     Assembler --> ToolReg
     Retriever --> Fleet
@@ -117,7 +117,7 @@ flowchart LR
 - Every edge targets a module's **public API**, never its internals.
 - The graph is **acyclic**; direction is inward (clients → engine → serving-data).
 - Leaf modules (no out-edges) hold pure/deterministic logic: `Mode registry`,
-  `Tool registry`, `Context assembler`, `Chunker`, `Conversation store`,
+  `Tool registry`, `Context assembler`, `Chunker`, `Session store`,
   `Provider gateway`, and the `Fleet manifest`.
 - The `Retriever` is **not** a leaf (depends on Fleet + Provider for the embed call
   and on the Chunker) — a deliberate consequence of ADR-0016.
@@ -128,7 +128,7 @@ Precise Go signatures and pure-DTO type definitions live in
 `contracts/interface.md`:
 
 - **Fleet + Provider + Retriever + Assembler + Meter + Document store +
-  Conversation store + Event bus** — exact Go interface signatures (ADR-0016).
+  Session store + Event bus** — exact Go interface signatures (ADR-0016, ADR-0026).
 - **Serving lifecycle** — the verb contract (ADR-0007), now transported by the
   control daemon (ADR-0025).
 - The **fleet manifest schema** (two-tier) — `contracts/data-model.md` §2
