@@ -11,6 +11,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"time"
 
 	"texteditor/internal/sqlmigrate"
@@ -22,6 +23,10 @@ import (
 // requirement that meter_events.session_id and .model are populated).
 type TokenMeter interface {
 	Attribute(ctx context.Context, turnID, sessionID, model string, b dto.Breakdown, counts dto.ProviderCounts) (dto.AttributedBreakdown, error)
+	// SessionUsage returns a session's cumulative token total (prompt + completion
+	// across all its turns). It backs the per-session budget check (ADR-0026 §5) —
+	// the meter owns the cumulative tally, so the loop reads it from here.
+	SessionUsage(ctx context.Context, sessionID string) (int, error)
 }
 
 // Interface is an alias for TokenMeter (the contracted name, interface.md §6).
@@ -33,6 +38,11 @@ type Interface = TokenMeter
 type Emitter interface {
 	Emit(ev dto.Event)
 }
+
+// ErrSessionBudgetExceeded is surfaced when a turn would cross a session's
+// cumulative token cap (ADR-0026 §5, failure-semantics §5). It is the loop's
+// caller-visible error, not a schema-internal state.
+var ErrSessionBudgetExceeded = errors.New("session-budget-exceeded: the turn would cross the session's cumulative token cap")
 
 // meter is the concrete Token metering module. meter.db is its single-writer
 // file (ADR-0016).
@@ -83,7 +93,7 @@ func (m *meter) Attribute(ctx context.Context, turnID, sessionID, model string, 
 		ThinkingApprox: approx,
 	}
 
-	if err := m.persist(ctx, turnID, sessionID, model, out); err != nil {
+	if err := m.persist(ctx, turnID, sessionID, model, out, completion); err != nil {
 		return out, err
 	}
 
@@ -120,7 +130,7 @@ func scalePrompt(b dto.Breakdown, total int) [5]int {
 	return out
 }
 
-func (m *meter) persist(ctx context.Context, turnID, sessionID, model string, a dto.AttributedBreakdown) error {
+func (m *meter) persist(ctx context.Context, turnID, sessionID, model string, a dto.AttributedBreakdown, completion int) error {
 	ts := time.Now().UnixMilli()
 	rows := []struct {
 		component          string
@@ -133,6 +143,9 @@ func (m *meter) persist(ctx context.Context, turnID, sessionID, model string, a 
 		{"history", a.History, 0, 0},
 		{"user", a.User, 0, 0},
 		{"thinking", 0, a.Thinking, boolToInt(a.ThinkingApprox)},
+		// "completion" records the turn's non-thinking output tokens (the answer);
+		// it has no prompt component — data-model.md §1.3's completion_tokens.
+		{"completion", 0, completion, 0},
 	}
 	for _, r := range rows {
 		if r.prompt == 0 && r.completion == 0 {
@@ -148,6 +161,30 @@ func (m *meter) persist(ctx context.Context, turnID, sessionID, model string, a 
 		}
 	}
 	return nil
+}
+
+// SessionUsage returns the cumulative token count for a session across all its
+// turns (sum of prompt_tokens + completion_tokens in meter_events). It backs the
+// per-session budget check (ADR-0026 §5). Consumed via a narrow seam by the loop.
+func (m *meter) SessionUsage(ctx context.Context, sessionID string) (int, error) {
+	var total int
+	err := m.db.QueryRowContext(ctx,
+		`SELECT COALESCE(SUM(prompt_tokens), 0) + COALESCE(SUM(completion_tokens), 0)
+		 FROM meter_events WHERE session_id = ?`, sessionID,
+	).Scan(&total)
+	if err != nil {
+		return 0, err
+	}
+	return total, nil
+}
+
+// SessionExceeded reports whether adding nextTokens to a session's cumulative
+// usage would cross its budget (nil budget = unbounded). ADR-0026 §5.
+func SessionExceeded(used int, budget *int, nextTokens int) bool {
+	if budget == nil {
+		return false
+	}
+	return used+nextTokens > *budget
 }
 
 // meterEvent renders the single meter event emitted per turn.

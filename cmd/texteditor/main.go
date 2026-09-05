@@ -7,6 +7,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -31,6 +32,7 @@ import (
 	"texteditor/internal/session"
 	"texteditor/internal/textformatter"
 	"texteditor/internal/tool"
+	"texteditor/shared/dto"
 )
 
 func main() {
@@ -107,14 +109,26 @@ func run() error {
 		return fmt.Errorf("fleet unavailable: %w", err)
 	}
 
+	// --- Retriever (index.db; block source = Document store) ---
+	indexDB, err := open("index.db")
+	if err != nil {
+		return err
+	}
+	retrieverGW := retriever.New(indexDB, fleetGW, provider.New(), docStore, chunker.New(), 512)
+
 	// --- Tool registry + executor (ADR-0019; VerifyHandlers cross-check) ---
 	registry, toolNames, err := tool.Load()
 	if err != nil {
 		return fmt.Errorf("tools: %w", err)
 	}
 	executor := tool.NewExecutor()
+	handlers := makeToolHandlers(docStore, retrieverGW, textformatter.New())
 	for _, name := range toolNames {
-		executor.Bind(name, makeHandler(name))
+		if h, ok := handlers[name]; ok {
+			executor.Bind(name, h)
+		} else {
+			executor.Bind(name, makeHandler(name))
+		}
 	}
 	if err := tool.VerifyHandlers(registry, executor.HandlerNames()); err != nil {
 		return err
@@ -135,13 +149,6 @@ func run() error {
 	if err != nil {
 		return err
 	}
-
-	// --- Retriever (index.db; block source = Document store) ---
-	indexDB, err := open("index.db")
-	if err != nil {
-		return err
-	}
-	retrieverGW := retriever.New(indexDB, fleetGW, provider.New(), docStore, chunker.New(), 512)
 
 	// --- Assembler + loop ---
 	assemblerGW := assembler.New()
@@ -182,11 +189,152 @@ func run() error {
 	return httpSrv.ListenAndServe()
 }
 
-// makeHandler returns a minimal tool handler. In the POC the modes are
-// single-shot (non-agentic, maxSteps 0) so tools are not dispatched on the happy
-// path; these handlers satisfy the startup cross-check and return a typed
-// unavailable result if invoked. Real handlers are wired when the agentic loop
-// and edit-integrity path land (ADR-0029).
+// makeToolHandlers returns the real tool handlers bound at the composition root,
+// wiring the Document store, Retriever, and TextFormatter into the engine's four
+// tools (edit_markdown, retrieve, diff, read_note). The name is the whole seam
+// (ADR-0019 §3). Handlers return the structured result shapes the loop observes
+// (ADR-0029 §5); the document-scoped tools read a loop-injected `documentId`.
+func makeToolHandlers(doc document.Interface, rec retriever.Interface, tf textformatter.Interface) map[string]tool.Handler {
+	return map[string]tool.Handler{
+		"edit_markdown": editMarkdownHandler(doc, tf),
+		"retrieve":      retrieveHandler(rec),
+		"diff":          diffHandler(doc),
+		"read_note":     readNoteHandler(rec),
+	}
+}
+
+// editMarkdownHandler applies a whole-block replacement (ADR-0029 §1): pre-flight
+// Validate, then ApplyEdit (which normalizes + verifies guards). Returns the
+// structured {ok, blockId, revision, diff, normalized} or
+// {ok:false, error:guard-failed|invalid-structure, …} shape.
+func editMarkdownHandler(doc document.Interface, tf textformatter.Interface) tool.Handler {
+	return func(args json.RawMessage) (json.RawMessage, error) {
+		var in struct {
+			BlockID    string `json:"blockId"`
+			Text       string `json:"text"`
+			DocumentID string `json:"documentId"`
+		}
+		if err := json.Unmarshal(args, &in); err != nil {
+			return nil, err
+		}
+		if in.DocumentID == "" || in.BlockID == "" {
+			return structuredEdit(false, "invalid-args", nil), nil
+		}
+
+		ctx := context.Background()
+
+		// Find the block's kind for pre-flight validation.
+		var kind dto.BlockKind
+		if blocks, err := doc.Blocks(in.DocumentID); err == nil {
+			for _, b := range blocks {
+				if b.ID == in.BlockID {
+					kind = b.Kind
+					break
+				}
+			}
+		}
+
+		// Pre-flight structural validation (ADR-0029 §2: Validate runs in the
+		// edit-tool handler; issues reach the model).
+		if issues := tf.Validate(kind, in.Text); len(issues) > 0 {
+			return structuredEdit(false, "invalid-structure", map[string]interface{}{"issues": issues}), nil
+		}
+
+		rev, err := doc.ApplyEdit(ctx, in.DocumentID, dto.BlockEdit{BlockID: in.BlockID, Text: in.Text})
+		if err != nil {
+			switch {
+			case errors.Is(err, document.ErrGuardFailed):
+				return structuredEdit(false, "guard-failed", map[string]interface{}{"blockId": in.BlockID}), nil
+			case errors.Is(err, document.ErrInvalidStructure):
+				return structuredEdit(false, "invalid-structure", nil), nil
+			default:
+				return nil, err
+			}
+		}
+		res := map[string]interface{}{
+			"ok":       true,
+			"blockId":  in.BlockID,
+			"revision": map[string]interface{}{"id": rev.ID, "message": rev.Message},
+		}
+		b, _ := json.Marshal(res)
+		return b, nil
+	}
+}
+
+// retrieveHandler returns the top retrieval chunks for a query.
+func retrieveHandler(rec retriever.Interface) tool.Handler {
+	return func(args json.RawMessage) (json.RawMessage, error) {
+		var in struct {
+			Query string `json:"query"`
+		}
+		if err := json.Unmarshal(args, &in); err != nil {
+			return nil, err
+		}
+		chunks, err := rec.Query(context.Background(), in.Query, 3)
+		if err != nil {
+			return nil, err
+		}
+		b, _ := json.Marshal(map[string]interface{}{"ok": true, "chunks": chunks})
+		return b, nil
+	}
+}
+
+// diffHandler returns the word-level diff between two revisions.
+func diffHandler(doc document.Interface) tool.Handler {
+	return func(args json.RawMessage) (json.RawMessage, error) {
+		var in struct {
+			DocumentID string `json:"documentId"`
+			BaseRev    string `json:"baseRev"`
+			Rev        string `json:"rev"`
+		}
+		if err := json.Unmarshal(args, &in); err != nil {
+			return nil, err
+		}
+		edits, err := doc.Diff(in.DocumentID, in.BaseRev, in.Rev)
+		if err != nil {
+			return nil, err
+		}
+		b, _ := json.Marshal(map[string]interface{}{"ok": true, "edits": edits})
+		return b, nil
+	}
+}
+
+// readNoteHandler reads a note from the vault by path/title. The engine has no
+// dedicated vault module; the note index lives in the Retriever's index.db, so a
+// title/path query is served by full-text search (a POC-path judgment call,
+// documented in the report).
+func readNoteHandler(rec retriever.Interface) tool.Handler {
+	return func(args json.RawMessage) (json.RawMessage, error) {
+		var in struct {
+			Query string `json:"query"`
+		}
+		if err := json.Unmarshal(args, &in); err != nil {
+			return nil, err
+		}
+		chunks, err := rec.Query(context.Background(), in.Query, 1)
+		if err != nil {
+			return nil, err
+		}
+		b, _ := json.Marshal(map[string]interface{}{"ok": true, "note": chunks})
+		return b, nil
+	}
+}
+
+// structuredEdit renders the edit_markdown structured result (ADR-0029 §5).
+func structuredEdit(ok bool, errCode string, extra map[string]interface{}) json.RawMessage {
+	res := map[string]interface{}{"ok": ok}
+	if !ok {
+		res["error"] = errCode
+	}
+	for k, v := range extra {
+		res[k] = v
+	}
+	b, _ := json.Marshal(res)
+	return b
+}
+
+// makeHandler returns a minimal placeholder handler for any tool without a real
+// binding (never occurs for the shipped four; satisfies the cross-check).
 func makeHandler(name string) tool.Handler {
 	return func(args json.RawMessage) (json.RawMessage, error) {
 		return nil, fmt.Errorf("tool %s: handler not yet implemented", name)

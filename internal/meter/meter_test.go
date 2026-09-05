@@ -63,8 +63,8 @@ func TestAttributeScalesToTotal(t *testing.T) {
 	if err := db.QueryRow(`SELECT count(*) FROM meter_events WHERE turn_id = 't1'`).Scan(&n); err != nil {
 		t.Fatal(err)
 	}
-	if n != 5 { // system, tools, rag, history, user (thinking=0 skipped)
-		t.Fatalf("meter_events = %d, want 5", n)
+	if n != 6 { // system, tools, rag, history, user + completion (thinking=0 skipped)
+		t.Fatalf("meter_events = %d, want 6", n)
 	}
 }
 
@@ -109,5 +109,41 @@ func TestScaleSumZeroBreakdown(t *testing.T) {
 	}
 	if a.SystemPrompt != 0 || a.User != 0 {
 		t.Fatalf("zero breakdown should scale to zero: %+v", a)
+	}
+}
+
+func TestSessionUsage(t *testing.T) {
+	m, _, _ := newTestMeter(t)
+	// Two turns across session s1 (and one in another session to ensure scoping).
+	if _, err := m.Attribute(context.Background(), "t1", "s1", "m", dto.Breakdown{SystemPrompt: 10, User: 10}, dto.ProviderCounts{InputTokens: 20, OutputTokens: 50}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Attribute(context.Background(), "t2", "s1", "m", dto.Breakdown{User: 10}, dto.ProviderCounts{InputTokens: 10, OutputTokens: 10}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Attribute(context.Background(), "t3", "s2", "m", dto.Breakdown{User: 10}, dto.ProviderCounts{InputTokens: 10, OutputTokens: 1}); err != nil {
+		t.Fatal(err)
+	}
+
+	total, err := m.SessionUsage(context.Background(), "s1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// s1: turn1 (20 prompt + 50 completion) + turn2 (10 + 10) = 90 cumulative.
+	if total != 90 {
+		t.Fatalf("s1 usage = %d, want 90", total)
+	}
+}
+
+func TestSessionExceeded(t *testing.T) {
+	budget := 100
+	if SessionExceeded(90, &budget, 10) { // 90+10 == 100, not exceed
+		t.Fatal("100 should not exceed a 100 budget (strictly greater)")
+	}
+	if !SessionExceeded(90, &budget, 11) { // 90+11 > 100
+		t.Fatal("101 should exceed a 100 budget")
+	}
+	if SessionExceeded(90, nil, 100000) { // nil budget = unbounded
+		t.Fatal("nil budget must never exceed")
 	}
 }

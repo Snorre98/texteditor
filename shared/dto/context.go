@@ -8,6 +8,16 @@ type Message struct {
 	Timestamp int64  // unix epoch seconds
 }
 
+// ToolCall is one native tool-calling invocation emitted by the model
+// (interface.md §2, amended at the agentic-loop milestone). It is the assembled
+// form of the wire delta.tool_calls: id (for the role:"tool" response), name (a
+// registered ToolDef.Name), and the JSON arguments string. Owner-free DTO.
+type ToolCall struct {
+	ID        string // the assistant's tool_call id, echoed back in the tool message
+	Name      string // the real tool name (== ToolDef.Name)
+	Arguments string // JSON-encoded arguments (rendered verbatim to Invoke)
+}
+
 // BlockKind enumerates Markdown block element kinds (interface.md §4b).
 type BlockKind string
 

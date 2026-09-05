@@ -79,7 +79,7 @@ produces it; `Index` rebuilds it). It may denormalize block text.
 | `ts` | INTEGER | unix epoch ms |
 | `session_id` | TEXT | → `sessions.id` (the owning session) |
 | `turn_id` | TEXT | groups events into one turn |
-| `component` | TEXT | `system` \| `tools` \| `rag` \| `history` \| `user` \| `thinking` |
+| `component` | TEXT | `system` \| `tools` \| `rag` \| `history` \| `user` \| `thinking` \| `completion` |
 | `prompt_tokens` | INTEGER | attributed prompt tokens |
 | `completion_tokens` | INTEGER | attributed completion tokens |
 | `approx` | INTEGER | 1 when the component is a labeled approximation (thinking, ADR-0024) |

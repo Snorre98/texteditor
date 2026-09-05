@@ -162,11 +162,13 @@ type Completion struct {
 }
 
 type RawEvent struct {           // unframed, un-attributed
-    Type string                  // "token" | "done" | "error"
+    Type string                  // "token" | "tool_call" | "finish" | "done" | "error"
     Data json.RawMessage         // payload shapes per ADR-0016 §2:
-                                 //   token → {"text": "…"}
-                                 //   done  → {"inputTokens": n, "outputTokens": n}
-                                 //   error → {"code": "…", "message": "…"}
+                                 //   token     → {"text": "…"}
+                                 //   tool_call → {"id": "…", "name": "…", "arguments": "…"}
+                                 //   finish    → {"reason": "tool_calls" | "stop" | …}
+                                 //   done      → {"inputTokens": n, "outputTokens": n}
+                                 //   error     → {"code": "…", "message": "…"}
 }
 
 type ProviderGateway interface {
@@ -178,9 +180,17 @@ type ProviderGateway interface {
 
 Semantics: the Provider takes an **already-resolved `Target`** (never a name) plus
 an **already-assembled `Request`** (the `Payload.Request` from §5) and is a pure
-REST/SSE leaf. It emits **only raw `token`/`done`/`error`**; attribution is
-downstream (the assembler + meter). Retry/backoff and per-server `-np 1`
-serialization are hidden internals.
+REST/SSE leaf. It emits **only raw `token`/`tool_call`/`finish`/`done`/`error`**;
+attribution is downstream (the assembler + meter). Retry/backoff and per-server
+`-np 1` serialization are hidden internals.
+
+(Amended at the agentic-loop milestone: `RawEvent` gained `tool_call` (from SSE
+`delta.tool_calls`, accumulated by index) and `finish` (from `finish_reason`), so
+the loop can observe a native-tool-calling turn's tool calls and render the
+follow-up `role: "tool"` message on the next round-trip. These are raw,
+un-attributed provider events like `token`/`done`/`error` — the wire shapes are
+`json.RawMessage`, no new shared DTO. This resolves the tool-call wire-format gap:
+`interface.md §2` previously pinned only `token`/`done`/`error`.)
 
 (Amended at A5: `Chat`/`Stream` now carry `Request` — the assembled messages,
 tools, serving model name, and merged params. This closes the earlier §2/§5 gap
@@ -303,6 +313,7 @@ type AttributedBreakdown struct {
 
 type TokenMeter interface {
     Attribute(ctx context.Context, turnID, sessionID, model string, b Breakdown, counts ProviderCounts) (AttributedBreakdown, error)
+    SessionUsage(ctx context.Context, sessionID string) (int, error) // cumulative tokens per session (budget)
 }
 ```
 
@@ -315,6 +326,11 @@ bus's concern.
 (Amended to add `sessionID`/`model` inputs: `data-model.md` §1.3 requires both
 `meter_events.session_id` and `meter_events.model`, and ADR-0026 §5 requires
 per-session budget checks — the loop holds both and passes them in.)
+
+(Amended at the agentic-loop milestone: `SessionUsage(ctx, sessionID)` was added
+so the loop can enforce a session's `TokenBudget` (ADR-0026 §5) before a turn —
+the meter owns the cumulative tally, so the budget check reads it from here and
+surfaces `session-budget-exceeded`.)
 
 ## 7. Agent loop (Go)
 

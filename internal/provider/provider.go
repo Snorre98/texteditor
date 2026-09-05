@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -248,6 +249,7 @@ func (g *gateway) streamOnce(ctx context.Context, target dto.Target, path string
 
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 1024*64), 1024*1024)
+	p := &frameParser{}
 	for scanner.Scan() {
 		line := scanner.Text()
 		if !strings.HasPrefix(line, "data:") {
@@ -257,45 +259,151 @@ func (g *gateway) streamOnce(ctx context.Context, target dto.Target, path string
 		if data == "[DONE]" {
 			continue
 		}
-		emit(frameToEvent(data))
+		// A frame may yield zero or more raw events (a tool-call frame emits a
+		// tool_call event per completed call; a final frame emits finish).
+		for _, ev := range p.frame(data) {
+			emit(ev)
+		}
 	}
 	if err := scanner.Err(); err != nil {
 		return err
 	}
+	// Flush any tool calls that complete at end-of-stream without an explicit
+	// finish frame (defensive; OpenAI servers always send finish_reason).
+	for _, ev := range p.flush() {
+		emit(ev)
+	}
 	return nil
 }
 
-// frameToEvent converts an SSE data frame into a raw event (token | done).
-func frameToEvent(data string) dto.RawEvent {
-	var frame struct {
+// frameParser accumulates streaming tool-call deltas and converts each SSE data
+// frame into zero or more raw events (token | tool_call | finish | done). The
+// tool-call shapes are pinned in interface.md §2 (amended at the agentic-loop
+// milestone): tool_call → {"id","name","arguments"}, finish → {"reason"}.
+type frameParser struct {
+	toolCalls map[int]toolCallAcc
+}
+
+type toolCallAcc struct {
+	id        string
+	name      string
+	arguments string
+}
+
+func (p *frameParser) frame(data string) []dto.RawEvent {
+	var f struct {
 		Choices []struct {
-			Delta struct {
-				Content string `json:"content"`
-			} `json:"delta"`
+			Delta        json.RawMessage `json:"delta"`
+			FinishReason string          `json:"finish_reason"`
 		} `json:"choices"`
 		Usage *struct {
 			PromptTokens     int `json:"prompt_tokens"`
 			CompletionTokens int `json:"completion_tokens"`
 		} `json:"usage"`
 	}
-	ev := dto.RawEvent{Type: "token"}
-	if err := json.Unmarshal([]byte(data), &frame); err != nil {
-		ev.Data = json.RawMessage(fmt.Sprintf(`{"text": %q}`, data))
-		return ev
+	if err := json.Unmarshal([]byte(data), &f); err != nil {
+		// Unparseable frame: fall back to treating it as raw token text (the
+		// legacy defensive path).
+		return []dto.RawEvent{{Type: "token", Data: json.RawMessage(fmt.Sprintf(`{"text": %q}`, data))}}
 	}
-	if len(frame.Choices) > 0 {
-		t, _ := json.Marshal(map[string]string{"text": frame.Choices[0].Delta.Content})
-		ev.Data = t
-		return ev
-	}
-	if frame.Usage != nil {
-		ev.Type = "done"
-		ev.Data, _ = json.Marshal(map[string]int{
-			"inputTokens":  frame.Usage.PromptTokens,
-			"outputTokens": frame.Usage.CompletionTokens,
+
+	var out []dto.RawEvent
+
+	// Usage frame → done.
+	if f.Usage != nil && len(f.Choices) == 0 {
+		out = append(out, dto.RawEvent{
+			Type: "done",
+			Data: json.RawMessage(fmt.Sprintf(`{"inputTokens":%d,"outputTokens":%d}`, f.Usage.PromptTokens, f.Usage.CompletionTokens)),
 		})
+		return out
 	}
-	return ev
+
+	for _, ch := range f.Choices {
+		// finish event (finish_reason tool_calls/stop/etc).
+		if ch.FinishReason != "" {
+			out = append(out, dto.RawEvent{
+				Type: "finish",
+				Data: json.RawMessage(fmt.Sprintf(`{"reason":%q}`, ch.FinishReason)),
+			})
+		}
+
+		var delta struct {
+			Content   string `json:"content"`
+			ToolCalls []struct {
+				Index    int    `json:"index"`
+				ID       string `json:"id"`
+				Function struct {
+					Name      string `json:"name"`
+					Arguments string `json:"arguments"`
+				} `json:"function"`
+			} `json:"tool_calls"`
+		}
+		if len(ch.Delta) > 0 {
+			if err := json.Unmarshal(ch.Delta, &delta); err != nil {
+				continue
+			}
+		}
+
+		// Content token.
+		if delta.Content != "" {
+			t, _ := json.Marshal(map[string]string{"text": delta.Content})
+			out = append(out, dto.RawEvent{Type: "token", Data: t})
+		}
+
+		// Tool-call deltas: accumulate by index; when a call's arguments finish
+		// (signaled by the stream's finish_reason), we emit it. For providers
+		// that send a complete arguments blob in one delta and no finish reason,
+		// emit immediately.
+		for _, tc := range delta.ToolCalls {
+			if p.toolCalls == nil {
+				p.toolCalls = map[int]toolCallAcc{}
+			}
+			acc := p.toolCalls[tc.Index]
+			if tc.ID != "" {
+				acc.id = tc.ID
+			}
+			if tc.Function.Name != "" {
+				acc.name = tc.Function.Name
+			}
+			acc.arguments += tc.Function.Arguments
+			p.toolCalls[tc.Index] = acc
+		}
+	}
+
+	// A finish_reason "tool_calls" completes all accumulated calls: emit each.
+	for _, ch := range f.Choices {
+		if ch.FinishReason == "tool_calls" {
+			out = append(out, p.emitCompleted()...)
+			break
+		}
+	}
+	return out
+}
+
+// emitCompleted emits a tool_call event for every accumulated (complete) call.
+func (p *frameParser) emitCompleted() []dto.RawEvent {
+	// Emit in ascending index order for determinism.
+	idx := make([]int, 0, len(p.toolCalls))
+	for i := range p.toolCalls {
+		idx = append(idx, i)
+	}
+	sort.Ints(idx)
+	var out []dto.RawEvent
+	for _, i := range idx {
+		acc := p.toolCalls[i]
+		b, _ := json.Marshal(map[string]string{"id": acc.id, "name": acc.name, "arguments": acc.arguments})
+		out = append(out, dto.RawEvent{Type: "tool_call", Data: b})
+	}
+	p.toolCalls = nil
+	return out
+}
+
+// flush emits any un-completed tool calls at end-of-stream.
+func (p *frameParser) flush() []dto.RawEvent {
+	if len(p.toolCalls) == 0 {
+		return nil
+	}
+	return p.emitCompleted()
 }
 
 func (g *gateway) post(ctx context.Context, target dto.Target, path string, payload []byte) ([]byte, int, error) {
@@ -320,8 +428,16 @@ func (g *gateway) post(ctx context.Context, target dto.Target, path string, payl
 func parseCompletion(raw []byte) (dto.Completion, error) {
 	var rsp struct {
 		Choices []struct {
-			Message struct {
-				Content string `json:"content"`
+			FinishReason string `json:"finish_reason"`
+			Message      struct {
+				Content   string `json:"content"`
+				ToolCalls []struct {
+					ID       string `json:"id"`
+					Function struct {
+						Name      string `json:"name"`
+						Arguments string `json:"arguments"`
+					} `json:"function"`
+				} `json:"tool_calls"`
 			} `json:"message"`
 		} `json:"choices"`
 		Usage struct {
@@ -338,6 +454,13 @@ func parseCompletion(raw []byte) (dto.Completion, error) {
 	}
 	if len(rsp.Choices) > 0 {
 		c.Text = rsp.Choices[0].Message.Content
+		for _, tc := range rsp.Choices[0].Message.ToolCalls {
+			c.ToolCalls = append(c.ToolCalls, dto.ToolCall{
+				ID:        tc.ID,
+				Name:      tc.Function.Name,
+				Arguments: tc.Function.Arguments,
+			})
+		}
 	}
 	return c, nil
 }

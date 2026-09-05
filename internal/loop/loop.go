@@ -4,15 +4,19 @@
 // forwards events to the bus tagged with a `turnID`.
 //
 // The turn: planning → (dispatching → observing)* → answering → done | error.
-// The dispatch/observe cycle is bounded by mode.maxSteps and is only entered for
-// agentic modes; a non-agentic mode (maxSteps 0) is a single-shot pass
-// (state-machine.md §1.3).
+// The dispatch/observe cycle is bounded by mode.maxSteps and is entered only for
+// agentic modes (maxSteps > 0); a non-agentic mode (maxSteps 0) is a single-shot
+// pass (state-machine.md §1.3). Native tool-calling (ADR-0028 default) drives
+// tool dispatch from the model's own tool_calls; edit-integrity results
+// (guard-failed / invalid-structure, ADR-0029) re-enter dispatching with a
+// re-read or the issue list, both counting against maxSteps.
 package loop
 
 import (
 	"context"
 	"encoding/json"
 	"errors"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -98,6 +102,23 @@ func (l *loop) runTurn(ctx context.Context, turnID string, task dto.Task) {
 	// planning: read session history + retrieved chunks.
 	history, _ := l.d.Sessions.History(task.SessionID)
 
+	// Append the user's turn input to the session so the conversation is durable
+	// (ADR-0026 §3). The assistant's completions are appended after they land.
+	if err := l.d.Sessions.Append(task.SessionID, dto.Message{Role: "user", Content: task.UserInput}); err != nil {
+		l.emit(turnID, dto.Event{Type: "error", Data: errorData(err)})
+		return
+	}
+
+	// Per-session budget gate (ADR-0026 §5) — checked before any model call.
+	sess, _ := l.d.Sessions.Resume(task.SessionID)
+	if sess.TokenBudget != nil {
+		used, err := l.d.Meter.SessionUsage(ctx, task.SessionID)
+		if err == nil && meter.SessionExceeded(used, sess.TokenBudget, 1) {
+			l.emit(turnID, dto.Event{Type: "error", Data: errorData(meter.ErrSessionBudgetExceeded)})
+			return
+		}
+	}
+
 	var chunks []dto.Chunk
 	if m.Agentic {
 		chunks, _ = l.d.Retriever.Query(ctx, task.UserInput, 3)
@@ -119,29 +140,210 @@ func (l *loop) runTurn(ctx context.Context, turnID string, task dto.Task) {
 		return
 	}
 
-	// answering: stream, forward tokens, then meter + persist.
 	target := dto.Target{BaseURL: res.Model.BaseURL, Capabilities: res.Model.Capabilities}
-	var lastCounts dto.ProviderCounts
-	emit := func(raw dto.RawEvent) {
-		switch raw.Type {
-		case "done":
-			parseDone(raw, &lastCounts)
-			l.emit(turnID, dto.Event{Type: "done", Data: raw.Data})
-		case "token":
-			l.emit(turnID, dto.Event{Type: "token", Data: raw.Data})
-		case "error":
-			l.emit(turnID, dto.Event{Type: "error", Data: raw.Data})
-		}
+
+	// The turn state machine (state-machine.md §1): planning → (dispatching →
+	// observing)* → answering. maxSteps bounds the tool loop; a non-agentic mode
+	// (maxSteps 0) is a single answering pass with no dispatch.
+	maxSteps := m.MaxSteps
+	if !m.Agentic {
+		maxSteps = 0
 	}
-	if err := l.d.Provider.Stream(ctx, target, payload.Request, emit); err != nil {
+
+	result, err := l.runSteps(ctx, turnID, task, target, payload, tools, maxSteps)
+	if err != nil {
 		l.emit(turnID, dto.Event{Type: "error", Data: errorData(err)})
 		return
 	}
 
-	// attribute + persist + append history.
-	if _, err := l.d.Meter.Attribute(ctx, turnID, task.SessionID, res.UsedName, breakdown, lastCounts); err != nil {
-		l.emit(turnID, dto.Event{Type: "error", Data: errorData(err)})
+	// answering: the final stream already forwarded tokens; now meter + persist.
+	if result.counts.InputTokens+result.counts.OutputTokens > 0 {
+		if _, err := l.d.Meter.Attribute(ctx, turnID, task.SessionID, res.UsedName, breakdown, result.counts); err != nil {
+			l.emit(turnID, dto.Event{Type: "error", Data: errorData(err)})
+		}
 	}
+
+	// Persist the assistant's final answer (ADR-0026 §3).
+	if result.text != "" {
+		_ = l.d.Sessions.Append(task.SessionID, dto.Message{Role: "assistant", Content: result.text})
+	}
+
+	l.emitFinal(turnID, res, result)
+}
+
+// streamResult is the loop's view of one provider stream round: the accumulated
+// answer text, any tool calls, the finish reason, and the final usage counts.
+type streamResult struct {
+	text      string
+	toolCalls []dto.ToolCall
+	finish    string
+	counts    dto.ProviderCounts
+}
+
+// runSteps drives the native tool-calling loop. It mutates `msgs` (the assembled
+// message list) across round-trips, threading assistant tool_calls and tool
+// results. It returns the final stream result (the answering round).
+func (l *loop) runSteps(ctx context.Context, turnID string, task dto.Task, target dto.Target, payload dto.Payload, tools []dto.ToolDef, maxSteps int) (streamResult, error) {
+	msgs := payload.Messages
+
+	steps := 0
+	for {
+		req := dto.Request{
+			ModelName:       payload.Request.ModelName,
+			Messages:        msgs,
+			Tools:           tools,
+			EffectiveParams: payload.Request.EffectiveParams,
+		}
+
+		var res streamResult
+		emit := func(raw dto.RawEvent) {
+			switch raw.Type {
+			case "token":
+				res.text += tokenText(raw)
+			case "tool_call":
+				tc := parseToolCall(raw)
+				if tc.Name != "" {
+					res.toolCalls = append(res.toolCalls, tc)
+				}
+			case "finish":
+				res.finish = reasonOf(raw)
+			case "done":
+				parseDone(raw, &res.counts)
+			}
+		}
+
+		if steps == 0 && maxSteps == 0 {
+			// Single-shot (non-agentic): forward tokens live (the POC happy path).
+			err := l.d.Provider.Stream(ctx, target, req, func(raw dto.RawEvent) {
+				emit(raw)
+				if raw.Type == "token" {
+					l.emit(turnID, dto.Event{Type: "token", Data: raw.Data})
+				}
+			})
+			if err != nil {
+				return streamResult{}, err
+			}
+			return res, nil
+		}
+
+		if err := l.d.Provider.Stream(ctx, target, req, emit); err != nil {
+			return streamResult{}, err
+		}
+
+		// No tool calls (or the model stopped) → answering round.
+		if len(res.toolCalls) == 0 || res.finish == "stop" {
+			l.emitToken(turnID, res.text)
+			return res, nil
+		}
+
+		// Bound reached without an explicit stop: treat the accumulated text as
+		// the answer (bounded loop, never unbounded — ADR-0019).
+		if steps >= maxSteps {
+			l.emitToken(turnID, res.text)
+			return res, nil
+		}
+
+		// dispatching → observing: append the assistant tool_call message, then
+		// invoke each tool and append its result (state-machine.md §1.2).
+		msgs = append(msgs, dto.Message{Role: "assistant", Content: res.text, Timestamp: nowUnix()})
+
+		for _, tc := range res.toolCalls {
+			rawArgs := json.RawMessage(tc.Arguments)
+			if len(rawArgs) == 0 {
+				rawArgs = json.RawMessage(`{}`)
+			}
+			// Document-scoped tools need the turn's documentID; it is injected
+			// here (the loop holds task.DocumentID), never exposed to the model in
+			// the tool schema (config/tools/*.json expose only the model's fields).
+			rawArgs = injectDocumentID(tc.Name, task, rawArgs)
+
+			out, toolErr := l.d.Executor.Invoke(tc.Name, rawArgs)
+
+			// Observe structured edit results for events + retry signals.
+			handled := l.observeTool(turnID, task, tc, out, toolErr)
+
+			var resultContent string
+			switch {
+			case toolErr != nil:
+				resultContent = toolErrorMessage(tc.Name, toolErr)
+			case handled != nil:
+				resultContent = string(handled)
+			default:
+				resultContent = string(outOrEmpty(out))
+			}
+			msgs = append(msgs, dto.Message{Role: "tool", Content: resultContent, Timestamp: nowUnix()})
+		}
+
+		steps++
+	}
+}
+
+// injectDocumentID adds task.DocumentID to the args of document-scoped tools
+// (edit_markdown, diff). The model never supplies it; the loop owns the document
+// binding (ADR-0029: edits target a block in a document the loop is scoped to).
+func injectDocumentID(name string, task dto.Task, args json.RawMessage) json.RawMessage {
+	if name != "edit_markdown" && name != "diff" {
+		return args
+	}
+	merged := map[string]interface{}{}
+	if len(args) > 0 {
+		_ = json.Unmarshal(args, &merged)
+	}
+	merged["documentId"] = task.DocumentID
+	out, _ := json.Marshal(merged)
+	return out
+}
+
+// observeTool inspects a tool result, emits candidate/diff events for edits, and
+// returns nil when no special handling occurred (the raw result is passed to the
+// model) or a possibly-rewritten result for edit retries.
+func (l *loop) observeTool(turnID string, task dto.Task, tc dto.ToolCall, out json.RawMessage, toolErr error) json.RawMessage {
+	switch tc.Name {
+	case "edit_markdown":
+		return l.observeEdit(turnID, task, out, toolErr)
+	case "diff":
+		// A diff tool result is itself the diff to surface.
+		l.emit(turnID, dto.Event{Type: "diff", Data: outOrEmpty(out)})
+	}
+	return nil
+}
+
+// observeEdit handles the edit_markdown structured result (ADR-0029 §5): a
+// successful stage emits a candidate event; guard-failed / invalid-structure
+// results are passed back to the model as-is so it can re-read / retry.
+func (l *loop) observeEdit(turnID string, task dto.Task, out json.RawMessage, toolErr error) json.RawMessage {
+	if toolErr != nil {
+		return json.RawMessage(`{"ok":false,"error":"` + toolErr.Error() + `"}`)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	var res struct {
+		Ok    bool   `json:"ok"`
+		Error string `json:"error"`
+	}
+	_ = json.Unmarshal(out, &res)
+	if res.Ok {
+		l.emit(turnID, dto.Event{Type: "candidate", Data: out})
+		var d struct {
+			Diff json.RawMessage `json:"diff"`
+		}
+		if json.Unmarshal(out, &d) == nil && len(d.Diff) > 0 {
+			l.emit(turnID, dto.Event{Type: "diff", Data: d.Diff})
+		}
+	}
+	// Whether ok or retryable error, pass the structured result back to the model.
+	return out
+}
+
+// emitFinal emits the terminal done event with degrade/usedModel labeling
+// (failure-semantics §3: a substitution is always labeled).
+func (l *loop) emitFinal(turnID string, res dto.Resolution, r streamResult) {
+	data, _ := json.Marshal(map[string]interface{}{
+		"degraded":  res.Degraded,
+		"usedModel": res.UsedName,
+	})
+	l.emit(turnID, dto.Event{Type: "done", Data: data})
 }
 
 func (l *loop) emit(turnID string, ev dto.Event) {
@@ -152,10 +354,48 @@ func (l *loop) emit(turnID string, ev dto.Event) {
 	l.d.Bus.Emit(ev)
 }
 
-// toolSchemasFor returns the mode's allowlisted tools (in allowlist order, so the
+// emitToken forwards one text token event (the answering phase; state-machine
+// §1: answering is the single token-emitting phase).
+func (l *loop) emitToken(turnID, text string) {
+	if text == "" {
+		return
+	}
+	data, _ := json.Marshal(map[string]string{"text": text})
+	l.emit(turnID, dto.Event{Type: "token", Data: data})
+}
+
+// toolsFor returns the mode's allowlisted tools (in allowlist order, so the
 // payload order matches the meter).
 func toolsFor(reg tool.Registry, m mode.Mode) []dto.ToolDef {
 	return reg.AllowlistFor(m)
+}
+
+// tokenText extracts the text from a raw token event.
+func tokenText(raw dto.RawEvent) string {
+	var v struct {
+		Text string `json:"text"`
+	}
+	_ = json.Unmarshal(raw.Data, &v)
+	return v.Text
+}
+
+// parseToolCall extracts a dto.ToolCall from a raw tool_call event.
+func parseToolCall(raw dto.RawEvent) dto.ToolCall {
+	var v struct {
+		ID        string `json:"id"`
+		Name      string `json:"name"`
+		Arguments string `json:"arguments"`
+	}
+	_ = json.Unmarshal(raw.Data, &v)
+	return dto.ToolCall{ID: v.ID, Name: v.Name, Arguments: v.Arguments}
+}
+
+func reasonOf(raw dto.RawEvent) string {
+	var v struct {
+		Reason string `json:"reason"`
+	}
+	_ = json.Unmarshal(raw.Data, &v)
+	return v.Reason
 }
 
 func parseDone(raw dto.RawEvent, counts *dto.ProviderCounts) {
@@ -168,6 +408,22 @@ func parseDone(raw dto.RawEvent, counts *dto.ProviderCounts) {
 	}
 	counts.InputTokens = v.InputTokens
 	counts.OutputTokens = v.OutputTokens
+}
+
+func toolErrorMessage(name string, err error) string {
+	b, _ := json.Marshal(map[string]interface{}{"ok": false, "error": "tool-error", "tool": name, "message": err.Error()})
+	return string(b)
+}
+
+func outOrEmpty(out json.RawMessage) json.RawMessage {
+	if len(out) == 0 {
+		return json.RawMessage(`{}`)
+	}
+	return out
+}
+
+func nowUnix() int64 {
+	return time.Now().Unix()
 }
 
 func errorData(err error) json.RawMessage {
@@ -183,6 +439,8 @@ func codeFor(err error) string {
 		return "no-model-available"
 	case errors.Is(err, provider.ErrProviderUnreachable):
 		return "provider-unreachable"
+	case errors.Is(err, meter.ErrSessionBudgetExceeded):
+		return "session-budget-exceeded"
 	default:
 		return "error"
 	}
