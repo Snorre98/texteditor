@@ -2,7 +2,9 @@
 
 Status: Accepted
 
-Supersedes: ADR-0007 (the "no HTTP daemon" conclusion).
+Supersedes: ADR-0007 (the "no HTTP daemon" conclusion), ADR-0018 §4 ("shared
+semantic loader invoked by both the engine and serve.sh" — the daemon is now the
+sole manifest reader and hands the parsed manifest to `serve.sh`).
 
 ## Context
 

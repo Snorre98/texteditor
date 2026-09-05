@@ -120,8 +120,9 @@ reopens the same session.
 ## 2. Fleet manifest (`models.json` in `macos-dev-config`) — two-tier
 
 Source ADR-0018. Validated against a committed JSON Schema, with **semantic**
-invariants (name uniqueness, lanes) enforced by the shared loader used by both the
-daemon and `serve.sh`.
+invariants (name uniqueness, lanes) enforced by the shared loader — owned by and
+invoked only by the control daemon, which hands the parsed manifest to `serve.sh`
+(ADR-0025, ADR-0027).
 
 ### 2.1 Top level
 
@@ -216,5 +217,6 @@ Startup validation failures (typed errors): `mode-refs-unknown-model`,
 - `sessions.db` is the Session store's single-writer file; `messages.session_id`
   references a `sessions.id`, and `meter_events.session_id` groups token cost per
   session (ADR-0026).
-- The fleet manifest is read only by the control daemon (`serve.sh` via the
-  daemon); the engine never reads `models.json` directly (ADR-0025).
+- The fleet manifest is read only by the control daemon; the engine never reads
+  `models.json` directly, and `serve.sh` receives the parsed manifest from the
+  daemon rather than parsing the file itself (ADR-0025, ADR-0027).

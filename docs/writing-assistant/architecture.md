@@ -171,7 +171,6 @@ flowchart TB
     Ret --> Fleet
     Ret --> Prov
     Ret --> Chunker
-    Prov --> Fleet
     Fleet --> Daemon
     Daemon --> Manifest
     Daemon --> Exec
@@ -191,7 +190,7 @@ flowchart TB
 | Context assembler | payload + attribution (pure) | `Assemble(ctx, in) → (Payload, Breakdown)` | layout, truncation, accounting |
 | Token metering | counts + attribution + persistence | `Attribute(ctx, turnID, breakdown, counts)` | scale-to-total, `meter.db` |
 | Retriever | retrieval | `Query(ctx, text, topK)`, `Index(ctx, docID)` | embedding, sqlite-vec KNN, FTS5 |
-| Chunker | chunking (pure) | `Chunk(doc, maxTokens)` | splitting algorithm |
+| Chunker | chunking (pure) | `Chunk(document Document, maxTokens int)` | splitting algorithm |
 | Document store | document + versions | `Open`, `Save`, `Blocks`, `ApplyEdit`, `Commit`, `Diff`, `History`, `Candidates` | git, block UUIDs, candidate side-table |
 | Session store | sessions + their messages (one per selection/doc) | `ListByDocument`, `Create`, `Resume`, `Append`, `History` | `sessions.db` |
 | API server | REST/SSE surface (codegen'd) | routes per OpenAPI spec | framing, turnID↔session↔client correlation |
@@ -313,18 +312,18 @@ Full records in [adr/](adr/). Index:
 |---|---|---|
 | 0001 | Base model: compact modules + explicit public APIs | Accepted |
 | 0002 | Layered, REST-first process architecture; dumb clients | Accepted |
-| 0003 | Single Go engine binary + contract-first codegen | Accepted |
+| 0003 | Single Go engine binary + contract-first codegen | Partially superseded by 0017 (codegen tool selection) |
 | 0004 | SQLite (meta/vec/FTS) + git versioning; Retriever interface | Accepted |
 | 0005 | Provider gateway: name → endpoint + capabilities | Superseded by 0016 |
 | 0006 | Fleet manifest (JSON) in macos-dev-config as source of truth | Superseded by 0018 |
-| 0007 | Serving lifecycle verbs as a defined control contract | Superseded by 0025 |
+| 0007 | Serving lifecycle verbs as a defined control contract | Partially superseded by 0025 (the "no HTTP daemon" conclusion); verb contract unchanged |
 | 0008 | Model provisioning via HF API | Accepted |
 | 0009 | Mode registry: modes as data | Superseded by 0019 |
 | 0010 | Tool registry: tools as data with JSON schemas | Superseded by 0016/0019 |
-| 0011 | Context assembler: single metered choke point | Superseded by 0016/0024 |
+| 0011 | Context assembler: single metered choke point | Superseded by 0016 (scale-to-total), 0022 (measurable target), 0024 (thinking tokenizer) |
 | 0012 | SSE typed events + NDJSON fallback | Accepted |
-| 0013 | Clients: OpenTUI first, Tauri later, both dumb | Superseded by 0023 |
-| 0014 | Deployment targets + capability adapter | Superseded by 0021 |
+| 0013 | Clients: OpenTUI first, Tauri later, both dumb | Partially superseded by 0023 (OpenTUI renderer only) |
+| 0014 | Deployment targets + capability adapter | Partially superseded by 0021 (sidecar spawn mechanics only) |
 | 0015 | Fleet sizing policy (MoE, 14B+ floor, temperature) | Accepted |
 | 0016 | Module inventory + exact public APIs, pure-DTO boundaries | Accepted |
 | 0017 | OpenAPI contract surface: endpoints, SSE, codegen (ogen/Zod/openapi-to-rust) | Accepted |
@@ -337,6 +336,7 @@ Full records in [adr/](adr/). Index:
 | 0024 | Thinking-token attribution: bundled tokenizer fallback | Accepted |
 | 0025 | Serving control transport: HTTP control daemon wrapping serve.sh | Accepted |
 | 0026 | Sessions as first-class entities (session store, per-session concurrency, budget) | Accepted |
+| 0027 | Locked-service tenet: shared-DTO ownership + stream seams; daemon sole manifest reader | Accepted |
 
 ## 10. Quality Requirements
 

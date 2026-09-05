@@ -2,6 +2,10 @@
 
 Status: Accepted
 
+Clarified by: ADR-0027 — "REST-first" applies only to process boundaries
+(client↔engine, engine↔serving); internal engine module boundaries are sealed Go
+interfaces over pure DTOs, never REST.
+
 ## Context
 
 The system spans four logical layers: clients (TUI, markdown editor), an OpenAPI

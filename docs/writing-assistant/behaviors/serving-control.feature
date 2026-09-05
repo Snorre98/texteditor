@@ -56,3 +56,4 @@ Feature: Serving control
     When a model's capabilities are changed in models.json
     Then only the control daemon re-reads the manifest and propagates the change
     And the engine never reads models.json directly
+    And serve.sh receives the parsed manifest from the daemon, not by reading the file

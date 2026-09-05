@@ -79,8 +79,9 @@ type FleetGateway interface {
   walks the models sharing the mode's `modeTag` ordered by fleet policy
   (ADR-0015), selects the first `up`, and sets `Degraded=true, UsedName=<fallback>`.
 - **`Runner`, `source`, and all provisioning fields do not cross this boundary.**
-  The engine never learns which binary serves a model. Those fields stay private
-  to Fleet (and, after ADR-0025, the control daemon).
+  The engine never learns which binary serves a model. Those fields are owned by
+  the control daemon (ADR-0025); the Fleet gateway holds neither the manifest file
+  nor the runner/source/provisioning fields.
 - `Start` is **blocking**: it returns only when the server is `up` (or a typed
   error: port-in-use, binary-missing, model-not-found, timeout). The 60s health
   wait lives once, in the lifecycle executor. `Status` returns the typed

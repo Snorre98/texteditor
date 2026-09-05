@@ -25,7 +25,7 @@ ADR-0025 (control daemon), ADR-0026 (sessions).
 | **Context assembler** (leaf) | the exact token payload + per-component attribution | `Assemble(ctx, in) → (Payload, Breakdown)` | prompt layout, budget truncation, attribution accounting |
 | **Token metering** | counts + attribution + persistence | `Attribute(ctx, turnID, breakdown, counts) → Attributed` | scale-to-total, `meter.db` writes, thinking-token reconciliation (ADR-0024) |
 | **Retriever** | retrieval (semantic + lexical) | `Query(ctx, text, topK) → []Chunk`, `Index(ctx, documentID)` | embedding (via Fleet+Provider), sqlite-vec KNN, FTS5, rerank |
-| **Chunker** (leaf) | chunking (paragraph-aligned, size-bounded) | `Chunk(documentBlockTree, maxTokens) → []Chunk` | splitting algorithm |
+| **Chunker** (leaf) | chunking (paragraph-aligned, size-bounded) | `Chunk(document Document, maxTokens int) → ([]Chunk, error)` | splitting algorithm |
 | **Document store** | document, blocks, version history | `Open`, `Save`, `Blocks`, `ApplyEdit`, `Commit`, `Diff`, `History`, `Candidates` | git (go-git), block-UUID minting, candidate side-table, word-diff |
 | **Session store** (leaf) | sessions + their messages | `ListByDocument`, `Create`, `Resume`, `Append`, `History` | `sessions.db` |
 | **API server** | the versioned REST/SSE surface (codegen'd) | HTTP routes + SSE endpoints per the OpenAPI spec | framing, validation, turnID↔client correlation |
@@ -37,7 +37,7 @@ ADR-0025 (control daemon), ADR-0026 (sessions).
 |---|---|---|---|
 | **Fleet manifest** (data) | what models *can* be served (two-tier: daemons + models) | manifest schema + `Read() → []Model` (validated by the shared loader) | file location, git-ignored local overrides |
 | **Control daemon** | HTTP transport over the verb contract; **sole reader of the manifest** | daemon HTTP contract (`list/start/stop/status/log/reach/provision`) | mapping HTTP → `serve.sh`; verb execution |
-| **Lifecycle executor** (`serve.sh`) | running/stopping model servers (runner logic) | verb contract (invoked by the daemon) | per-runner CLI flags, `models.json` parse (via jq), health checks, delegate wrappers |
+| **Lifecycle executor** (`serve.sh`) | running/stopping model servers (runner logic) | verb contract (invoked by the daemon) | per-runner CLI flags, health checks, delegate wrappers; receives the parsed manifest from the daemon (ADR-0025/0027), does not parse `models.json` |
 | **Always-on agents** (`launchd/`) | reboot-persistent serving | install/load a named agent | plist templating, `launchctl` load |
 | **Tailscale ACL** | remote inference authorization | deny-by-default ACL matching `tag:inference-client` → `tag:inference-server` ports | tailnet tag assignment |
 
@@ -104,7 +104,6 @@ flowchart LR
     Retriever --> Fleet
     Retriever --> Prov
     Retriever --> Chunker
-    Prov --> Fleet
     Meter --> Bus
     Fleet --> Daemon
     Daemon --> Manifest
@@ -138,11 +137,19 @@ Precise Go signatures and pure-DTO type definitions live in
 
 - No cross-module dependency reaches outside a defined public API (R1–R3).
 - Every boundary type is a **pure DTO** (no behavior, no pointers into another
-  module's state, no embedding of another module's types) — the locked-service
-  tenet (ADR-0016).
+  module's state, no embedding of another module's *live* types) — the
+  locked-service tenet (ADR-0016). Composition of other pure DTOs is permitted;
+  shared DTOs are owner-free and live in one neutral package (ADR-0027).
+- **Stream seams (named exceptions, ADR-0027):** the event bus's
+  `Subscribe(filter) → <-chan Event` returns a stream handle (not shared mutable
+  state) and the Provider's `Stream(…, emit func(RawEvent))` passes a stream sink;
+  both carry only pure-DTO payloads (`Event`, `RawEvent`). No other boundary
+  crosses a handle, channel, or callback.
 - The dependency graph is acyclic (R4).
 - Each public API is narrow and stable (R2) and contracted (R6).
 - The engine depends on serving *only* through the Fleet gateway → control daemon
   HTTP contract (ADR-0025). It never reads `models.json` directly and never
   invokes `serve.sh` directly.
+- The control daemon is the sole reader of `models.json`; `serve.sh` receives the
+  parsed manifest from the daemon (ADR-0027), and the engine reads neither.
 - The Provider, Context assembler, and Mode/Tool registries are all pure leaves.

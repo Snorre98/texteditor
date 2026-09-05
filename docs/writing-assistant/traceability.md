@@ -34,6 +34,7 @@ row: ADR-0001/0016 map to it and to §2/§5.2/§8.
 | 0024 | §8 | token-metering | interface, failure-semantics | Q1 |
 | 0025 | §3.2, §4, §7, §8 | serving-control | interface, module-boundaries, concurrency-topology | Q2 |
 | 0026 | §5.2, §8 | sessions | data-model, interface, state-machine, concurrency-topology, module-boundaries | Q1 (per-session budget), Q5 |
+| 0027 | §2, §5.2, §8 | serving-control | interface, module-boundaries | Q2 |
 
 ## Behavior contract ↔ quality scenario coverage
 
@@ -58,15 +59,26 @@ row: ADR-0001/0016 map to it and to §2/§5.2/§8.
 
 ## Supersession notes
 
+- ADR-0003 → partially superseded by ADR-0017 (codegen tool selection: ogen, Hey
+  API + Zod, openapi-to-rust locked).
 - ADR-0005 → superseded by ADR-0016 (Resolve moves to Fleet; Provider is pure REST).
 - ADR-0006 → superseded by ADR-0018 (two-tier manifest; daemon is the sole reader).
-- ADR-0007 → superseded by ADR-0025 (daemon transports the same verb contract).
+- ADR-0007 → partially superseded by ADR-0025 (the "no HTTP daemon" conclusion);
+  the verb contract itself is unchanged.
 - ADR-0009/0010 → superseded by ADR-0016/0019 (mode field set; tool registry split).
-- ADR-0011 → superseded by ADR-0016 (meter scale-to-total) and ADR-0024 (thinking fallback).
-- ADR-0013 → superseded by ADR-0023 (Solid renderer).
-- ADR-0014 → superseded by ADR-0021 (sidecar spawn mechanics).
+- ADR-0011 → superseded by ADR-0016 (meter scale-to-total), ADR-0022 (measurable
+  target), and ADR-0024 (thinking fallback).
+- ADR-0013 → partially superseded by ADR-0023 (Solid renderer only; TUI-first,
+  Tauri-later still stands).
+- ADR-0014 → partially superseded by ADR-0021 (sidecar spawn mechanics only; the
+  three-target deployment concept stands).
 - ADR-0016/0017/0020 → *extended* (not reversed) by ADR-0026: the `conversation_id`
   naming and `messages.db` filename are superseded by `Session`/`sessions.db`.
+- ADR-0018 §2/§4 → superseded by ADR-0025/0027 (the shared manifest loader is the
+  daemon's alone; `serve.sh` no longer parses `models.json` via `jq` and receives
+  the parsed manifest from the daemon, and the engine reads none).
+- ADR-0002/0016 → *clarified* (not reversed) by ADR-0027 (shared-DTO ownership;
+  stream-seam carve-out; REST-first scoped to process boundaries).
 
 Superseded ADRs remain in the log, untouched; supersession is recorded in the
 superseding ADR's header and in the §9 index.

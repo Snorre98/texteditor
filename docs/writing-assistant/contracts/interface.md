@@ -2,10 +2,40 @@
 
 The seams between modules. Source ADRs: ADR-0016 (module inventory),
 ADR-0018 (fleet manifest), ADR-0020 (storage), ADR-0024 (thinking attribution),
-ADR-0025 (control daemon), ADR-0026 (sessions).
+ADR-0025 (control daemon), ADR-0026 (sessions), ADR-0027 (shared-DTO ownership).
 
 All boundary types are **pure DTOs** — plain data, no behavior, no pointers into
-another module's state, no embedded foreign types (locked-service tenet).
+another module's state, no embedded foreign types beyond other pure DTOs
+(locked-service tenet, ADR-0016; clarified by ADR-0027). Shared, owner-free DTOs
+live in one neutral package (`shared`/`dto`), owned by no single module; see the
+catalog below.
+
+## 0. Shared DTO catalog (owner-free, ADR-0027)
+
+The following types cross one or more module boundaries and are **shared,
+owner-free** — defined in the neutral `shared`/`dto` package, pure (no methods,
+channels, or pointers), and imported by modules rather than owned by any one of
+them. No module may add methods to a shared DTO or define a boundary type that
+embeds a sibling module's package type.
+
+| DTO | Used across | Defined in § |
+|---|---|---|
+| `Capabilities` | Fleet (`Model`), Provider (`Target`) | 1, 2 |
+| `SamplingParams` | Provider, Fleet (`Resolution.EffectiveParams`), `Mode` | 1, 2, 8 |
+| `ContextBudget` | `Mode` | 8 |
+| `Model` | Fleet | 1 |
+| `Target` | Provider | 2 |
+| `Resolution`, `LiveState` | Fleet | 1 |
+| `Chunk` | Retriever, Chunker, Assembler | 3, 4, 5 |
+| `Message` | Session store, Assembler, `Payload` | 5, 10 |
+| `JSONSchema` | `ToolDef`, `AssemblerInput` | 5, 8 |
+| `Document` | Document store, Chunker | 4, 9 |
+| `Block`, `BlockEdit`, `Revision`, `Candidate`, `WordEdit` | Document store | 9 |
+| `Event`, `RawEvent` | EventBus, Provider | 2, 11 |
+| `ToolDef` | Tool registry | 8 |
+| `Session` | Session store | 10 |
+| `Payload`, `Breakdown` | Context assembler | 5 |
+| `ProviderCounts`, `AttributedBreakdown` | Token metering | 6 |
 
 ## 1. Fleet gateway (Go)
 
@@ -92,7 +122,10 @@ type Completion struct {
 
 type RawEvent struct {           // unframed, un-attributed
     Type string                  // "token" | "done" | "error"
-    Data json.RawMessage
+    Data json.RawMessage         // payload shapes per ADR-0016 §2:
+                                 //   token → {"text": "…"}
+                                 //   done  → {"inputTokens": n, "outputTokens": n}
+                                 //   error → {"code": "…", "message": "…"}
 }
 
 type ProviderGateway interface {

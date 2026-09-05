@@ -2,7 +2,7 @@
 
 Status: Accepted
 
-Supersedes: ADR-0014 (sidecar spawn mechanics), touches §11 risk #1 and #5.
+Supersedes: ADR-0014 (sidecar spawn mechanics), touches §11 risk #5.
 
 ## Context
 
