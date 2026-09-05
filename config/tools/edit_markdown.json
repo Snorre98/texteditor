@@ -1,0 +1,13 @@
+{
+  "$schema": "https://texteditor.local/schemas/tool.schema.json",
+  "name": "edit_markdown",
+  "description": "Replace the content of a markdown block by its stable id.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "blockId": { "type": "string" },
+      "text": { "type": "string" }
+    },
+    "required": ["blockId", "text"]
+  }
+}

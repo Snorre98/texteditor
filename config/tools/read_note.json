@@ -1,0 +1,12 @@
+{
+  "$schema": "https://texteditor.local/schemas/tool.schema.json",
+  "name": "read_note",
+  "description": "Read a note from the user's vault by path or title.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "query": { "type": "string" }
+    },
+    "required": ["query"]
+  }
+}

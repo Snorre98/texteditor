@@ -1,0 +1,23 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://texteditor.local/schemas/tool.schema.json",
+  "title": "Tool",
+  "description": "A tool definition + its prompt-spliced function schema (ADR-0019).",
+  "type": "object",
+  "required": ["name", "description", "parameters"],
+  "additionalProperties": false,
+  "properties": {
+    "name": {
+      "type": "string",
+      "description": "Unique; the executor's handler key."
+    },
+    "description": {
+      "type": "string",
+      "description": "Goes into the prompt."
+    },
+    "parameters": {
+      "type": "object",
+      "description": "The prompt-spliced OpenAI-function schema; its size is metered."
+    }
+  }
+}

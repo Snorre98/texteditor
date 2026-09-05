@@ -1,0 +1,13 @@
+{
+  "$schema": "https://texteditor.local/schemas/tool.schema.json",
+  "name": "diff",
+  "description": "Show the word-level diff between two revisions of a document.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "baseRev": { "type": "string" },
+      "rev": { "type": "string" }
+    },
+    "required": ["baseRev", "rev"]
+  }
+}

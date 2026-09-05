@@ -1,0 +1,12 @@
+{
+  "$schema": "https://texteditor.local/schemas/tool.schema.json",
+  "name": "retrieve",
+  "description": "Retrieve a passage from the user's notes or ingested literature by citation.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "query": { "type": "string" }
+    },
+    "required": ["query"]
+  }
+}

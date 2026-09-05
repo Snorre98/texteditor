@@ -1,0 +1,14 @@
+{
+  "$schema": "https://texteditor.local/schemas/mode.schema.json",
+  "name": "proofreader",
+  "systemPrompt": "You are a careful academic proofreader. Correct grammar, spelling, and clarity without changing meaning or voice. Preserve citations and factual claims. Do not add or remove sources.",
+  "defaultModel": "gemma4-12b",
+  "toolAllowlist": ["edit_markdown", "retrieve", "read_note", "diff"],
+  "params": { "temperature": 0.3, "maxTokens": 2048 },
+  "contextBudget": { "maxHistoryTokens": 32000, "maxRagTokens": 16000 },
+  "maxSteps": 4,
+  "agentic": false,
+  "kind": "model",
+  "preamble": "Use only sources provided. If unsure, write '[citation needed]'. APA 7 or Chicago author-date, as specified.",
+  "toolCalling": "native"
+}

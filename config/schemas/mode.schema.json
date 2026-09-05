@@ -1,0 +1,66 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://texteditor.local/schemas/mode.schema.json",
+  "title": "Mode",
+  "description": "A declarative writing persona: prompt + default model + tool set + budget (ADR-0019).",
+  "type": "object",
+  "required": ["name", "systemPrompt", "defaultModel"],
+  "additionalProperties": false,
+  "properties": {
+    "name": {
+      "type": "string",
+      "description": "Unique; also the fallback modeTag."
+    },
+    "systemPrompt": {
+      "type": "string",
+      "description": "Fixed cost per turn."
+    },
+    "defaultModel": {
+      "type": "string",
+      "description": "Must resolve via the fleet manifest."
+    },
+    "toolAllowlist": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Subset of registered tool names."
+    },
+    "params": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "temperature": { "type": "number", "minimum": 0, "maximum": 2 },
+        "maxTokens": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "contextBudget": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxHistoryTokens": { "type": "integer", "minimum": 0 },
+        "maxRagTokens": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "maxSteps": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Per-mode bound on dispatch/observe."
+    },
+    "agentic": {
+      "type": "boolean",
+      "description": "Multi-turn tool loop vs single-shot pass."
+    },
+    "kind": {
+      "type": "string",
+      "enum": ["model", "assistant"]
+    },
+    "preamble": {
+      "type": "string",
+      "description": "Spliced before systemPrompt (e.g. citation line)."
+    },
+    "toolCalling": {
+      "type": "string",
+      "enum": ["native", "router"],
+      "default": "native"
+    }
+  }
+}

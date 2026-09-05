@@ -1,0 +1,14 @@
+# Binaries
+/engine
+/cmd/engine/engine
+
+# Editor/OS
+.DS_Store
+
+# SQLite runtime files
+*.db
+*.db-wal
+*.db-shm
+
+# Engine runtime data (git history worktree, etc.)
+/var/

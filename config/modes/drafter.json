@@ -1,0 +1,14 @@
+{
+  "$schema": "https://texteditor.local/schemas/mode.schema.json",
+  "name": "drafter",
+  "systemPrompt": "You are an academic drafter. Write prose from the sources provided only. Never invent a citation, statistic, or quote; if unsupported, write '[citation needed]'.",
+  "defaultModel": "mistral-24b",
+  "toolAllowlist": ["retrieve", "read_note"],
+  "params": { "temperature": 0.5, "maxTokens": 4096 },
+  "contextBudget": { "maxHistoryTokens": 48000, "maxRagTokens": 32000 },
+  "maxSteps": 8,
+  "agentic": true,
+  "kind": "model",
+  "preamble": "Use only sources provided. If unsure, write '[citation needed]'. APA 7 or Chicago author-date, as specified.",
+  "toolCalling": "native"
+}

@@ -1,0 +1,67 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://texteditor.local/schemas/fleet-manifest.schema.json",
+  "title": "FleetManifest",
+  "description": "Two-tier fleet manifest: daemons (lifecycle units) + models (resolve/provision units). Read only by the control daemon (ADR-0025/0027).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["$schema", "daemons", "models"],
+  "properties": {
+    "$schema": { "type": "string", "format": "uri" },
+    "daemons": { "type": "array", "items": { "$ref": "#/definitions/Daemon" } },
+    "models": { "type": "array", "items": { "$ref": "#/definitions/Model" } }
+  },
+  "definitions": {
+    "Daemon": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "runner", "host", "port"],
+      "properties": {
+        "name": { "type": "string" },
+        "runner": { "type": "string", "enum": ["llama.cpp", "mlx-lm", "mlx-vlm", "delegate"] },
+        "delegate": { "type": "string", "description": "Wrapper script name, if runner == delegate." },
+        "host": { "type": "string", "default": "127.0.0.1" },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 }
+      }
+    },
+    "Model": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "daemon", "source", "capabilities"],
+      "properties": {
+        "name": { "type": "string" },
+        "daemon": { "type": "string" },
+        "source": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind"],
+          "properties": {
+            "kind": { "type": "string", "enum": ["hf", "gguf", "needle"] },
+            "repo": { "type": "string", "description": "HF repo id, if kind == hf." },
+            "file": { "type": "string", "description": "Filename under models/gguf/, if kind == gguf." },
+            "fingerprint": { "type": "string", "description": "Tool-set hash the .cact was fine-tuned against, if kind == needle." }
+          }
+        },
+        "capabilities": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["contextLength", "thinkingMode", "supportsSystemPrompt"],
+          "properties": {
+            "contextLength": { "type": "integer", "minimum": 1 },
+            "thinkingMode": { "type": "boolean" },
+            "supportsSystemPrompt": { "type": "boolean" }
+          }
+        },
+        "defaults": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "temperature": { "type": "number", "minimum": 0, "maximum": 2.0 },
+            "maxTokens": { "type": "integer", "minimum": 1 }
+          }
+        },
+        "modeTags": { "type": "array", "items": { "type": "string" } }
+      }
+    }
+  }
+}

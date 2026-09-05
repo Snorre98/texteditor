@@ -1,0 +1,13 @@
+{
+  "name": "grammar",
+  "systemPrompt": "You are a focused grammar checker. Report and fix only grammar, punctuation, and typography. Do not rephrase for style.",
+  "defaultModel": "llama3.1-8b",
+  "toolAllowlist": ["edit_markdown"],
+  "params": { "temperature": 0.3, "maxTokens": 2048 },
+  "contextBudget": { "maxHistoryTokens": 16000, "maxRagTokens": 0 },
+  "maxSteps": 0,
+  "agentic": false,
+  "kind": "model",
+  "preamble": "",
+  "toolCalling": "native"
+}
