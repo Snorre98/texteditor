@@ -33,6 +33,8 @@ embeds a sibling module's package type.
 | `Block`, `BlockEdit`, `Revision`, `Candidate`, `WordEdit` | Document store | 9 |
 | `Event`, `RawEvent` | EventBus, Provider | 2, 11 |
 | `ToolDef` | Tool registry | 8 |
+| `BlockKind`, `TextFormatterIssue` | `TextFormatter` | 4b |
+| `Guard` | Document store (`BlockEdit`) | 9 |
 | `Session` | Session store | 10 |
 | `Payload`, `Breakdown` | Context assembler | 5 |
 | `ProviderCounts`, `AttributedBreakdown` | Token metering | 6 |
@@ -169,6 +171,33 @@ type Chunker interface {
 ```
 
 Pure/deterministic; chunk size is a data tunable (the RAG token lever, ADR-0020).
+
+## 4b. TextFormatter (Go, pure leaf)
+
+Owns formatting — the model never reproduces bytes (ADR-0029). Pure and
+deterministic; the style is hardcoded code, not data.
+
+```go
+type BlockKind string // paragraph | heading | list_item | code_fence | blockquote | table
+
+type TextFormatterIssue struct {
+    Line    int
+    Message string
+}
+
+type TextFormatter interface {
+    Normalize(kind BlockKind, text string) (canonical string, changes []string) // semantic-preserving whitespace
+    Validate(kind BlockKind, text string) []TextFormatterIssue                   // structural integrity
+    Format(kind BlockKind, text string) (formatted string, changes []string)     // opinionated style
+}
+```
+
+- `Normalize` — canonical indentation, list markers, table pipe alignment, line
+  endings, trailing whitespace. Run on every `ApplyEdit`.
+- `Validate` — structural checks (table column counts, balanced fences, list depth).
+  Run pre-flight by the edit-tool handler.
+- `Format` — the hardcoded opinionated style. Run on `Commit` (accept) and
+  autosave. `Normalize` is a strict subset of `Format`.
 
 ## 5. Context assembler (Go, pure leaf)
 
@@ -341,6 +370,11 @@ labeled error the loop maps to `answering`. The loop routes `result.Usage` to
 type BlockEdit struct {
     BlockID string
     Text    string
+    Guards  []Guard // optional block-level context guards (ADR-0029)
+}
+type Guard struct {
+    BlockID string // a sibling/context block the edit relies on
+    Hash    string // short hash of its canonical content
 }
 type Revision struct { ID, Message string; Timestamp int64 }
 type Candidate struct {
@@ -361,6 +395,21 @@ type DocumentStore interface {
     Candidates(documentID string, blockID string) ([]Candidate, error)
 }
 ```
+
+`Block` gains a `Hash` field — the hash of its canonical content, surfaced in the
+edit read path (`{blockID, kind, content, hash}`) so the model can echo it as a
+guard.
+
+Edit semantics (ADR-0029):
+
+- `ApplyEdit` **normalizes** `edit.Text` to canonical form and **verifies
+  `edit.Guards` atomically** before staging. A guard whose `Hash` no longer matches
+  the block's current canonical content fails with a typed `guard-failed` error
+  naming the changed blocks. A successful stage returns the candidate's `Revision`.
+- `Commit` and `Save` **format** the accepted/edited blocks to the opinionated
+  style before persisting.
+- **Canonical-content invariant:** blocks are always stored canonical; therefore
+  content hashes are stable per revision.
 
 Commit cadence and block identity are ADR-0020 (two paths: AI edit == commit; manual
 edit == autosave snapshot; block IDs == stable UUIDs).

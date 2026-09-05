@@ -47,8 +47,8 @@ built in Track 1, its *enablement* is deferred (see Plan D).
 
 | Layer | Modules / artifacts | ADR |
 |---|---|---|
-| 1 — Data | shared DTO package (`shared`/`dto`); SQLite schemas `app.db`/`index.db`/`meter.db`/`sessions.db`; git repo; `config/modes`, `config/tools` data files + schemas; fleet manifest (two-tier) schema + lanes loader | 0027, 0016, 0004, 0020, 0019, 0018, 0026 |
-| 2 — Repository | Document store; Session store; Mode registry; Tool registry + Tool executor; Chunker; Retriever | 0016 §4–§10, 0020, 0019, 0004, 0026 |
+| 1 — Data | shared DTO package (`shared`/`dto`); SQLite schemas `app.db`/`index.db`/`meter.db`/`sessions.db`; git repo; `config/modes`, `config/tools` data files + schemas; fleet manifest (two-tier) schema + lanes loader | 0027, 0016, 0004, 0020, 0019, 0018, 0026, 0029, 0030 |
+| 2 — Repository | Document store; Session store; Mode registry; Tool registry + Tool executor; Chunker; TextFormatter; Retriever | 0016 §4–§10, 0020, 0019, 0004, 0026, 0029 |
 | 3 — Service | Provider gateway; Context assembler; Token metering; Fleet gateway; Agent loop; ToolDecider (optional, ADR-0028) | 0016 §1–§3/§6–§7, 0005, 0011, 0024, 0022, 0018, 0025, 0015, 0007, 0028 |
 | 4 — Public module API | Sealed Go interfaces + pure DTOs locked (`contracts/interface.md`); 100% stub boundary tests | 0016, 0027, 0001 (R1–R6), 0022 (Q5) |
 | 5 — Controller | SSE event bus; API server (OpenAPI routes) | 0016 §11–§12, 0012, 0017, 0003 |
@@ -72,7 +72,9 @@ Build with zero logic; only formats and schemas.
    `Resolution`, `LiveState`, `Chunk`, `Message`, `JSONSchema`, `Document`,
    `Block`, `BlockEdit`, `Revision`, `Candidate`, `WordEdit`, `Event`,
    `RawEvent`, `ToolDef`, `Session`, `Payload`, `Breakdown`, `ProviderCounts`,
-   `AttributedBreakdown` — plus the router DTOs `Decision`, `RouterContext`,
+   `AttributedBreakdown` — plus the edit-verification DTOs `BlockKind`,
+   `TextFormatterIssue`, `Guard` (`Block` gains `Hash`, `BlockEdit` gains
+   `Guards`) (ADR-0029 §2/§4), and the router DTOs `Decision`, `RouterContext`,
    `RouterUsage`, `RouterResult` (ADR-0028 §1; additive, only used when the
    router is enabled).
 2. SQLite schemas + migrations per `contracts/data-model.md` §1:
@@ -95,7 +97,9 @@ Each store/registry built standalone, exposed only through its interface.
 
 1. **Document store** — ADR-0016 §9 + ADR-0020 (commit cadence, worktree, UUID
    block IDs, candidate side-table, `ApplyEdit`/`Commit`/`Diff`/`History`/
-   `Candidates`).
+   `Candidates`) + ADR-0029 (normalize on `ApplyEdit`, verify `BlockEdit.Guards`
+   atomically, format on `Commit`/`Save`; `guard-failed`/`invalid-structure`
+   typed errors).
 2. **Session store** — ADR-0016 §10 + ADR-0026 §2 (`ListByDocument`/`Create`/
    `Resume`/`Append`/`History`).
 3. **Mode registry** — ADR-0016 §4 + ADR-0019 §2 (fail-fast validation, typed
@@ -105,7 +109,9 @@ Each store/registry built standalone, exposed only through its interface.
    handler map, `tool-has-no-handler`). Add the reserved-name guard for
    `request_tool` now (reject any real tool by that name) — ADR-0028 §2.
 5. **Chunker** — ADR-0020 §5 (pure leaf, `Chunk(document Document, maxTokens)`).
-6. **Retriever** — ADR-0016 §8 + ADR-0004 §3. Its embed path depends on the
+6. **TextFormatter** — ADR-0029 §2 (pure leaf, `Normalize`/`Validate`/`Format`;
+   hardcoded opinionated style, per block kind).
+7. **Retriever** — ADR-0016 §8 + ADR-0004 §3. Its embed path depends on the
    `Provider.Embed` / `Fleet.Resolve` *interfaces*; build against stubs here,
    wire in A3.
 
@@ -145,11 +151,15 @@ must complete before A3.4 starts.
 1. Fleet manifest data (`models.json`, two-tier) + shared semantic lanes loader —
    ADR-0018 §1/§4 (daemon-owned reader, ADR-0027). Seed `capabilities`/`defaults`/
    `modeTags` per the fleet policy (MoE over dense, 14B+ citation floor,
-   temperature sheet) — ADR-0015 §1–§3.
+   temperature sheet) — ADR-0015 §1–§3. The `runner` enum is `llama.cpp | mlx-lm |
+   mlx-vlm | delegate` only (no `ollama`/`lmstudio`), every runner on the Metal GPU
+   backend — ADR-0030 §1–§2.
 2. **Provisioning** — the `provision` verb resolves the manifest `source` and
    downloads via the HF API; enforce the lanes rule (one runner per model) and the
    archive policy (full-precision safetensors archived; run-quants re-pullable);
-   dedup via APFS hardlinks — ADR-0008 §1–§4, ADR-0018 §5.
+   dedup via APFS hardlinks — ADR-0008 §1–§4, ADR-0018 §5. `source.kind` is
+   `hf | gguf | needle` only (direct MLX/GGUF quants; no `ollama`/`lmstudio`
+   import) — ADR-0030 §3.
 3. `serve.sh` lifecycle executor (verb contract; receives the parsed manifest
    from the daemon, no `jq` parse) — ADR-0007, ADR-0018 §2, ADR-0025/0027.
 4. Control daemon (HTTP transport over the verb contract, sole manifest reader) —
@@ -239,13 +249,15 @@ phase lands:
 | Q4 — edit integrity | diff ≤ 100 ms; revert isolates blocks | ADR-0022 Q4, `versioning.feature` |
 | Q5 — testability | 100% public ops stub-tested (in A4) | ADR-0022 Q5, `client-swap.feature` |
 | Router | `tool-routing.feature` scenarios (native passthrough, refusal→answering, startup gates, separate meter row) | ADR-0028, `tool-routing.feature` |
+| Edit verification | `edit-integrity.feature` (whole-block replace, guard-failed→re-read, invalid-structure→retry, format on accept/save) | ADR-0029, `edit-integrity.feature` |
 | Sessions | `sessions.feature` (per-session concurrency + budget) | ADR-0026 |
 
 **Failure semantics** (`contracts/failure-semantics.md`) are verified alongside
 the owning module: retry/backoff + `provider-unreachable` (Provider, A3.1),
 `provision-required`/`no-model-available`/`daemon-unreachable` (Fleet, A3.4),
 `lanes-conflict`/`start-timeout`/`port-in-use` (serving, Plan B),
-`tool-has-no-handler` (A2.4), `session-budget-exceeded` (Meter, A3.3 + ADR-0026).
+`tool-has-no-handler` (A2.4), `session-budget-exceeded` (Meter, A3.3 + ADR-0026),
+`guard-failed`/`invalid-structure` (Document store, A2.1 + ADR-0029).
 
 ---
 
@@ -253,8 +265,9 @@ the owning module: retry/backoff + `provider-unreachable` (Provider, A3.1),
 
 - **Standalone + boundary-test every module** before advancing (R5, ADR-0001;
   Q5 100% stub coverage, ADR-0022).
-- **Pure leaves first, determinism enforced**: Chunker, Context assembler,
-  Provider, Mode/Tool registries, Session store (R4, ADR-0001; ADR-0016).
+- **Pure leaves first, determinism enforced**: Chunker, TextFormatter, Context
+  assembler, Provider, Mode/Tool registries, Session store (R4, ADR-0001;
+  ADR-0016, ADR-0029).
 - **Serving is only reached via Fleet → daemon**; the engine never reads
   `models.json` or calls `serve.sh` directly (ADR-0025, ADR-0027).
 - **Contract-first for clients**: the OpenAPI spec (ADR-0017) is finalized in A5

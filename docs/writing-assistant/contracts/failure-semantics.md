@@ -47,6 +47,11 @@ Retries are **bounded (≤3)**; every failure is recorded in `meter_events`/logs
   intent. Confident (`Confidence ≥ τ`) → dispatch. Low-confidence / refusal /
   empty-call → proceed to `answering` (graceful, not an error). Transport failure →
   labeled `error` (`router-unreachable`) then `answering` (no retry).
+- **Edit verification (ADR-0029)** — `ApplyEdit` returns a structured, retryable
+  outcome, never a silent write. `guard-failed` (a guarded sibling's canonical
+  content no longer matches the echoed hash) → the loop re-reads the block and the
+  model re-attempts. `invalid-structure` (a table/fence/list fails `TextFormatter.Validate`)
+  → the model retries with the specific issue list. Both are bounded by `maxSteps`.
 
 ## 4. Attribution and the thinking-token approximation
 
@@ -74,6 +79,8 @@ Retries are **bounded (≤3)**; every failure is recorded in `meter_events`/logs
 | router mode with no served Needle | startup error, `mode-refs-router-unavailable` |
 | router fine-tuned against a different tool set | startup error, `router-tools-stale` |
 | router unreachable mid-turn | `error` event, `router-unreachable`, then graceful answer |
+| edit context changed (stale guard) | structured `guard-failed` naming the changed block; model re-reads and retries |
+| edit structurally invalid | structured `invalid-structure` with issue list; model retries informed |
 
 ## 6. Invariants
 

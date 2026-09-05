@@ -45,7 +45,8 @@ Ranked; each has a measurable, Gherkin-style scenario and links to its ADR.
 | Local-first, single machine; privacy preserved (no public hosting requirement) | architecture.md |
 | No Node/Python at runtime for the engine; single static Go binary (no CGO) | ADR-0003 |
 | Mac mini M4, 32 GB unified memory, 120 GB/s bandwidth | hardware |
-| Model serving is external over REST (Ollama / MLX-LM / MLX-VLM / llama.cpp) | ADR-0005 |
+| Model serving is external over REST (llama.cpp / MLX-LM / MLX-VLM) | ADR-0005, ADR-0030 |
+| Local runners use the Metal GPU backend; no CPU-only or CUDA path | ADR-0030 |
 | The model fleet is defined in `macos-dev-config`, not in the engine repo | ADR-0006 |
 
 ## 3. Context & Scope
@@ -58,7 +59,7 @@ flowchart LR
     U --> M[Markdown editor]
     T --> E[Writing Assistant engine]
     M --> E
-    E --> S[(Serving: Ollama / MLX / llama.cpp)]
+    E --> S[(Serving: llama.cpp / MLX, Metal)]
     E --> D[(SQLite + git)]
     E --> C[macos-dev-config: fleet manifest + control daemon + serve.sh]
     S --> W[(Model weights on SSD)]
@@ -110,7 +111,7 @@ flowchart TB
         Manifest[(fleet manifest)]
         Daemon[Control daemon]
         Exec[serve.sh executor]
-        Runners[Ollama / MLX / llama.cpp]
+        Runners[llama.cpp / MLX (Metal)]
     end
     subgraph store[Storage]
         SQLite[(SQLite: per-service files)]
@@ -145,6 +146,7 @@ flowchart TB
         Meter[Token metering]
         Ret[Retriever]
         Chunker[Chunker]
+        TextFormatter[TextFormatter]
         Sess[Session store]
         Doc[Document store]
         Bus[SSE event bus]
@@ -175,6 +177,7 @@ flowchart TB
     Ret --> Fleet
     Ret --> Prov
     Ret --> Chunker
+    Doc --> TextFormatter
     Fleet --> Daemon
     Daemon --> Manifest
     Daemon --> Exec
@@ -196,6 +199,7 @@ flowchart TB
 | Token metering | counts + attribution + persistence | `Attribute(ctx, turnID, breakdown, counts)` | scale-to-total, `meter.db` |
 | Retriever | retrieval | `Query(ctx, text, topK)`, `Index(ctx, docID)` | embedding, sqlite-vec KNN, FTS5 |
 | Chunker | chunking (pure) | `Chunk(document Document, maxTokens int)` | splitting algorithm |
+| TextFormatter | formatting (pure) | `Normalize(kind, text)`, `Validate(kind, text)`, `Format(kind, text)` | hardcoded opinionated style |
 | Document store | document + versions | `Open`, `Save`, `Blocks`, `ApplyEdit`, `Commit`, `Diff`, `History`, `Candidates` | git, block UUIDs, candidate side-table |
 | Session store | sessions + their messages (one per selection/doc) | `ListByDocument`, `Create`, `Resume`, `Append`, `History` | `sessions.db` |
 | API server | REST/SSE surface (codegen'd) | routes per OpenAPI spec | framing, turnID↔session↔client correlation |
@@ -212,7 +216,7 @@ process boundaries.
 Deferred — generated from source as it lands. Pre-defined seams/interfaces:
 `FleetGateway`, `ProviderGateway`, `Retriever`, `ContextAssembler`,
 `Chunker`, `TokenMeter`, `DocumentStore`, `SessionStore`, `EventBus`,
-`ToolDecider` (optional, ADR-0028)
+`ToolDecider` (optional, ADR-0028), `TextFormatter` (ADR-0029)
 (see `contracts/interface.md`).
 
 ## 6. Runtime View
@@ -284,7 +288,7 @@ flowchart TB
         subgraph serving[Serving]
             Manifest[(fleet manifest)]
             Exec[serve.sh]
-            Runners[Ollama / MLX / llama.cpp on local ports]
+            Runners[llama.cpp / MLX (Metal) on local ports]
         end
         SSD[(Ex-SSD: models/ + caches/)]
     end
@@ -309,6 +313,8 @@ flowchart TB
 | Versioning | git (coarse, commit-per-AI-edit + autosave) + stable UUID block IDs (fine) + candidate side-table — ADR-0004, ADR-0020 |
 | Fleet policy | MoE over dense, 14B+ citation floor, temperature sheet — ADR-0015 |
 | Tool routing | optional `ToolDecider`: writer emits `request_tool`, specialist resolves tool+args; per-mode `toolCalling` toggle; fail-fast sync gate — ADR-0028 |
+| Edit formatting | the engine owns the bytes: whole-block edits, `TextFormatter` normalize/validate/format, block-level guard, structured edit result — ADR-0029 |
+| Inference control surface | a future `InferenceControl` interface *behind* the Provider seam (a sibling of `ProviderGateway`, not a change to it); the "knobs" (logprobs, grammar, KV, speculative decoding) are decoupled from the OpenAI-compatible contract for the MVP — `research/vision-native-local-llm-text-editing.md` |
 | Deployment/security | sidecar spawn dynamic-port-default; localhost bind; Tailscale deny-by-default — ADR-0021 |
 
 ## 9. Architectural Decisions
@@ -324,7 +330,7 @@ Full records in [adr/](adr/). Index:
 | 0005 | Provider gateway: name → endpoint + capabilities | Superseded by 0016 |
 | 0006 | Fleet manifest (JSON) in macos-dev-config as source of truth | Superseded by 0018 |
 | 0007 | Serving lifecycle verbs as a defined control contract | Partially superseded by 0025 (the "no HTTP daemon" conclusion); verb contract unchanged |
-| 0008 | Model provisioning via HF API | Accepted |
+| 0008 | Model provisioning via HF API | Partially superseded by 0030 (source kinds narrowed) |
 | 0009 | Mode registry: modes as data | Superseded by 0019 |
 | 0010 | Tool registry: tools as data with JSON schemas | Superseded by 0016/0019 |
 | 0011 | Context assembler: single metered choke point | Superseded by 0016 (scale-to-total), 0022 (measurable target), 0024 (thinking tokenizer) |
@@ -334,7 +340,7 @@ Full records in [adr/](adr/). Index:
 | 0015 | Fleet sizing policy (MoE, 14B+ floor, temperature) | Accepted |
 | 0016 | Module inventory + exact public APIs, pure-DTO boundaries | Accepted |
 | 0017 | OpenAPI contract surface: endpoints, SSE, codegen (ogen/Zod/openapi-to-rust) | Accepted |
-| 0018 | Fleet manifest: two-tier + serve.sh migration + lanes + async provision | Accepted |
+| 0018 | Fleet manifest: two-tier + serve.sh migration + lanes + async provision | Partially superseded by 0030 (runner enum narrowed) |
 | 0019 | Modes/tools as data: engine-repo, fail-fast, name-keyed handler bind | Accepted |
 | 0020 | Storage: commit cadence, worktree, UUID blocks, candidates, Chunker | Accepted |
 | 0021 | Deployment + security: sidecar spawn, bind policy, Tailscale-only | Accepted |
@@ -345,6 +351,8 @@ Full records in [adr/](adr/). Index:
 | 0026 | Sessions as first-class entities (session store, per-session concurrency, budget) | Accepted |
 | 0027 | Locked-service tenet: shared-DTO ownership + stream seams; daemon sole manifest reader | Accepted |
 | 0028 | Tool decider: optional router ("writer signals, specialist decides") | Accepted |
+| 0029 | Edit verification + TextFormatter: "the engine owns the bytes" | Accepted |
+| 0030 | Fleet substrate: pure llama.cpp + MLX on Metal | Accepted |
 
 ## 10. Quality Requirements
 
@@ -382,6 +390,7 @@ Each is an SEI general scenario with a concrete response-measure (ADR-0022).
 | client-swap.feature | dumb generated clients | 0002, 0013, 0016, 0017, 0023 |
 | sessions.feature | persisted sessions, per-session concurrency + budget | 0026 |
 | tool-routing.feature | writer-signals-router-decides, per-mode toggle, fail-fast gates | 0028 |
+| edit-integrity.feature | whole-block edits, engine-owned formatting, block-level guard, structured result | 0029 |
 
 ### 10.3 Definition of done (documentation)
 
@@ -405,6 +414,8 @@ The documentation set is complete when:
 | 5 | No auth on local inference servers exposed to LAN | Low | Tailscale ACL deny-by-default + pre-bind gate (ADR-0021) |
 | 6 | Bundled per-family tokenizer (thinking fallback) adds binary size + maintenance | Low | scoped to reasoning-prefix counting, omitting-providers only (ADR-0024) |
 | 7 | The `.cact` router artifact can drift from the tool vocabulary | Medium | `router-tools-stale` startup sync gate (ADR-0028); re-`needle finetune` or switch the mode back to `native` |
+| 8 | Hardcoded formatter style may diverge from model expectations | Low | the style is fixed code, so the model trains against a stable target (ADR-0029); `Validate` catches structural drift |
+| 9 | Inference control surface (knobs) deferred | Low | decoupling model: `InferenceControl` is a future *sibling* interface behind the Provider seam, not a Provider change (vision doc); the non-native knobs (logprobs, grammar, logit-bias) arrive via a richer protocol, the native knobs (KV branching, speculative decoding) stay deferred pending in-process; do not bake OpenAI-only assumptions into the loop or assembler |
 
 ## 12. Glossary
 

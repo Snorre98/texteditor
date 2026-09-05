@@ -137,13 +137,14 @@ invoked only by the control daemon, which hands the parsed manifest to `serve.sh
 | Field | Type | Required | Notes |
 |---|---|---|---|
 | `name` | string | yes | unique; the lifecycle unit `start`/`stop` operate on |
-| `runner` | string | yes | `ollama` \| `mlx-lm` \| `mlx-vlm` \| `llama.cpp` \| `lmstudio` \| `delegate` |
+| `runner` | string | yes | `llama.cpp` \| `mlx-lm` \| `mlx-vlm` \| `delegate` |
 | `delegate` | string | if `runner`==`delegate` | wrapper script name (e.g. `serve-qwen.sh`) |
 | `host` | string | yes | default bind |
 | `port` | integer | yes | 1–65535 |
 
-A daemon is either a shared daemon (`ollama`/`lmstudio`, hosting many models) or a
-dedicated server (each mlx/llama server is itself a daemon).
+A daemon is always a **dedicated server** over a direct model file (llama.cpp or
+MLX); the shared-daemon concept (one port hosting many models) is dropped, and
+every runner must use the **Metal** GPU backend (ADR-0030).
 
 ### 2.3 `Model`
 
@@ -152,10 +153,9 @@ dedicated server (each mlx/llama server is itself a daemon).
 | `name` | string | yes | logical name, stable across runners; unique |
 | `daemon` | string | yes | → `daemons[].name` serving this model |
 | `source` | object | yes, except GUI-managed | how to obtain/run it |
-| `source.kind` | string | yes | `hf` \| `gguf` \| `ollama` \| `lmstudio` \| `needle` |
-| `source.repo` | string | if `hf` | HF repo id |
+| `source.kind` | string | yes | `hf` \| `gguf` \| `needle` |
+| `source.repo` | string | if `hf` | HF repo id (MLX quant, e.g. `mlx-community/…`) |
 | `source.file` | string | if `gguf` | filename under `models/gguf/` |
-| `source.tag` | string | if `ollama` | Ollama tag |
 | `source.fingerprint` | string | if `needle` | tool-set hash the `.cact` was fine-tuned against (ADR-0028) |
 | `capabilities.contextLength` | integer | yes | tokens |
 | `capabilities.thinkingMode` | boolean | yes | emits reasoning tokens |
@@ -169,8 +169,9 @@ dedicated server (each mlx/llama server is itself a daemon).
 - `daemons[].name` and `models[].name` are each unique.
 - `models[].daemon` references an existing `daemons[].name` (or the model is
   invalid).
-- Dedicated daemons (mlx/llama) bind a unique `port`; shared daemons (ollama/
-  lmstudio) may host many models on one port.
+- Every daemon binds a unique `port`; there are no shared daemons (ADR-0030).
+  Every local runner uses the Metal GPU backend; CPU-only/CUDA paths are not
+  supported.
 - A `modeTag` must name a mode in the Mode registry, or the manifest is invalid.
 - **Lanes rule** (semantic, enforced by the shared loader): no two models resolve
   to the same `source` (hf repo or gguf file) on **different** daemons. A conflict
@@ -213,7 +214,11 @@ Startup validation failures (typed errors): `mode-refs-unknown-model`,
 
 - Each SQLite file is owned by exactly one service; no module reads/writes
   another's file (ADR-0016). Supersedes the prior "Document store owns all SQLite."
-- Block IDs are stable UUIDs across edits (ADR-0020).
+- Block IDs are stable UUIDs across edits (ADR-0020). Content *hashes* are used
+  only as transient guard anchors, never as identity.
+- **Canonical-content invariant (ADR-0029):** block content is stored canonical —
+  normalized on `ApplyEdit`, opinionated-formatted on `Commit`/autosave — so the
+  engine owns formatting and a block's content hash is stable per revision.
 - Every `meter_events` row is attributable to exactly one `component`, and a
   `component` set `approx=1` is a labeled approximation, never silent.
 - `sessions.db` is the Session store's single-writer file; `messages.session_id`

@@ -47,6 +47,10 @@ back to the session.
   no tool loop.
 - `deciding` exists only when `mode.toolCalling == "router"`; the native path's
   `planning → dispatching` is unchanged (ADR-0028).
+- A tool result is **structured and retryable** (ADR-0029): `guard-failed` → the
+  loop re-reads the block and re-enters `dispatching`; `invalid-structure` → the
+  model retries with the issue list. Both count against `mode.maxSteps`, never
+  looping unbounded.
 - `answering` is entered exactly once per turn; after `done`/`error` the loop
   returns to `idle`.
 - One turn in flight **per session**; distinct sessions run turns concurrently

@@ -27,6 +27,7 @@ ADR-0025 (control daemon), ADR-0026 (sessions).
 | **Token metering** | counts + attribution + persistence | `Attribute(ctx, turnID, breakdown, counts) → Attributed` | scale-to-total, `meter.db` writes, thinking-token reconciliation (ADR-0024) |
 | **Retriever** | retrieval (semantic + lexical) | `Query(ctx, text, topK) → []Chunk`, `Index(ctx, documentID)` | embedding (via Fleet+Provider), sqlite-vec KNN, FTS5, rerank |
 | **Chunker** (leaf) | chunking (paragraph-aligned, size-bounded) | `Chunk(document Document, maxTokens int) → ([]Chunk, error)` | splitting algorithm |
+| **TextFormatter** (leaf) | formatting: normalize + validate + format block content | `Normalize(kind, text)`, `Validate(kind, text)`, `Format(kind, text)` | hardcoded opinionated style, structural checks |
 | **Document store** | document, blocks, version history | `Open`, `Save`, `Blocks`, `ApplyEdit`, `Commit`, `Diff`, `History`, `Candidates` | git (go-git), block-UUID minting, candidate side-table, word-diff |
 | **Session store** (leaf) | sessions + their messages | `ListByDocument`, `Create`, `Resume`, `Append`, `History` | `sessions.db` |
 | **API server** | the versioned REST/SSE surface (codegen'd) | HTTP routes + SSE endpoints per the OpenAPI spec | framing, validation, turnID↔client correlation |
@@ -75,6 +76,7 @@ flowchart LR
         Meter[Token metering]
         Retriever[Retriever]
         Chunker[Chunker]
+        TextFormatter[TextFormatter]
         Doc[Document store]
         Sess[Session store]
         Bus[SSE event bus]
@@ -109,6 +111,7 @@ flowchart LR
     Retriever --> Fleet
     Retriever --> Prov
     Retriever --> Chunker
+    Doc --> TextFormatter
     Meter --> Bus
     Fleet --> Daemon
     Daemon --> Manifest
@@ -121,13 +124,16 @@ flowchart LR
 - Every edge targets a module's **public API**, never its internals.
 - The graph is **acyclic**; direction is inward (clients → engine → serving-data).
 - Leaf modules (no out-edges) hold pure/deterministic logic: `Mode registry`,
-  `Tool registry`, `Context assembler`, `Chunker`, `Session store`,
+  `Tool registry`, `Context assembler`, `Chunker`, `TextFormatter`, `Session store`,
   `Provider gateway`, and the `Fleet manifest`.
 - The `Retriever` is **not** a leaf (depends on Fleet + Provider for the embed call
   and on the Chunker) — a deliberate consequence of ADR-0016.
 - The `Tool decider` is **not** a leaf (depends on Fleet + Provider to serve the
   router call) — a Retriever-style consequence, wired only when a mode sets
   `toolCalling: "router"` (ADR-0028).
+- The `Document store` is **not** a leaf (depends on `TextFormatter` to normalize on
+  `ApplyEdit` and format on `Commit`/`Save`) — a deliberate consequence of
+  ADR-0029.
 
 ## 3. Public API signatures
 
@@ -135,7 +141,8 @@ Precise Go signatures and pure-DTO type definitions live in
 `contracts/interface.md`:
 
 - **Fleet + Provider + Retriever + Assembler + Meter + Document store +
-  Session store + Event bus** — exact Go interface signatures (ADR-0016, ADR-0026).
+  Session store + Event bus + TextFormatter** — exact Go interface signatures
+  (ADR-0016, ADR-0026, ADR-0029).
 - **Serving lifecycle** — the verb contract (ADR-0007), now transported by the
   control daemon (ADR-0025).
 - The **fleet manifest schema** (two-tier) — `contracts/data-model.md` §2
@@ -160,4 +167,5 @@ Precise Go signatures and pure-DTO type definitions live in
   invokes `serve.sh` directly.
 - The control daemon is the sole reader of `models.json`; `serve.sh` receives the
   parsed manifest from the daemon (ADR-0027), and the engine reads neither.
-- The Provider, Context assembler, and Mode/Tool registries are all pure leaves.
+- The Provider, Context assembler, TextFormatter, and Mode/Tool registries are all pure
+  leaves.

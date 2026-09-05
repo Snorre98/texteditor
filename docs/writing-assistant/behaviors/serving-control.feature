@@ -2,10 +2,10 @@
 Feature: Serving control
   Control what LLMs are served on the machine via the fleet manifest and
   lifecycle verbs, all defined in macos-dev-config.
-  Normative per ADR-0006, ADR-0007, ADR-0008, ADR-0018, ADR-0025.
+  Normative per ADR-0006, ADR-0007, ADR-0008, ADR-0018, ADR-0025, ADR-0030.
 
   Scenario: Discover the fleet from the two-tier manifest
-    Given a valid two-tier manifest listing daemon "ollama" and model "gemma4-26b"
+    Given a valid two-tier manifest listing daemon "llama.cpp" and model "gemma4-26b"
     When the control daemon serves list
     Then the Fleet gateway receives "gemma4-26b" with endpoint, capabilities, and modeTags
     And no engine code changes when a new model is added to the manifest
@@ -40,7 +40,7 @@ Feature: Serving control
     And huggingface-cli downloaded the repo into models/huggingface
 
   Scenario: Provision honors the lanes rule
-    Given model "gemma4-26b" is assigned to daemon "ollama"
+    Given model "gemma4-26b" is assigned to daemon "llama.cpp"
     When a second model resolves to the same HF source on daemon "mlx-lm"
     Then the manifest fails validation with lanes-conflict naming both entries
 

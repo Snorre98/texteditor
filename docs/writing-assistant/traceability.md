@@ -36,6 +36,8 @@ row: ADR-0001/0016 map to it and to §2/§5.2/§8.
 | 0026 | §5.2, §8 | sessions | data-model, interface, state-machine, concurrency-topology, module-boundaries | Q1 (per-session budget), Q5 |
 | 0027 | §2, §5.2, §8 | serving-control | interface, module-boundaries | Q2 |
 | 0028 | §4, §5.2, §8 | tool-routing | module-boundaries, interface, data-model, failure-semantics, state-machine | Q1 (router metered), Q2 (per-mode toggle), Q5 |
+| 0029 | §4, §5.2, §8 | edit-integrity | module-boundaries, interface, data-model, failure-semantics, state-machine | Q4 |
+| 0030 | §2, §3.2, §4, §8 | serving-control | data-model | Q2 |
 
 ## Behavior contract ↔ quality scenario coverage
 
@@ -51,13 +53,14 @@ row: ADR-0001/0016 map to it and to §2/§5.2/§8.
 
 | Behavior contract | ADRs |
 |---|---|
-| serving-control.feature | 0006, 0007, 0008, 0018, 0025 |
+| serving-control.feature | 0006, 0007, 0008, 0018, 0025, 0030 |
 | provider-hotswap.feature | 0005, 0009, 0015, 0016, 0019 |
 | token-metering.feature | 0011, 0016, 0022, 0024 |
 | versioning.feature | 0004, 0020 |
 | client-swap.feature | 0002, 0013, 0016, 0017, 0023 |
 | sessions.feature | 0026 |
 | tool-routing.feature | 0028 |
+| edit-integrity.feature | 0029 |
 
 ## Supersession notes
 
@@ -81,6 +84,11 @@ row: ADR-0001/0016 map to it and to §2/§5.2/§8.
   the parsed manifest from the daemon, and the engine reads none).
 - ADR-0002/0016 → *clarified* (not reversed) by ADR-0027 (shared-DTO ownership;
   stream-seam carve-out; REST-first scoped to process boundaries).
+- ADR-0018 §1/§3 → superseded by ADR-0030 (runner enum narrowed to
+  `llama.cpp`/`mlx-lm`/`mlx-vlm`/`delegate`; `ollama`/`lmstudio` demoted).
+- ADR-0008 §2 → superseded by ADR-0030 (source kinds narrowed to `hf`/`gguf`/
+  `needle`; `ollama`/`lmstudio` provisioning dropped; Metal made a hard
+  constraint).
 
 Superseded ADRs remain in the log, untouched; supersession is recorded in the
 superseding ADR's header and in the §9 index.
