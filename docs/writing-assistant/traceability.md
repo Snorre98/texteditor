@@ -1,0 +1,68 @@
+# Traceability matrix
+
+Rows = ADRs. Columns = arc42 sections, behavior contracts (Gherkin), precise
+contracts, and quality scenarios. Every ADR maps to at least one arc42 section;
+every §10.2 quality scenario maps to at least one behavior contract.
+`contracts/module-boundaries.md` (base model) is a required precise-contract
+row: ADR-0001/0016 map to it and to §2/§5.2/§8.
+
+| ADR | arc42 section(s) | Behavior contract | Precise contract | Quality scenario |
+|---|---|---|---|---|
+| 0001 | §2, §5.2, §8 | — | module-boundaries | Q5 |
+| 0002 | §3, §4, §6 | client-swap | interface | — |
+| 0003 | §2, §4 | client-swap | interface | Q2 |
+| 0004 | §4, §5.2, §6, §8 | versioning | data-model, concurrency-topology | Q4 |
+| 0005 | §3.2, §4, §5.2 | provider-hotswap | interface | Q3 |
+| 0006 | §2, §3.2, §4, §8 | serving-control | data-model | Q2 |
+| 0007 | §3.2, §4, §8 | serving-control | interface, state-machine, failure-semantics | Q2 |
+| 0008 | §3.2, §8 | serving-control | data-model | — |
+| 0009 | §4, §5.2 | provider-hotswap | data-model | Q2 |
+| 0010 | §4, §5.2 | token-metering | data-model | — |
+| 0011 | §4, §5.2, §6, §8 | token-metering | interface | Q1 |
+| 0012 | §6, §8 | token-metering, client-swap | interface, concurrency-topology | — |
+| 0013 | §3, §4, §7 | client-swap | module-boundaries | — |
+| 0014 | §7 | — | — | — |
+| 0015 | §4, §8 | provider-hotswap | data-model | Q3 |
+| 0016 | §5.2, §8 | provider-hotswap, token-metering, client-swap | module-boundaries, interface, data-model, state-machine, concurrency-topology | Q1, Q3, Q5 |
+| 0017 | §3.2, §4, §6 | client-swap | interface | — |
+| 0018 | §3.2, §4, §8 | serving-control | data-model, state-machine | Q2 |
+| 0019 | §4, §5.2 | provider-hotswap, token-metering | data-model | Q2 |
+| 0020 | §4, §5.2, §8 | versioning | data-model, interface, state-machine | Q4 |
+| 0021 | §7 | — | concurrency-topology | — |
+| 0022 | §10 | token-metering, provider-hotswap, versioning | failure-semantics | Q1, Q2, Q3, Q4, Q5 |
+| 0023 | §3, §7 | client-swap | — | — |
+| 0024 | §8 | token-metering | interface, failure-semantics | Q1 |
+| 0025 | §3.2, §4, §7, §8 | serving-control | interface, module-boundaries, concurrency-topology | Q2 |
+
+## Behavior contract ↔ quality scenario coverage
+
+| §10.2 scenario | Behavior contract |
+|---|---|
+| Q1 (transparent token cost) | token-metering.feature |
+| Q2 (modifiability) | serving-control.feature, provider-hotswap.feature |
+| Q3 (hot-swappable serving) | provider-hotswap.feature |
+| Q4 (edit integrity) | versioning.feature |
+| Q5 (testability) | client-swap.feature (dumb generated clients) |
+
+## Behavior contract ↔ ADR coverage
+
+| Behavior contract | ADRs |
+|---|---|
+| serving-control.feature | 0006, 0007, 0008, 0018, 0025 |
+| provider-hotswap.feature | 0005, 0009, 0015, 0016, 0019 |
+| token-metering.feature | 0011, 0016, 0022, 0024 |
+| versioning.feature | 0004, 0020 |
+| client-swap.feature | 0002, 0013, 0016, 0017, 0023 |
+
+## Supersession notes
+
+- ADR-0005 → superseded by ADR-0016 (Resolve moves to Fleet; Provider is pure REST).
+- ADR-0006 → superseded by ADR-0018 (two-tier manifest; daemon is the sole reader).
+- ADR-0007 → superseded by ADR-0025 (daemon transports the same verb contract).
+- ADR-0009/0010 → superseded by ADR-0016/0019 (mode field set; tool registry split).
+- ADR-0011 → superseded by ADR-0016 (meter scale-to-total) and ADR-0024 (thinking fallback).
+- ADR-0013 → superseded by ADR-0023 (Solid renderer).
+- ADR-0014 → superseded by ADR-0021 (sidecar spawn mechanics).
+
+Superseded ADRs remain in the log, untouched; supersession is recorded in the
+superseding ADR's header and in the §9 index.
