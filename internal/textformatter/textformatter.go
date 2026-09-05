@@ -9,9 +9,12 @@ package textformatter
 
 import "texteditor/shared/dto"
 
-// Interface is the TextFormatter public API (interface.md §4b).
-type Interface interface {
+// TextFormatter is the TextFormatter public API (interface.md §4b).
+type TextFormatter interface {
 	Normalize(kind dto.BlockKind, text string) (canonical string, changes []string)
 	Validate(kind dto.BlockKind, text string) []dto.TextFormatterIssue
 	Format(kind dto.BlockKind, text string) (formatted string, changes []string)
 }
+
+// Interface is an alias for TextFormatter (the contracted name, interface.md §4b).
+type Interface = TextFormatter

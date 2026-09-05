@@ -10,7 +10,7 @@ import (
 type chunker struct{}
 
 // New returns the default Chunker implementation.
-func New() Interface { return chunker{} }
+func New() Chunker { return chunker{} }
 
 var ErrZeroTokens = errors.New("maxTokens must be positive")
 

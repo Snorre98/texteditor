@@ -4,10 +4,13 @@ package chunker
 
 import "texteditor/shared/dto"
 
-// Interface is the Chunker public API (interface.md §4).
-type Interface interface {
+// Chunker is the Chunker public API (interface.md §4).
+type Chunker interface {
 	// Chunk split a document block tree into []Chunk, paragraph-aligned and
 	// size-bounded by maxTokens. Chunk size is a data tunable — the RAG token
 	// lever (ADR-0020 §5).
 	Chunk(tree []dto.Block, maxTokens int) ([]dto.Chunk, error)
 }
+
+// Interface is an alias for Chunker (the contracted name, interface.md §4).
+type Interface = Chunker

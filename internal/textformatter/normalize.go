@@ -10,7 +10,7 @@ import (
 type formatter struct{}
 
 // New returns the default TextFormatter implementation.
-func New() Interface { return formatter{} }
+func New() TextFormatter { return formatter{} }
 
 var (
 	// A markdown table separator row aligns (| --- | --- |) or unaligned (|---|).

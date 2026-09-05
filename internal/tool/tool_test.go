@@ -72,3 +72,31 @@ func TestExecutorNameKeyedInvoke(t *testing.T) {
 		t.Fatalf("got %v want ErrToolNoHandler", err)
 	}
 }
+
+func TestVerifyHandlers(t *testing.T) {
+	r := NewRegistry()
+	if err := r.Register(dto.ToolDef{
+		Name: "a", Description: "a", Parameters: json.RawMessage(`{"type":"object"}`),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Register(dto.ToolDef{
+		Name: "b", Description: "b", Parameters: json.RawMessage(`{"type":"object"}`),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	e := NewExecutor()
+	e.Bind("a", func(args json.RawMessage) (json.RawMessage, error) { return nil, nil })
+
+	// "b" is registered but has no handler.
+	if err := VerifyHandlers(r, e.HandlerNames()); err == nil {
+		t.Fatal("expected tool-has-no-handler for missing 'b'")
+	}
+
+	// Bind "b" and the cross-check passes.
+	e.Bind("b", func(args json.RawMessage) (json.RawMessage, error) { return nil, nil })
+	if err := VerifyHandlers(r, e.HandlerNames()); err != nil {
+		t.Fatalf("expected clean cross-check, got %v", err)
+	}
+}

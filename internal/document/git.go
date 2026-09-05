@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/go-git/go-git/v5"
@@ -47,6 +48,82 @@ func (h *historyStore) writeFile(name string, data []byte) error {
 		return err
 	}
 	return os.WriteFile(path, data, 0o644)
+}
+
+// readFile returns the current working-tree bytes for a document file.
+func (h *historyStore) readFile(name string) (string, error) {
+	path := filepath.Join(h.worktreeDir, filepath.FromSlash(name))
+	b, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", nil
+		}
+		return "", err
+	}
+	return string(b), nil
+}
+
+// fileAt returns a file's content at a specific commit hash.
+func (h *historyStore) fileAt(name string, rev string) (string, error) {
+	hash := plumbing.NewHash(rev)
+	commit, err := h.repo.CommitObject(hash)
+	if err != nil {
+		return "", err
+	}
+	tree, err := commit.Tree()
+	if err != nil {
+		return "", err
+	}
+	f, err := tree.File(name)
+	if err != nil {
+		return "", err
+	}
+	r, err := f.Reader()
+	if err != nil {
+		return "", err
+	}
+	defer r.Close()
+	b, err := io.ReadAll(r)
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
+}
+
+// commitInfo pairs a commit hash with its metadata for History/headRev reads.
+type commitInfo struct {
+	hash string
+	msg  string
+	ts   int64
+}
+
+// log walks history newest-first along the HEAD commit chain.
+func (h *historyStore) log() ([]commitInfo, error) {
+	head, err := h.repo.Head()
+	if err != nil {
+		if err == plumbing.ErrReferenceNotFound {
+			return nil, nil // no commits yet
+		}
+		return nil, err
+	}
+	iter, err := h.repo.Log(&git.LogOptions{From: head.Hash()})
+	if err != nil {
+		return nil, err
+	}
+	defer iter.Close()
+	var out []commitInfo
+	err = iter.ForEach(func(c *object.Commit) error {
+		out = append(out, commitInfo{
+			hash: c.Hash.String(),
+			msg:  strings.TrimSpace(c.Message),
+			ts:   c.Committer.When.Unix(),
+		})
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // commit snapshots the working tree into the history as one commit.
