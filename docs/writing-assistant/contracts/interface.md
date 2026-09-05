@@ -279,14 +279,19 @@ type AttributedBreakdown struct {
 }
 
 type TokenMeter interface {
-    Attribute(ctx context.Context, turnID string, b Breakdown, counts ProviderCounts) (AttributedBreakdown, error)
+    Attribute(ctx context.Context, turnID, sessionID, model string, b Breakdown, counts ProviderCounts) (AttributedBreakdown, error)
 }
 ```
 
 `Attribute` scales the assembler's `Breakdown` onto the provider's exact totals,
-persists `meter_events`, and emits one `meter` event to the bus. Thinking-token
+persists `meter_events` rows (tagged with `sessionID` and the actually-used `model`),
+and emits one `meter` event to the bus. Thinking-token
 reconciliation is a hidden internal (ADR-0024). No `Subscribe` — fan-out is the
 bus's concern.
+
+(Amended to add `sessionID`/`model` inputs: `data-model.md` §1.3 requires both
+`meter_events.session_id` and `meter_events.model`, and ADR-0026 §5 requires
+per-session budget checks — the loop holds both and passes them in.)
 
 ## 7. Agent loop (Go)
 

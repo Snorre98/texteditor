@@ -1,6 +1,6 @@
 # ADR-0031: SSE server transport is hand-framed; ogen scope clarified
 
-Status: Proposed
+Status: Accepted
 
 Clarifies: ADR-0017 §1 (the ogen "typed streaming handlers" rationale) and §3
 ("no ogen-only extensions").
