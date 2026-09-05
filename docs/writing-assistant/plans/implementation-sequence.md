@@ -163,7 +163,9 @@ must complete before A3.4 starts.
 3. `serve.sh` lifecycle executor (verb contract; receives the parsed manifest
    from the daemon, no `jq` parse) — ADR-0007, ADR-0018 §2, ADR-0025/0027.
 4. Control daemon (HTTP transport over the verb contract, sole manifest reader) —
-   ADR-0025, ADR-0021 §3 (bind + Tailscale ACL), ADR-0027.
+   ADR-0025, ADR-0021 §3 (bind + Tailscale ACL), ADR-0027. Source is authored in
+   `texteditor` (`cmd/fleetdaemon/`); the binary is drop-shipped to
+   `macos-dev-config` — ADR-0032.
 5. Tailscale ACL entries + pre-bind gate — ADR-0021 §3.
 6. **Always-on agents** (`launchd/`) — install/load a named agent for
    reboot-persistent serving (plist templating, `launchctl` load) —

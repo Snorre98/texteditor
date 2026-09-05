@@ -354,6 +354,7 @@ Full records in [adr/](adr/). Index:
 | 0029 | Edit verification + TextFormatter: "the engine owns the bytes" | Accepted |
 | 0030 | Fleet substrate: pure llama.cpp + MLX on Metal | Accepted |
 | 0031 | SSE server transport is hand-framed; ogen scope clarified | Accepted |
+| 0032 | Control daemon authored in texteditor; lifecycle decision-gaps closed | Accepted |
 
 ## 10. Quality Requirements
 

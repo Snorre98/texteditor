@@ -38,6 +38,7 @@ row: ADR-0001/0016 map to it and to §2/§5.2/§8.
 | 0028 | §4, §5.2, §8 | tool-routing | module-boundaries, interface, data-model, failure-semantics, state-machine | Q1 (router metered), Q2 (per-mode toggle), Q5 |
 | 0029 | §4, §5.2, §8 | edit-integrity | module-boundaries, interface, data-model, failure-semantics, state-machine | Q4 |
 | 0030 | §2, §3.2, §4, §8 | serving-control | data-model | Q2 |
+| 0032 | §5.2, §7, §8 | serving-control | module-boundaries, interface | Q2 |
 
 ## Behavior contract ↔ quality scenario coverage
 
@@ -53,7 +54,7 @@ row: ADR-0001/0016 map to it and to §2/§5.2/§8.
 
 | Behavior contract | ADRs |
 |---|---|
-| serving-control.feature | 0006, 0007, 0008, 0018, 0025, 0030 |
+| serving-control.feature | 0006, 0007, 0008, 0018, 0025, 0030, 0032 |
 | provider-hotswap.feature | 0005, 0009, 0015, 0016, 0019 |
 | token-metering.feature | 0011, 0016, 0022, 0024 |
 | versioning.feature | 0004, 0020 |
@@ -89,6 +90,12 @@ row: ADR-0001/0016 map to it and to §2/§5.2/§8.
 - ADR-0008 §2 → superseded by ADR-0030 (source kinds narrowed to `hf`/`gguf`/
   `needle`; `ollama`/`lmstudio` provisioning dropped; Metal made a hard
   constraint).
+- ADR-0025 §3 → *clarified* (not reversed) by ADR-0032: "lives in
+  `macos-dev-config`" means the daemon's *deployment* (a drop-shipped binary), not
+  its *source* — which is authored in `texteditor` (`cmd/fleetdaemon`). ADR-0032
+  also pins the previously-implicit serving lifecycle mechanics (serve.sh manifest
+  seam, lanes/port-enforcement home, pre-bind gate owner, ACL↔manifest projection,
+  launchd shape, and release tracking).
 
 Superseded ADRs remain in the log, untouched; supersession is recorded in the
 superseding ADR's header and in the §9 index.
