@@ -108,7 +108,7 @@ Each store/registry built standalone, exposed only through its interface.
 4. **Tool registry + Tool executor** — ADR-0016 §5 + ADR-0019 §3 (name-keyed
    handler map, `tool-has-no-handler`). Add the reserved-name guard for
    `request_tool` now (reject any real tool by that name) — ADR-0028 §2.
-5. **Chunker** — ADR-0020 §5 (pure leaf, `Chunk(document Document, maxTokens)`).
+5. **Chunker** — ADR-0020 §5 (pure leaf, `Chunk(tree []Block, maxTokens)`).
 6. **TextFormatter** — ADR-0029 §2 (pure leaf, `Normalize`/`Validate`/`Format`;
    hardcoded opinionated style, per block kind).
 7. **Retriever** — ADR-0016 §8 + ADR-0004 §3. Its embed path depends on the

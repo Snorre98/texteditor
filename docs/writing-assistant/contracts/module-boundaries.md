@@ -26,7 +26,7 @@ ADR-0025 (control daemon), ADR-0026 (sessions).
 | **Context assembler** (leaf) | the exact token payload + per-component attribution | `Assemble(ctx, in) → (Payload, Breakdown)` | prompt layout, budget truncation, attribution accounting |
 | **Token metering** | counts + attribution + persistence | `Attribute(ctx, turnID, breakdown, counts) → Attributed` | scale-to-total, `meter.db` writes, thinking-token reconciliation (ADR-0024) |
 | **Retriever** | retrieval (semantic + lexical) | `Query(ctx, text, topK) → []Chunk`, `Index(ctx, documentID)` | embedding (via Fleet+Provider), sqlite-vec KNN, FTS5, rerank |
-| **Chunker** (leaf) | chunking (paragraph-aligned, size-bounded) | `Chunk(document Document, maxTokens int) → ([]Chunk, error)` | splitting algorithm |
+| **Chunker** (leaf) | chunking (paragraph-aligned, size-bounded) | `Chunk(tree []Block, maxTokens int) → ([]Chunk, error)` | splitting algorithm |
 | **TextFormatter** (leaf) | formatting: normalize + validate + format block content | `Normalize(kind, text)`, `Validate(kind, text)`, `Format(kind, text)` | hardcoded opinionated style, structural checks |
 | **Document store** | document, blocks, version history | `Open`, `Save`, `Blocks`, `ApplyEdit`, `Commit`, `Diff`, `History`, `Candidates` | git (go-git), block-UUID minting, candidate side-table, word-diff |
 | **Session store** (leaf) | sessions + their messages | `ListByDocument`, `Create`, `Resume`, `Append`, `History` | `sessions.db` |

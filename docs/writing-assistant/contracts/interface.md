@@ -27,10 +27,11 @@ embeds a sibling module's package type.
 | `Target` | Provider | 2 |
 | `Resolution`, `LiveState` | Fleet | 1 |
 | `Chunk` | Retriever, Chunker, Assembler | 3, 4, 5 |
-| `Message` | Session store, Assembler, `Payload` | 5, 10 |
-| `JSONSchema` | `ToolDef`, `AssemblerInput` | 5, 8 |
-| `Document` | Document store, Chunker | 4, 9 |
-| `Block`, `BlockEdit`, `Revision`, `Candidate`, `WordEdit` | Document store | 9 |
+| `Message` | Session store, Assembler, `Payload` | 0b |
+| `JSONSchema` | `ToolDef`, `AssemblerInput` | 0b |
+| `Document` | Document store | 0b |
+| `Block` | Document store, Chunker | 0b |
+| `BlockEdit`, `Revision`, `Candidate`, `WordEdit` | Document store | 9 |
 | `Event`, `RawEvent` | EventBus, Provider | 2, 11 |
 | `ToolDef` | Tool registry | 8 |
 | `BlockKind`, `TextFormatterIssue` | `TextFormatter` | 4b |
@@ -38,6 +39,43 @@ embeds a sibling module's package type.
 | `Session` | Session store | 10 |
 | `Payload`, `Breakdown` | Context assembler | 5 |
 | `ProviderCounts`, `AttributedBreakdown` | Token metering | 6 |
+
+## 0b. Shared DTO definitions — the unpinned catalog types
+
+Most catalog DTOs are defined in their owning section below. Four are named
+everywhere but pinned nowhere; they are defined here (owner-free, `shared`/`dto`):
+
+```go
+// JSONSchema is an unparsed JSON Schema, spliced verbatim into the payload
+// (function/parameters schemas); its size is metered (ADR-0011, ADR-0019).
+type JSONSchema = json.RawMessage
+
+// Message is one conversation entry (role ∈ user | assistant | tool).
+type Message struct {
+    Role      string // user | assistant | tool
+    Content   string // tool messages carry the tool result (JSON) in Content
+    Timestamp int64  // unix epoch seconds
+}
+
+// Block is a Markdown block element in the document tree (ADR-0020 §3).
+type Block struct {
+    ID       string    // stable UUID, minted at creation (ADR-0020 §3)
+    ParentID *string   // nil = root level
+    Kind     BlockKind // paragraph | heading | list_item | code_fence | blockquote | table
+    Position int       // sibling order
+    Text     string    // canonical content (normalized + formatted, ADR-0029)
+    Hash     string    // hash of the canonical Text — the guard anchor (ADR-0029)
+}
+
+// Document is document metadata; the content is the block tree, read via
+// DocumentStore.Blocks (a document is a tree of blocks — ADR-0020 §3).
+type Document struct {
+    ID          string // surrogate id (UUID)
+    Path        string // absolute path; the Document store's open resolver
+    RootBlockID string // id of the root block
+    UpdatedAt   int64  // unix epoch seconds
+}
+```
 
 ## 1. Fleet gateway (Go)
 
@@ -166,7 +204,7 @@ side: it calls the Chunker then writes `index.db` (vec + FTS).
 
 ```go
 type Chunker interface {
-    Chunk(document Document, maxTokens int) ([]Chunk, error) // paragraph-aligned, size-bounded
+    Chunk(tree []Block, maxTokens int) ([]Chunk, error) // tree = the document block tree (ADR-0020 §5); paragraph-aligned, size-bounded
 }
 ```
 

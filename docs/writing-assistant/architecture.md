@@ -198,7 +198,7 @@ flowchart TB
 | Context assembler | payload + attribution (pure) | `Assemble(ctx, in) → (Payload, Breakdown)` | layout, truncation, accounting |
 | Token metering | counts + attribution + persistence | `Attribute(ctx, turnID, breakdown, counts)` | scale-to-total, `meter.db` |
 | Retriever | retrieval | `Query(ctx, text, topK)`, `Index(ctx, docID)` | embedding, sqlite-vec KNN, FTS5 |
-| Chunker | chunking (pure) | `Chunk(document Document, maxTokens int)` | splitting algorithm |
+| Chunker | chunking (pure) | `Chunk(tree []Block, maxTokens int)` | splitting algorithm |
 | TextFormatter | formatting (pure) | `Normalize(kind, text)`, `Validate(kind, text)`, `Format(kind, text)` | hardcoded opinionated style |
 | Document store | document + versions | `Open`, `Save`, `Blocks`, `ApplyEdit`, `Commit`, `Diff`, `History`, `Candidates` | git, block UUIDs, candidate side-table |
 | Session store | sessions + their messages (one per selection/doc) | `ListByDocument`, `Create`, `Resume`, `Append`, `History` | `sessions.db` |
