@@ -65,6 +65,7 @@ tools (ogen, Hey API, openapi-to-rust) consume the same spec.
 | GET | `/documents/{id}/history` | DocumentStore.History | revisions |
 | GET | `/documents/{id}/diff` | DocumentStore.Diff | word edits |
 | GET | `/documents/{id}/blocks/{bid}/candidates` | DocumentStore.Candidates | |
+| PUT | `/documents/{id}/tree` | DocumentStore.SaveTree | manual autosave snapshot (ADR-0038) |
 | POST | `/turn` → **SSE** | Loop.Run | the core interaction; returns turnID |
 | GET | `/sessions` | SessionStore.ListByDocument (per document) | supersedes `/conversations` (ADR-0026) |
 | POST | `/sessions` | SessionStore.Create | create-or-resume a session |
@@ -78,6 +79,12 @@ tools (ogen, Hey API, openapi-to-rust) consume the same spec.
 (→ `Workspace.List`, one-level listing) and ADR-0036 adds `Task.mentions` and
 the `mentions` meter component. The spec amendments land in `api/openapi.yaml`
 at implementation, in lockstep with codegen regeneration.
+
+*Amendment (Track 2 — recorded):* ADR-0038 adds `PUT /documents/{id}/tree`
+(→ `DocumentStore.SaveTree`) — the manual-edit autosave route, with the
+`SaveTreeRequest`/`BlockWrite` schemas. Recorded contract amendment; the spec
+change lands in `api/openapi.yaml` at implementation in lockstep with the three
+codegens.
 
 ### 5. Lifecycle verbs project as resource-oriented routes
 

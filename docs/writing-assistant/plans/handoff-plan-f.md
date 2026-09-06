@@ -55,8 +55,12 @@ phase table; this handoff expands the F-side of it.
 7. F7 transport = **(a) direct HTTP from the webview** (ADR-0037); the Rust
    generated client's shipped role is `/health` discovery only; the TS client is
    regenerated Hey API + Zod; per-session state is keyed by `sessionId`.
+8. F8 manual-edit wire path = **`PUT /documents/{id}/tree`** (ADR-0038), a
+   whole-tree snapshot with a dedicated `BlockWrite` schema (`id?` absent = engine
+   mints); sync commit-on-receipt, client holds the silence timer; manual save of a
+   block drops its open candidates.
 
-## Still open (explicit list; do not silently choose)
+## Remaining work (both open decisions recorded — F7 transport, F8 manual-edit route)
 
 ### F7 · Vue state over the generated client (ADR-0023, ADR-0013 §2)
 
@@ -106,18 +110,19 @@ keyed by `sessionId`).
 3. **Manual-edit cadence** — human keystrokes batch into an autosave snapshot on a
    silence interval (10 s / N min), distinct from AI-edit commits (ADR-0020 §1).
 
-   **⚠️ Contract question — the manual-edit wire path is not in the spec.** The
-   engine surface has `POST /documents/{id}/edits` (ApplyEdit → *candidate*, the AI
-   path per ADR-0029) and `POST /documents/{id}/commits` (accept), but **no route
-   for "here is the human-typed block text."** ADR-0020 §1 says manual edits batch
-   into an autosave commit with no accept signal, which cannot be expressed with
-   the current `BlockEdit` (it always stages a candidate). Decide before building:
-   (i) manual edits ride `ApplyEdit` + an engine-side autosave `Commit` (treat the
-   human as another editor; requires the engine to distinguish manual from AI
-   edits — a flag or route), or (ii) add a contract route (e.g. `PUT /documents/{id}/blocks/{bid}`
-   or a "save snapshot" verb) — a **recorded contract amendment** with `go generate`
-   + `bun run gen` + `openapi-to-rust` regen in lockstep. **Do not silently pick;
-   this is the one place a spec change may be forced.**
+   **✅ Contract question — DECIDED: (ii) a new route** (recorded in ADR-0038).
+   `ApplyEdit` always stages a candidate (ADR-0029 §1) and cannot express ADR-0020
+   §1's "no accept" manual path, so the manual-edit wire path is a **new route**:
+   `PUT /documents/{id}/tree` (operationId `saveDocument`) — a whole-tree snapshot
+   (`SaveTreeRequest { blocks: BlockWrite[] }`, `BlockWrite { id?, kind, parentId?,
+   text }`, array order = position, no `hash`/`guards`), engine reconciles (mint/
+   drop/retype/move) + formats + commits `autosave @ ts` iff changed. Cadence: the
+   client holds the silence timer and sends one tree per interval; the engine
+   commits on receipt (synchronous `Revision`). Manual save of a block drops its
+   open candidates. This is a **recorded contract amendment**: `api/openapi.yaml` +
+   the three codegens (`go generate ./...` + `bun run gen` + `openapi-to-rust`)
+   re-run in lockstep, and ADR-0017 §4's endpoint table + `interface.md` §9's
+   `Save` signature are amended accordingly.
 4. **Session bubbles** — create-or-resume anchored to a block; re-selecting a block
    reopens its session (ADR-0026 §1–§3).
 
@@ -127,14 +132,17 @@ keyed by `sessionId`).
    over direct HTTP per ADR-0037; add the engine CORS middleware + the
    `--cors-origins`/`ENGINE_CORS_ORIGINS` knob (sidecar passes the local origins).
 2. F7 SSE decoder (hand-framed, per-type schemas) + a per-session turn slice.
-3. F8: CodeMirror 6 editor shell → selection tooltip bubbles → `@codemirror/merge`
-   candidates → the manual-edit cadence (resolving the contract question).
+3. **F8 manual-edit route is settled (ADR-0038)** — land `PUT /documents/{id}/tree`
+   in `api/openapi.yaml` + the three-codegen lockstep first, then CodeMirror 6
+   editor shell → selection tooltip bubbles → `@codemirror/merge` candidates → the
+   manual-edit cadence.
 
 ## Verification gates
 
-- `CGO_ENABLED=0 go test -count=1 ./...` stays green — **unless** the manual-edit
-  question forces a spec change (then it is a recorded amendment and the three
-  codegens re-run in lockstep).
+- `CGO_ENABLED=0 go test -count=1 ./...` stays green — **except** the manual-edit
+  route (ADR-0038) is a **recorded amendment**: `api/openapi.yaml` changes first,
+  then the three codegens re-run in lockstep (`go generate ./...` + `bun run gen` +
+  `openapi-to-rust generate`), never hand-shaped.
 - `client/tauri`: `bun run typecheck` + `bun test` green; `cargo test` +
   `cargo check --features tauri` green (no regression in the sidecar handshake).
 - Behavior: `sessions.feature` (create/resume/concurrent/persist/budget) and the
@@ -158,7 +166,8 @@ keyed by `sessionId`).
    **ADR-0020** (manual-edit cadence, commit paths), **ADR-0017 §3/§6** (Rust
    client, SSE vocabulary), **ADR-0029** (edit verification — guard-failed /
    invalid-structure shape the bubble's accept UI), **ADR-0035/0036** (workspace
-   listing + mentions for the `@`-picker).
+   listing + mentions for the `@`-picker), **ADR-0037** (CORS — F7 transport
+   enabler), **ADR-0038** (manual-edit route — F8 autosave path).
 5. `docs/writing-assistant/behaviors/*.feature` — `sessions.feature`,
    `versioning.feature`, `client-swap.feature`, `edit-integrity.feature`.
 
@@ -187,6 +196,7 @@ At each milestone: what landed, which tests pass, and any place the docs forced 
 stop or a judgment call. Specifically flag: (a) **F7 transport — resolved as (a)
 direct HTTP from the webview**, recorded in ADR-0037 + `client/tauri/README.md`;
 engine CORS is the enabler (explicit allowlist, no `*`, consumer opt-in), (b) the
-**manual-edit wire path** resolution — in particular whether a contract amendment
-was required and its exact recorded shape, and (c) how the per-session turn slice
-was keyed for concurrent bubbles (ADR-0026 §4).
+**manual-edit wire path — resolved as (ii) a new route**, recorded in ADR-0038:
+`PUT /documents/{id}/tree` whole-tree snapshot (`BlockWrite`, engine mints IDs,
+sync commit-on-receipt), a recorded contract amendment with three-codegen lockstep,
+and (c) how the per-session turn slice was keyed for concurrent bubbles (ADR-0026 §4).

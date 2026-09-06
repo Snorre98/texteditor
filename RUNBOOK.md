@@ -34,9 +34,9 @@ The editor uses **mode → default model** mappings (`server/config/modes/*.json
 
 | Mode | Default model | HF repo (source.kind `hf`) | Size | Status |
 |---|---|---|---|---|
-| `editor` / `proofreader` | `gemma4-26b-moe` | `mlx-community/gemma-4-26B-A4B-it-OptiQ-4bit` | ~19 GB | **downloading now** |
+| `editor` / `proofreader` | `gemma4-26b-moe` | `mlx-community/gemma-4-26B-A4B-it-OptiQ-4bit` | ~19 GB | **downloaded** |
 | `grammar` | `llama3.1-8b` | `mlx-community/Llama-3.1-8B-Instruct-4bit` | ~5 GB | not downloaded |
-| `drafter` | `mistral-24b` | `mlx-community/Mistral-Small-3.1-24B-Instruct-4bit` | ~14 GB | not downloaded |
+| `drafter` | `mistral-24b` | `mlx-community/Mistral-Small-3.1-Text-24B-Instruct-2503-4bit` | ~14 GB | not downloaded |
 | `drafter` (alt) | `qwen-35b-moe` | `mlx-community/Qwen3.6-35B-A3B-4bit` | ~20 GB | not downloaded |
 | `editor` (alt) | `text` | `mlx-community/Llama-3.2-3B-Instruct-4bit` | ~2 GB | already cached |
 
@@ -52,7 +52,7 @@ alternative — paragraph-level passes only (ADR-0015 "short-pass polish").
 hf auth login                                           # already logged in as Snorre98 — skip unless the token expired
 hf download mlx-community/gemma-4-26B-A4B-it-OptiQ-4bit    # editor + proofreader (Gemma 4 MoE, recommended)
 hf download mlx-community/phi-4-4bit                       # lighter 14B alt (16K ctx → paragraph-level only)
-hf download mlx-community/Mistral-Small-3.1-24B-Instruct-4bit   # drafter (best voice, recommended)
+hf download mlx-community/Mistral-Small-3.1-Text-24B-Instruct-2503-4bit   # drafter (best voice, recommended)
 hf download mlx-community/Qwen3.6-35B-A3B-4bit                  # drafter alt (max quality)
 # lighter editor fallback (already cached): hf download mlx-community/Llama-3.2-3B-Instruct-4bit
 ```
@@ -65,14 +65,13 @@ needed for run-models.
 OptiQ sensitivity-aware mixed 4-bit (246 layers @8-bit, 79 @4-bit); beats uniform
 4-bit on every benchmark. `mlx-lm` runner, port `8092`, tagged `editor` + `proofreader`.
 
-- **Memory:** ~19 GB resident + KV. On 32 GB, run **one** big model at a time —
-  don't load it alongside `qwen-27b`/`qwen-35b-moe`.
+- **Memory:** ~18 GB resident + KV (measured 17.7 GB peak at load). On 32 GB, run
+  **one** big model at a time — don't load it alongside `qwen-27b`/`qwen-35b-moe`.
 - **Tool-calling:** fixed upstream in Google's 2026-07-15 silent refresh; this
   quant (re-published 2026-07-20) ships the fixed canonical chat template. No
   known blocker for the agentic `editor` mode.
-- **mlx-lm support:** the Gemma 4 MoE text tower may not be in mlx-lm 0.31.3 — if
-  load fails, install from git:
-  `uv tool install "mlx-lm @ git+https://github.com/ml-explore/mlx-lm.git"`.
+- **mlx-lm support:** verified — loads with stock `mlx-lm` 0.31.3 (no git build
+  needed); the MoE text tower is in the PyPI release.
 - **Context:** 131072 declared (256K native); raise only if memory allows.
 
 **Option B — via the control daemon (canonical, ADR-0008):**
