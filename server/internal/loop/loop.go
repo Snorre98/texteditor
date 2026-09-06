@@ -46,6 +46,14 @@ type Emitter interface {
 	Emit(ev dto.Event)
 }
 
+// Decider is the sealed subset of the ToolDecider the loop consumes in router
+// mode (interface.md §8b). nil when no mode opts into the router — the native
+// baseline wires no ToolDecider (ADR-0028 §3).
+type Decider interface {
+	SignalTool() dto.ToolDef
+	Decide(ctx context.Context, intent string, c dto.RouterContext) (dto.RouterResult, error)
+}
+
 // Deps holds the loop's injected dependencies (the composition root wires these).
 type Deps struct {
 	Modes     mode.Interface
@@ -59,7 +67,20 @@ type Deps struct {
 	Sessions  session.Interface
 	Meter     meter.Interface
 	Bus       Emitter
+	Decider   Decider // optional: wired only when a mode sets toolCalling "router"
 }
+
+// The router-mode protocol constants (ADR-0028 §2/§7). The writer's synthetic
+// tool name, and the router serving model name (the meter row's model column).
+const (
+	requestToolName = "request_tool"
+	routerModelName = "needle-router"
+)
+
+// errRouterUnwired is the defensive guard for a composition-root wiring bug:
+// a mode requests the router but no Decider was wired. The startup gates
+// (routergate.Check) make this unreachable.
+var errRouterUnwired = errors.New("router-unavailable: mode requests router tool-calling but no ToolDecider is wired")
 
 // loop is the concrete Agent loop.
 type loop struct {
@@ -126,6 +147,24 @@ func (l *loop) runTurn(ctx context.Context, turnID string, task dto.Task) {
 
 	tools := toolsFor(l.d.Tools, m)
 
+	// Router toggle (ADR-0028 §3): when the mode opts in, the writer sees only
+	// the synthetic request_tool; the real allowlist rides along as the
+	// Decide candidate set. Native modes never consult the decider.
+	var r *route
+	if m.ToolCalling == "router" {
+		if l.d.Decider == nil {
+			l.emit(turnID, dto.Event{Type: "error", Data: errorData(errRouterUnwired)})
+			return
+		}
+		r = &route{
+			decider:   l.d.Decider,
+			allowlist: tools,
+			chunks:    chunks,
+			history:   history,
+		}
+		tools = []dto.ToolDef{l.d.Decider.SignalTool()}
+	}
+
 	payload, breakdown, err := l.d.Assembler.Assemble(ctx, dto.AssemblerInput{
 		Mode:      m,
 		ModelName: res.UsedName,
@@ -150,7 +189,7 @@ func (l *loop) runTurn(ctx context.Context, turnID string, task dto.Task) {
 		maxSteps = 0
 	}
 
-	result, err := l.runSteps(ctx, turnID, task, target, payload, tools, maxSteps)
+	result, err := l.runSteps(ctx, turnID, task, target, payload, tools, maxSteps, r)
 	if err != nil {
 		l.emit(turnID, dto.Event{Type: "error", Data: errorData(err)})
 		return
@@ -180,10 +219,22 @@ type streamResult struct {
 	counts    dto.ProviderCounts
 }
 
-// runSteps drives the native tool-calling loop. It mutates `msgs` (the assembled
+// route is the router-mode context threaded through runSteps. nil when the
+// mode is native — the native path is byte-identical to the accepted baseline.
+type route struct {
+	decider   Decider
+	allowlist []dto.ToolDef // the mode's real allowlist (the Decide candidate set)
+	chunks    []dto.Chunk
+	history   []dto.Message
+}
+
+// runSteps drives the tool-calling loop. It mutates `msgs` (the assembled
 // message list) across round-trips, threading assistant tool_calls and tool
-// results. It returns the final stream result (the answering round).
-func (l *loop) runSteps(ctx context.Context, turnID string, task dto.Task, target dto.Target, payload dto.Payload, tools []dto.ToolDef, maxSteps int) (streamResult, error) {
+// results. It returns the final stream result (the answering round). In router
+// mode (r != nil) the writer's request_tool calls are intercepted and resolved
+// through the decider (state-machine §1.2: planning → deciding → dispatch |
+// answering); native tool-calling is unchanged.
+func (l *loop) runSteps(ctx context.Context, turnID string, task dto.Task, target dto.Target, payload dto.Payload, tools []dto.ToolDef, maxSteps int, r *route) (streamResult, error) {
 	msgs := payload.Messages
 
 	steps := 0
@@ -248,6 +299,16 @@ func (l *loop) runSteps(ctx context.Context, turnID string, task dto.Task, targe
 		msgs = append(msgs, dto.Message{Role: "assistant", Content: res.text, Timestamp: nowUnix()})
 
 		for _, tc := range res.toolCalls {
+			// Router mode: the writer's single tool is the synthetic
+			// request_tool; the loop resolves it through the decider
+			// (state-machine §1.2: planning → deciding). Confident → dispatch
+			// the resolved tool; refusal / router error → a "no tool" result
+			// that drives one more bounded writer round (the answering phase).
+			if r != nil && tc.Name == requestToolName {
+				msgs = append(msgs, dto.Message{Role: "tool", Content: l.routeTool(ctx, turnID, task, tc, r), Timestamp: nowUnix()})
+				continue
+			}
+
 			rawArgs := json.RawMessage(tc.Arguments)
 			if len(rawArgs) == 0 {
 				rawArgs = json.RawMessage(`{}`)
@@ -338,6 +399,87 @@ func (l *loop) observeEdit(turnID string, task dto.Task, out json.RawMessage, to
 	}
 	// Whether ok or retryable error, pass the structured result back to the model.
 	return out
+}
+
+// routeTool implements the deciding phase (state-machine §1.2, router mode):
+// one writer request_tool → Decide → confident dispatch through the exact
+// native machinery, or a "no tool" tool result that drives one more bounded
+// writer round. The router call is metered as its own row (D4, ADR-0028 §5)
+// whether confident or refused; a Decide error emits a labeled
+// router-unreachable event and degrades to answering (failure-semantics §3 —
+// no retry loop).
+func (l *loop) routeTool(ctx context.Context, turnID string, task dto.Task, tc dto.ToolCall, r *route) string {
+	result, err := r.decider.Decide(ctx, intentOf(tc.Arguments), dto.RouterContext{
+		ToolDefs:  r.allowlist,
+		Chunks:    r.chunks,
+		Selection: task.Selection,
+		History:   r.history,
+		UserInput: task.UserInput,
+	})
+	if err != nil {
+		l.emit(turnID, dto.Event{Type: "error", Data: errorDataWithCode("router-unreachable", err)})
+		return noToolResult(err.Error())
+	}
+
+	// Second meter row (ADR-0028 §5): model=needle-router, turn-scoped, before
+	// the outcome is known — the router call already happened.
+	if result.Usage.Counts.InputTokens+result.Usage.Counts.OutputTokens > 0 {
+		if _, err := l.d.Meter.Attribute(ctx, turnID, task.SessionID, routerModelName, result.Usage.Breakdown, result.Usage.Counts); err != nil {
+			l.emit(turnID, dto.Event{Type: "error", Data: errorData(err)})
+		}
+	}
+
+	// Refusal / below τ: the decider returned the zero Decision (τ is private
+	// to it, interface.md §8b). The writer answers directly next round.
+	if result.Decision.Name == "" {
+		return noToolResult("")
+	}
+
+	// Confident: dispatch the resolved tool exactly like a native call.
+	args := injectDocumentID(result.Decision.Name, task, result.Decision.Args)
+	out, toolErr := l.d.Executor.Invoke(result.Decision.Name, args)
+	handled := l.observeTool(turnID, task, dto.ToolCall{ID: tc.ID, Name: result.Decision.Name, Arguments: string(args)}, out, toolErr)
+	switch {
+	case toolErr != nil:
+		return toolErrorMessage(result.Decision.Name, toolErr)
+	case handled != nil:
+		return string(handled)
+	default:
+		return string(outOrEmpty(out))
+	}
+}
+
+// intentOf extracts the writer's free-text intent from request_tool arguments;
+// malformed arguments fall back to the raw JSON string.
+func intentOf(arguments string) string {
+	var v struct {
+		Intent string `json:"intent"`
+	}
+	if err := json.Unmarshal([]byte(arguments), &v); err == nil && v.Intent != "" {
+		return v.Intent
+	}
+	return arguments
+}
+
+// noToolResult renders the request_tool tool result that drives the writer to
+// answer directly (interface.md §8b recorded amendment: refusal/error → one
+// bounded writer round, no extra router call). reason=="" is the graceful
+// refusal; otherwise it is the router-unreachable labeled failure.
+func noToolResult(reason string) string {
+	if reason == "" {
+		b, _ := json.Marshal(map[string]interface{}{
+			"ok":      true,
+			"tool":    nil,
+			"message": "no tool required; answer the user directly",
+		})
+		return string(b)
+	}
+	b, _ := json.Marshal(map[string]interface{}{
+		"ok":      false,
+		"error":   "router-unreachable",
+		"message": reason,
+	})
+	return string(b)
 }
 
 // emitFinal emits the terminal done event with degrade/usedModel labeling
@@ -432,6 +574,13 @@ func nowUnix() int64 {
 
 func errorData(err error) json.RawMessage {
 	b, _ := json.Marshal(map[string]string{"code": codeFor(err), "message": err.Error()})
+	return b
+}
+
+// errorDataWithCode renders an error event with an explicit code (used for the
+// router's labeled mid-turn failure, failure-semantics §5).
+func errorDataWithCode(code string, err error) json.RawMessage {
+	b, _ := json.Marshal(map[string]string{"code": code, "message": err.Error()})
 	return b
 }
 

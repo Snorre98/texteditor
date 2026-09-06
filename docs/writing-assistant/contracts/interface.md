@@ -124,6 +124,7 @@ type FleetGateway interface {
     Start(name string) error                                    // blocking: up or typed error
     Stop(name string) error
     Provision(ctx context.Context, name string) (provisionID string, err error) // async
+    Fingerprint(name string) (string, error) // list projection's fingerprint; "" when absent (ADR-0028 §4 gate)
 }
 ```
 
@@ -139,6 +140,11 @@ Semantics:
   `no-model-available`).
 - `Start` blocks only the caller's goroutine; it returns when the server is `up`
   (or a typed error: timeout / port-in-use / binary-missing / model-not-found).
+- `Fingerprint` returns the daemon `list` projection's optional `fingerprint`
+  field (populated only for `source.kind == "needle"` entries, per
+  `daemon-http.md §2`). It exists solely for ADR-0028 §4's `router-tools-stale`
+  startup gate — a recorded amendment to ADR-0016 §1, which otherwise keeps the
+  engine from learning source fields.
 - The Fleet gateway is the daemon's HTTP client (ADR-0025); it never reads the
   manifest file or invokes `serve.sh`.
 
@@ -156,9 +162,11 @@ type SamplingParams struct {
 }
 
 type Completion struct {
-    Text        string
-    InputTokens int  // raw prompt_eval_count
-    OutputTokens int // raw eval_count
+    Text         string
+    ToolCalls    []ToolCall // native tool calls when finish_reason == tool_calls
+    FinishReason string     // the response's finish_reason (stop | tool_calls | length | tool …)
+    InputTokens  int        // raw prompt_eval_count
+    OutputTokens int        // raw eval_count
 }
 
 type RawEvent struct {           // unframed, un-attributed
@@ -197,6 +205,12 @@ tools, serving model name, and merged params. This closes the earlier §2/§5 ga
 where neither `Target` nor `SamplingParams` could carry the assembled payload to
 the Provider. The Provider renders `Request` to the OpenAI-compatible wire format
 and owns nothing upstream.)
+
+(Amended at the router-seam milestone (D2–D5): `Completion` gains `ToolCalls`
+(recorded when it landed with the agentic loop) and `FinishReason` — the
+non-streaming response's `finish_reason`, carried so the `ToolDecider` can read
+the router facade's decision signal (ADR-0028 §7). Additive; existing callers
+ignore it.)
 
 ## 3. Retriever (Go interface)
 
@@ -450,6 +464,28 @@ splices into the writer's payload in router mode; it is **not** a registered too
 (or refusal/empty) is a normal result, not an error; a transport failure is a
 labeled error the loop maps to `answering`. The loop routes `result.Usage` to
 `Meter.Attribute`.
+
+(Amended at the router-seam milestone (D2–D5) with the implemented semantics,
+recording the ADR-0028 §6/§7 resolution choices:
+
+- **τ is applied inside the decider.** `Decide` returns a `Decision` with
+  `Name != ""` only when the reported confidence is ≥ τ; a refusal is the
+  zero-value `Decision` (`Name == ""`). The loop dispatches iff `Name != ""`.
+- **Confidence channel (deviation from ADR-0028 §7's "stop-reason/header"):**
+  the router facade's confident response is a non-streaming completion whose
+  `FinishReason` is `"tool"` and whose content is compact JSON
+  `{"name","args","confidence"}`; refusal/empty is an empty completion
+  (`FinishReason "stop"`). The decider parses that content — the Provider carries
+  it untouched, so no shared wire type beyond `Completion.FinishReason` (§2).
+- **Refusal → answering** is realized as: append a "no tool needed" tool-result
+  message for `request_tool`, run **one** more writer round (bounded by
+  `mode.maxSteps` like any dispatch), and treat that round's `stop` stream as the
+  answering phase (state-machine §1.2 `deciding → answering`). No error event.
+  A transport error instead emits `error`/`router-unreachable` first, then the
+  same bounded writer round — no retry loop.
+- The router call is metered as its own `Meter.Attribute` row
+  (`model = "needle-router"`) at dispatch time, whether the outcome is confident
+  or a refusal (ADR-0028 §5).)
 
 ## 9. Document store (Go)
 

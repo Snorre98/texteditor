@@ -50,7 +50,10 @@ manifest), each with the `daemon`'s host/port/runner and its
 `Fleet.ListModels()` and uses `defaults` in `Resolve`'s merge. `runner` and
 `daemon` were added by ADR-0033 §4 so consumers can do runner-specific memory
 management and target `start`/`stop`; the engine client ignores them
-(daemon-owned fields).
+(daemon-owned fields). `fingerprint` is optional: the model's
+`source.fingerprint`, projected only when `source.kind == "needle"` (the tool
+routing fine-tune artifact). It feeds the engine's `router-tools-stale` startup
+gate (ADR-0028 §4) and is absent from every other entry.
 
 ```json
 {
@@ -64,6 +67,17 @@ management and target `start`/`stop`; the engine client ignores them
       "capabilities": { "contextLength": 131072, "thinkingMode": false, "supportsSystemPrompt": true },
       "defaults": { "temperature": 0.5 },
       "modeTags": ["drafter"]
+    },
+    {
+      "name": "needle-router",
+      "runner": "delegate",
+      "daemon": "needle",
+      "host": "127.0.0.1",
+      "port": 8081,
+      "capabilities": { "contextLength": 2048, "thinkingMode": false, "supportsSystemPrompt": false },
+      "defaults": { "temperature": 0.0 },
+      "modeTags": [],
+      "fingerprint": "sha256:<tool-set hash>"
     }
   ]
 }
@@ -142,6 +156,7 @@ Base URL + a client `curl` example (read-only).
 | `Stop(name)` | `stop` | idempotent |
 | `Provision(ctx, name)` | `provision` | returns `provisionID` |
 | `Resolve(name, opts)` | `list` + `status` | merge `defaults ← mode.params ← overrides`; enforce capability gates; fold the fallback ladder (ADR-0015) — engine-side, over daemon-returned data |
+| `Fingerprint(name)` | `list` | returns the entry's `fingerprint` (empty when absent); the engine's `router-tools-stale` startup gate (ADR-0028 §4) |
 
 ### PresentationToMarkdown (its ADR-0034)
 
@@ -154,7 +169,8 @@ memory-release paths from `runner` (mlx-vlm `/unload`, ollama
 The engine never sees `runner`, `source`, or `provisioning` fields beyond what the
 contract exposes; those remain daemon-owned (ADR-0016 §1) — with the single
 ADR-0033 §4 exception that `runner`/`daemon` are exposed for consumer-side memory
-management.
+management, and the single ADR-0028 §4 exception that `fingerprint` is exposed
+for the engine's router sync gate (only for `source.kind == "needle"`).
 
 ## 4. Error-code table (`interface.md §12.1`, confirmed)
 

@@ -454,6 +454,7 @@ func parseCompletion(raw []byte) (dto.Completion, error) {
 	}
 	if len(rsp.Choices) > 0 {
 		c.Text = rsp.Choices[0].Message.Content
+		c.FinishReason = rsp.Choices[0].FinishReason
 		for _, tc := range rsp.Choices[0].Message.ToolCalls {
 			c.ToolCalls = append(c.ToolCalls, dto.ToolCall{
 				ID:        tc.ID,

@@ -29,9 +29,11 @@ import (
 	"texteditor/internal/mode"
 	"texteditor/internal/provider"
 	"texteditor/internal/retriever"
+	"texteditor/internal/routergate"
 	"texteditor/internal/session"
 	"texteditor/internal/textformatter"
 	"texteditor/internal/tool"
+	"texteditor/internal/tooldecider"
 	"texteditor/shared/dto"
 )
 
@@ -109,12 +111,16 @@ func run() error {
 		return fmt.Errorf("fleet unavailable: %w", err)
 	}
 
+	// --- Provider (one shared gateway: retriever embeds, loop streams, the
+	// router decides — stateless transport, safe to share) ---
+	providerGW := provider.New()
+
 	// --- Retriever (index.db; block source = Document store) ---
 	indexDB, err := open("index.db")
 	if err != nil {
 		return err
 	}
-	retrieverGW := retriever.New(indexDB, fleetGW, provider.New(), docStore, chunker.New(), 512)
+	retrieverGW := retriever.New(indexDB, fleetGW, providerGW, docStore, chunker.New(), 512)
 
 	// --- Tool registry + executor (ADR-0019; VerifyHandlers cross-check) ---
 	registry, toolNames, err := tool.Load()
@@ -150,6 +156,32 @@ func run() error {
 		return err
 	}
 
+	// --- Router startup gates (ADR-0028 §4, run at the composition root — the
+	// sequencing note in implementation-sequence.md; the Mode registry stays a
+	// leaf). A no-op when no mode opts into the router. ---
+	toolHash := routergate.ToolSetHash(registry.List())
+	present := map[string]bool{}
+	for _, n := range modelNames {
+		present[n] = true
+	}
+	if err := routergate.Check(modeReg.List(),
+		func(name string) bool { return present[name] },
+		fleetGW.Fingerprint,
+		toolHash,
+	); err != nil {
+		return err
+	}
+
+	// --- ToolDecider (wired only when a mode opts in — ADR-0028 §3: the native
+	// baseline wires no decider) ---
+	var deciderGW loop.Decider
+	for _, m := range modeReg.List() {
+		if m.ToolCalling == "router" {
+			deciderGW = tooldecider.New(fleetGW, providerGW)
+			break
+		}
+	}
+
 	// --- Assembler + loop ---
 	assemblerGW := assembler.New()
 	loopGW := loop.New(loop.Deps{
@@ -157,13 +189,14 @@ func run() error {
 		Tools:     registry,
 		Executor:  executor,
 		Assembler: assemblerGW,
-		Provider:  provider.New(),
+		Provider:  providerGW,
 		Fleet:     fleetGW,
 		Doc:       docStore,
 		Retriever: retrieverGW,
 		Sessions:  sessStore,
 		Meter:     meterStore,
 		Bus:       bus,
+		Decider:   deciderGW,
 	})
 
 	// --- API server ---

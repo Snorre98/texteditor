@@ -47,6 +47,11 @@ back to the session.
   no tool loop.
 - `deciding` exists only when `mode.toolCalling == "router"`; the native path's
   `planning → dispatching` is unchanged (ADR-0028).
+- `deciding → answering` (refusal / `router-unreachable`) is realized as **one
+  bounded writer round**: the loop appends a "no tool needed" tool-result message
+  for `request_tool` and the writer's next `stop` stream is the answering phase
+  (recorded amendment, ADR-0028 §6). It counts against `mode.maxSteps` like any
+  dispatch and emits no error event on refusal.
 - A tool result is **structured and retryable** (ADR-0029): `guard-failed` → the
   loop re-reads the block and re-enters `dispatching`; `invalid-structure` → the
   model retries with the issue list. Both count against `mode.maxSteps`, never

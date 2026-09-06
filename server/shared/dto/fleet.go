@@ -62,10 +62,14 @@ type Resolution struct {
 	UsedName        string // actual serving name (== fallback when Degraded)
 }
 
-// Completion is a non-streaming provider result (interface.md §2).
+// Completion is a non-streaming provider result (interface.md §2). FinishReason
+// was added at the router-seam milestone (recorded amendment, interface.md §2):
+// the ToolDecider reads the router facade's decision signal through it
+// (ADR-0028 §7). Additive; existing callers ignore it.
 type Completion struct {
 	Text         string
 	ToolCalls    []ToolCall // native tool calls when finish_reason == tool_calls
+	FinishReason string     // the response's finish_reason (stop | tool_calls | length | tool …)
 	InputTokens  int        // raw prompt_eval_count
 	OutputTokens int        // raw eval_count
 }

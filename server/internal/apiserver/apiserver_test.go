@@ -33,6 +33,7 @@ func (s stubFleet) Status(name string) (dto.LiveState, error) {
 func (s stubFleet) Start(string) error                                { return nil }
 func (s stubFleet) Stop(string) error                                 { return nil }
 func (s stubFleet) Provision(context.Context, string) (string, error) { return "p1", nil }
+func (s stubFleet) Fingerprint(string) (string, error)                { return "", nil }
 
 type stubModes struct{ modes []dto.Mode }
 

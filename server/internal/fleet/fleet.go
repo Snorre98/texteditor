@@ -32,6 +32,7 @@ type FleetGateway interface {
 	Start(name string) error
 	Stop(name string) error
 	Provision(ctx context.Context, name string) (string, error)
+	Fingerprint(name string) (string, error)
 }
 
 // Interface is an alias for FleetGateway (the contracted name, interface.md §1).
@@ -60,7 +61,8 @@ type daemonEntry struct {
 		Temperature float64 `json:"temperature"`
 		MaxTokens   int     `json:"maxTokens"`
 	} `json:"defaults"`
-	ModeTags []string `json:"modeTags"`
+	ModeTags    []string `json:"modeTags"`
+	Fingerprint string   `json:"fingerprint,omitempty"` // source.fingerprint; needle entries only (ADR-0028 §4)
 
 	state dto.LiveState // fetched per-call via the status verb
 }
@@ -213,6 +215,19 @@ func (d *daemon) Status(name string) (dto.LiveState, error) {
 		return dto.LiveUnknown, err
 	}
 	return d.statusOf(name)
+}
+
+// Fingerprint returns the daemon `list` projection's optional fingerprint for a
+// model — populated only for source.kind == "needle" entries (daemon-http.md §2,
+// recorded amendment). It exists solely for the router-tools-stale startup gate
+// (ADR-0028 §4) and is the single source-derived field the engine ever reads
+// (interface.md §1 amendment to ADR-0016 §1).
+func (d *daemon) Fingerprint(name string) (string, error) {
+	e, err := d.entryByName(name)
+	if err != nil {
+		return "", err
+	}
+	return e.Fingerprint, nil
 }
 
 // Start issues the daemon `start` verb (blocking up-or-typed-error). The daemon

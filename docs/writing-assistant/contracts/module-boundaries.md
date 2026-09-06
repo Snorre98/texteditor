@@ -16,7 +16,7 @@ ADR-0025 (control daemon), ADR-0026 (sessions).
 
 | Module | Owns (concern) | Public API (defined operations) | Hidden internals |
 |---|---|---|---|
-| **Fleet gateway** | model discovery, resolution (merge + gates + fallback), lifecycle | `ListModels()`, `Resolve(name, opts) → Resolution`, `Status(name) → LiveState`, `Start(name)` (blocking), `Stop(name)`, `Provision(ctx, name) → provisionID` | daemon HTTP client (ADR-0025), verb mapping, fallback ladder |
+| **Fleet gateway** | model discovery, resolution (merge + gates + fallback), lifecycle | `ListModels()`, `Resolve(name, opts) → Resolution`, `Status(name) → LiveState`, `Start(name)` (blocking), `Stop(name)`, `Provision(ctx, name) → provisionID`, `Fingerprint(name) → string` | daemon HTTP client (ADR-0025), verb mapping, fallback ladder |
 | **Provider gateway** (leaf) | OpenAI-compatible REST/SSE calls | `Chat(ctx, target, req)`, `Stream(ctx, target, req, emit)`, `Embed(ctx, target, text)` | retry/backoff, per-server `-np 1` serialization, framing |
 | **Agent loop** | the turn loop: task → plan → tools → observe → answer | `Run(ctx, task) → (turnID, err)` (async) | turn state machine, dispatch/observe, truncation |
 | **Mode registry** (leaf) | declarative modes (persona/model/tools/budget) | `List()`, `Get(name)` | mode file loading (go:embed), validation |

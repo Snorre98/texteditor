@@ -199,3 +199,30 @@ behind a thin OpenAI facade, resident in `macos-dev-config`:
   pattern).
 - **Always fine-tune, no sync gate** — rejected: silent staleness on tool edits (the
   failure class `failure-semantics.md` forbids).
+
+## Recorded amendments (router-seam milestone, D2–D5)
+
+The seam build recorded these implementation choices; the decision body above is
+normative except where these explicitly deviate:
+
+1. **§4 gate mechanism.** The manifest fingerprint reaches the engine through the
+   daemon's `list` projection: entries carry an optional `fingerprint` field,
+   populated only for `source.kind == "needle"` (amendment to `daemon-http.md`
+   §2, canonical in macos-dev-config, mirrored here). The engine reads it via a
+   new `FleetGateway.Fingerprint(name)` op (amendment to `interface.md` §1 —
+   the single source-derived field the engine ever reads, per this ADR's explicit
+   gate requirement). Both gates execute at the **composition root**, not inside
+   the Mode registry package (sequencing note, `implementation-sequence.md`).
+2. **§6.2 refusal realization.** `Confidence < τ` / refusal resolves as: a
+   "no tool needed" tool-result message for `request_tool`, then **one** bounded
+   writer round whose `stop` stream is the answering phase — "no extra call"
+   means no extra *router* call. No error event. A transport error emits
+   `error`/`router-unreachable` first, then the same bounded writer round.
+3. **§7 confidence channel (deviation).** The facade's confidence does not ride
+   a stop-reason/header: the Provider passes no header channel. Instead the
+   confident response is a completion with `finish_reason: "tool"` and content
+   JSON `{"name","args","confidence"}`; refusal/empty is an empty completion.
+   `dto.Completion` gains `FinishReason` (additive, `interface.md` §2 amendment).
+   The decider parses the content; τ stays private to it.
+4. **τ application.** The decider applies τ internally: `Decide` returns
+   `Decision{Name: ""}` for a refusal, a populated `Decision` when confident.

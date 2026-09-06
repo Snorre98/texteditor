@@ -188,7 +188,7 @@ flowchart TB
 
 | Component | Responsibility | Public API | Hidden internals |
 |---|---|---|---|
-| Fleet gateway | model discovery, resolution (merge + gates + fallback), lifecycle | `ListModels`, `Resolve(name, opts) → Resolution`, `Status`, `Start` (blocking), `Stop`, `Provision` (async) | daemon HTTP client, fallback ladder |
+| Fleet gateway | model discovery, resolution (merge + gates + fallback), lifecycle | `ListModels`, `Resolve(name, opts) → Resolution`, `Status`, `Start` (blocking), `Stop`, `Provision` (async), `Fingerprint` (router sync gate) | daemon HTTP client, fallback ladder |
 | Provider gateway | OpenAI-compatible REST/SSE calls | `Chat(ctx, target, params)`, `Stream(ctx, target, params, emit)`, `Embed(ctx, target, text)` | retry/backoff, `-np 1` serialization |
 | Agent loop | turn loop (thin orchestrator, session-scoped) | `Run(ctx, task) → (turnID, err)` (async) | turn state machine, dispatch/observe |
 | Mode registry | modes as data | `List`, `Get` | validation, file loading |

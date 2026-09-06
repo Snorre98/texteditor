@@ -213,17 +213,24 @@ Two parts, separated on purpose (per `research/parked-needle-router.md`):
   triggers above.
 - **D2 · `ToolDecider` service** — Retriever-style (ADR-0016 §8): resolves
   `needle-router` via Fleet, calls Provider; `SignalTool()` + `Decide(ctx, intent,
-  RouterContext)`. Not a leaf — depends on Fleet + Provider.
+  RouterContext)`. Not a leaf — depends on Fleet + Provider. **(landed)**
 - **D3 · Loop toggle + routing** — Agent loop: when `mode.toolCalling == "router"`,
   splice `SignalTool()` instead of `AllowlistFor(mode)`; intercept `request_tool`;
   call `Decide`; on `Confidence ≥ τ` dispatch `Invoke`, else the existing
   `planning → answering` transition — ADR-0028 §3/§6, `state-machine.md` §1.
+  **(landed; τ is applied inside the decider — refusal = zero Decision — and the
+  refusal/error path answers via one bounded writer round with a "no tool" tool
+  result, recorded amendment to ADR-0028 §6.2)**
 - **D4 · Second meter call** — loop calls the existing `Meter.Attribute` a second
   time with `RouterUsage`; no `meter_events` schema change — ADR-0028 §5.
+  **(landed; the router row is tagged `model=needle-router`)**
 - **D5 · Public API lock** — add the `ToolDecider` sealed interface to
   `interface.md`/`module-boundaries.md`; add edges `ToolDecider → Fleet`,
   `ToolDecider → Provider`, `Loop → ToolDecider` (conditional); boundary tests per
-  Q5 — ADR-0028 §1, ADR-0022.
+  Q5 — ADR-0028 §1, ADR-0022. **(landed: §8b/module row existed since A1–A4;
+  the seam session added `Completion.FinishReason` (interface.md §2) and
+  `FleetGateway.Fingerprint` (interface.md §1), plus Q5 boundary tests for
+  tooldecider/routergate/loop-router paths.)**
 
 ### Sequencing note (Mode-registry validation wrinkle)
 
@@ -234,6 +241,14 @@ a leaf and standalone-testable in A2, this Fleet-dependent gate is executed at t
 package. `router-tools-stale` likewise runs at startup where the manifest
 fingerprint is reachable. This is an ordering choice, not a change to the ADR's
 failure semantics.
+
+Landed (router seam, D2–D5): the manifest fingerprint reaches the composition
+root through the daemon `list` projection's optional `fingerprint` field
+(`source.kind == "needle"` only — recorded amendment to `daemon-http.md` §2,
+canonical in macos-dev-config) via the new `FleetGateway.Fingerprint(name)` op
+(recorded amendment to `interface.md` §1). Both gates live in the
+`internal/routergate` leaf, invoked by `cmd/texteditor` between the Mode registry
+and loop wiring; the engine-side tool-set hash is `routergate.ToolSetHash`.
 
 ---
 
@@ -282,5 +297,5 @@ the owning module: retry/backoff + `provider-unreachable` (Provider, A3.1),
 3. A4 → interfaces sealed, Q5 at 100%.
 4. A5 → engine headless-driveable via `curl`/generated client (ADR-0002).
 5. C6–C8 → TUI with live token meter — **proof of concept reached**.
-6. (Optional) D2–D5 → router seam built, off by default (D1 enablement deferred).
+6. D2–D5 → router seam built, off by default (D1 enablement deferred) — **landed**.
 7. → Track 2 (mandatory): see `implementation-sequence-future.md`.

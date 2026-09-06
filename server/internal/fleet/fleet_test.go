@@ -258,6 +258,39 @@ func TestListModels(t *testing.T) {
 	}
 }
 
+func TestFingerprint(t *testing.T) {
+	tf := newFakeDaemon(t)
+	tf.add(daemonEntry{
+		Name: "needle-router", Host: "127.0.0.1", Port: 8081,
+		Capabilities: dto.Capabilities{ContextLength: 2048},
+		ModeTags:     []string{},
+		Fingerprint:  "sha256:abc123",
+	})
+	s := tf.server()
+	f := NewDaemonWithClient(s.URL, s.Client())
+
+	got, err := f.Fingerprint("needle-router")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "sha256:abc123" {
+		t.Fatalf("fingerprint = %q, want sha256:abc123", got)
+	}
+
+	// A regular model has no fingerprint in the projection → empty, no error.
+	got, err = f.Fingerprint("gemma4-12b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "" {
+		t.Fatalf("fingerprint = %q, want empty for a non-needle model", got)
+	}
+
+	if _, err := f.Fingerprint("nope"); !errors.Is(err, ErrModelNotFound) {
+		t.Fatalf("want ErrModelNotFound, got %v", err)
+	}
+}
+
 func TestStartStop(t *testing.T) {
 	tf := newFakeDaemon(t)
 	tf.mu.Lock()

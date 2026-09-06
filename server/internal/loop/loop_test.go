@@ -3,10 +3,12 @@ package loop
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"sync"
 	"testing"
 	"time"
 
+	"texteditor/internal/provider"
 	"texteditor/shared/dto"
 )
 
@@ -83,6 +85,7 @@ func (s stubFleet) Status(string) (dto.LiveState, error)                    { re
 func (s stubFleet) Start(string) error                                      { return nil }
 func (s stubFleet) Stop(string) error                                       { return nil }
 func (s stubFleet) Provision(context.Context, string) (string, error)       { return "", nil }
+func (s stubFleet) Fingerprint(string) (string, error)                      { return "", nil }
 
 type stubDoc struct{}
 
@@ -423,3 +426,373 @@ func (b budgetMeter) Attribute(context.Context, string, string, string, dto.Brea
 	return dto.AttributedBreakdown{}, nil
 }
 func (b budgetMeter) SessionUsage(context.Context, string) (int, error) { return b.used, nil }
+
+// --------------------- router-mode stubs (ADR-0028) ---------------------
+
+// stubDecider implements the loop's sealed Decider subset (interface.md §8b).
+type stubDecider struct {
+	mu       sync.Mutex
+	calls    int
+	intents  []string
+	decision dto.Decision
+	err      error
+}
+
+func (s *stubDecider) SignalTool() dto.ToolDef {
+	return dto.ToolDef{
+		Name:        "request_tool",
+		Description: "Request an external action.",
+		Parameters:  json.RawMessage(`{"type":"object","properties":{"intent":{"type":"string"}},"required":["intent"]}`),
+	}
+}
+
+func (s *stubDecider) Decide(_ context.Context, intent string, _ dto.RouterContext) (dto.RouterResult, error) {
+	s.mu.Lock()
+	s.calls++
+	s.intents = append(s.intents, intent)
+	s.mu.Unlock()
+	if s.err != nil {
+		return dto.RouterResult{}, s.err
+	}
+	return dto.RouterResult{
+		Decision: s.decision,
+		Usage: dto.RouterUsage{
+			Breakdown: dto.Breakdown{SystemPrompt: 40, User: 5},
+			Counts:    dto.ProviderCounts{InputTokens: 45, OutputTokens: 10},
+		},
+	}, nil
+}
+
+// recordingMeter records the model name of every Attribute call (the router row
+// must be tagged needle-router, ADR-0028 §5).
+type recordingMeter struct {
+	mu   sync.Mutex
+	rows []string
+}
+
+func (r *recordingMeter) Attribute(_ context.Context, _, _, model string, _ dto.Breakdown, _ dto.ProviderCounts) (dto.AttributedBreakdown, error) {
+	r.mu.Lock()
+	r.rows = append(r.rows, model)
+	r.mu.Unlock()
+	return dto.AttributedBreakdown{}, nil
+}
+func (r *recordingMeter) SessionUsage(context.Context, string) (int, error) { return 0, nil }
+
+// reqProvider records every dto.Request it streams, so tests can assert the
+// spliced tool set.
+type reqProvider struct {
+	mu     sync.Mutex
+	reqs   []dto.Request
+	stream func(ctx context.Context, req dto.Request, emit func(dto.RawEvent)) error
+}
+
+func (s *reqProvider) Chat(context.Context, dto.Target, dto.Request) (dto.Completion, error) {
+	return dto.Completion{}, nil
+}
+func (s *reqProvider) Stream(ctx context.Context, t dto.Target, r dto.Request, emit func(dto.RawEvent)) error {
+	s.mu.Lock()
+	s.reqs = append(s.reqs, r)
+	s.mu.Unlock()
+	return s.stream(ctx, r, emit)
+}
+func (*reqProvider) Embed(context.Context, dto.Target, string) ([]float32, error) { return nil, nil }
+
+// requestToolRound + answerRound are the writer's two router-mode rounds.
+func requestToolRound(emit func(dto.RawEvent)) {
+	emit(dto.RawEvent{Type: "tool_call", Data: json.RawMessage(`{"id":"c1","name":"request_tool","arguments":"{\"intent\":\"rewrite block b9\"}"}`)})
+	emit(dto.RawEvent{Type: "finish", Data: json.RawMessage(`{"reason":"tool_calls"}`)})
+}
+
+func answerRound(emit func(dto.RawEvent)) {
+	emit(dto.RawEvent{Type: "token", Data: json.RawMessage(`{"text":"answered"}`)})
+	emit(dto.RawEvent{Type: "finish", Data: json.RawMessage(`{"reason":"stop"}`)})
+	emit(dto.RawEvent{Type: "done", Data: json.RawMessage(`{"inputTokens":14,"outputTokens":5}`)})
+}
+
+func routerDeps(bus *stubBus, decider Decider, prov provider.Interface) Deps {
+	deps := happyPathDeps(bus)
+	deps.Modes = stubMode{modes: map[string]dto.Mode{
+		"editor": {Name: "editor", DefaultModel: "gemma4-12b", Agentic: true, MaxSteps: 4, ToolCalling: "router"},
+	}}
+	deps.Decider = decider
+	deps.Provider = prov
+	return deps
+}
+
+// --------------------- router-mode tests (tool-routing.feature) ---------------------
+
+// TestRouterConfidentDispatch: the writer emits request_tool; Decide returns a
+// confident Decision; the loop invokes the resolved tool and meters the router
+// call as its own needle-router row (ADR-0028 §5, D4).
+func TestRouterConfidentDispatch(t *testing.T) {
+	bus := &stubBus{done: make(chan struct{})}
+	decider := &stubDecider{decision: dto.Decision{
+		Name:       "edit_markdown",
+		Args:       json.RawMessage(`{"blockId":"b9","text":"new"}`),
+		Confidence: 0.9,
+	}}
+	exec := &recordingExecutor{result: json.RawMessage(`{"ok":true,"blockId":"b9","diff":{"ok":true}}`)}
+	meter := &recordingMeter{}
+
+	round := 0
+	prov := &reqProvider{stream: func(ctx context.Context, req dto.Request, emit func(dto.RawEvent)) error {
+		round++
+		if round == 1 {
+			requestToolRound(emit)
+		} else {
+			answerRound(emit)
+		}
+		return nil
+	}}
+
+	deps := routerDeps(bus, decider, prov)
+	deps.Executor = exec
+	deps.Meter = meter
+	l := New(deps)
+
+	_, err := l.Run(context.Background(), dto.Task{
+		SessionID: "s1", ModeName: "editor", DocumentID: "d1", UserInput: "rewrite it",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitDone(t, bus)
+
+	exec.mu.Lock()
+	calls := append([]string(nil), exec.calls...)
+	exec.mu.Unlock()
+	if len(calls) != 1 || calls[0] != "edit_markdown" {
+		t.Fatalf("executor calls = %v, want [edit_markdown] (the resolved tool)", calls)
+	}
+
+	decider.mu.Lock()
+	gotIntent := append([]string(nil), decider.intents...)
+	decider.mu.Unlock()
+	if len(gotIntent) != 1 || gotIntent[0] != "rewrite block b9" {
+		t.Fatalf("intents = %v, want [rewrite block b9]", gotIntent)
+	}
+
+	meter.mu.Lock()
+	rows := append([]string(nil), meter.rows...)
+	meter.mu.Unlock()
+	if len(rows) != 2 || rows[0] != "needle-router" || rows[1] != "gemma4-12b" {
+		t.Fatalf("meter rows = %v, want [needle-router gemma4-12b] (router row + writer row)", rows)
+	}
+
+	events := busEvents(t, bus)
+	if !hasEvent(events, "candidate") || !hasEvent(events, "done") {
+		t.Fatalf("want candidate + done, got %+v", events)
+	}
+}
+
+// TestRouterRefusalAnswers: a refused/empty Decide (zero Decision) appends a
+// "no tool" result and drives one more writer round whose stream is the
+// answering phase — no error event, done still lands (state-machine §1.2).
+func TestRouterRefusalAnswers(t *testing.T) {
+	bus := &stubBus{done: make(chan struct{})}
+	decider := &stubDecider{decision: dto.Decision{}} // refusal
+	meter := &recordingMeter{}
+
+	round := 0
+	prov := &reqProvider{stream: func(ctx context.Context, req dto.Request, emit func(dto.RawEvent)) error {
+		round++
+		if round == 1 {
+			requestToolRound(emit)
+		} else {
+			answerRound(emit)
+		}
+		return nil
+	}}
+
+	deps := routerDeps(bus, decider, prov)
+	deps.Meter = meter
+	l := New(deps)
+
+	_, err := l.Run(context.Background(), dto.Task{
+		SessionID: "s1", ModeName: "editor", DocumentID: "d1", UserInput: "rewrite it",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitDone(t, bus)
+
+	events := busEvents(t, bus)
+	if !hasEvent(events, "done") {
+		t.Fatalf("want done, got %+v", events)
+	}
+	for _, ev := range events {
+		if ev.Type == "error" {
+			t.Fatalf("refusal must emit no error event, got %+v", events)
+		}
+	}
+	meter.mu.Lock()
+	defer meter.mu.Unlock()
+	if len(meter.rows) != 2 || meter.rows[0] != "needle-router" {
+		t.Fatalf("meter rows = %v, want a needle-router row even on refusal", meter.rows)
+	}
+}
+
+// TestRouterDecideErrorDegrades: a Decide transport error emits a labeled
+// router-unreachable event, then the same bounded writer round answers — no
+// retry loop (failure-semantics §3).
+func TestRouterDecideErrorDegrades(t *testing.T) {
+	bus := &stubBus{done: make(chan struct{})}
+	decider := &stubDecider{err: errors.New("needle down mid-turn")}
+
+	round := 0
+	prov := &reqProvider{stream: func(ctx context.Context, req dto.Request, emit func(dto.RawEvent)) error {
+		round++
+		if round == 1 {
+			requestToolRound(emit)
+		} else {
+			answerRound(emit)
+		}
+		return nil
+	}}
+
+	deps := routerDeps(bus, decider, prov)
+	l := New(deps)
+
+	_, err := l.Run(context.Background(), dto.Task{
+		SessionID: "s1", ModeName: "editor", DocumentID: "d1", UserInput: "rewrite it",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitDone(t, bus)
+
+	events := busEvents(t, bus)
+	var sawRouterErr bool
+	for _, ev := range events {
+		if ev.Type == "error" {
+			var v struct {
+				Code string `json:"code"`
+			}
+			_ = json.Unmarshal(ev.Data, &v)
+			if v.Code == "router-unreachable" {
+				sawRouterErr = true
+			}
+		}
+	}
+	if !sawRouterErr || !hasEvent(events, "done") {
+		t.Fatalf("want router-unreachable error + graceful done, got %+v", events)
+	}
+}
+
+// TestRouterSplicesRequestTool: in router mode the writer's payload carries
+// exactly the single synthetic request_tool, never the mode allowlist.
+func TestRouterSplicesRequestTool(t *testing.T) {
+	bus := &stubBus{done: make(chan struct{})}
+	decider := &stubDecider{decision: dto.Decision{}} // refusal; tools still asserted
+
+	round := 0
+	prov := &reqProvider{stream: func(ctx context.Context, req dto.Request, emit func(dto.RawEvent)) error {
+		round++
+		if round == 1 {
+			requestToolRound(emit)
+		} else {
+			answerRound(emit)
+		}
+		return nil
+	}}
+
+	deps := routerDeps(bus, decider, prov)
+	deps.Tools = stubTools{defs: []dto.ToolDef{
+		{Name: "edit_markdown"}, {Name: "retrieve"}, {Name: "diff"},
+	}}
+	l := New(deps)
+
+	_, err := l.Run(context.Background(), dto.Task{
+		SessionID: "s1", ModeName: "editor", DocumentID: "d1", UserInput: "hi",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitDone(t, bus)
+
+	prov.mu.Lock()
+	defer prov.mu.Unlock()
+	if len(prov.reqs) == 0 {
+		t.Fatal("provider never called")
+	}
+	tools := prov.reqs[0].Tools
+	if len(tools) != 1 || tools[0].Name != "request_tool" {
+		t.Fatalf("tools = %+v, want exactly [request_tool]", tools)
+	}
+}
+
+// TestNativeNeverConsultsDecider: a wired decider is invisible to native modes
+// (the byte-identical baseline, ADR-0028 §3).
+func TestNativeNeverConsultsDecider(t *testing.T) {
+	bus := &stubBus{done: make(chan struct{})}
+	decider := &stubDecider{decision: dto.Decision{Name: "retrieve"}}
+
+	deps := happyPathDeps(bus)
+	deps.Decider = decider
+	l := New(deps)
+
+	_, err := l.Run(context.Background(), dto.Task{
+		SessionID: "s1", ModeName: "proofreader", DocumentID: "d1", UserInput: "fix",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitDone(t, bus)
+
+	decider.mu.Lock()
+	defer decider.mu.Unlock()
+	if decider.calls != 0 {
+		t.Fatalf("decider consulted %d times in native mode, want 0", decider.calls)
+	}
+}
+
+// TestRouterUnwiredEmitsError: a router mode with no wired decider (a
+// composition-root bug the startup gates prevent) surfaces an error event
+// instead of half-running.
+func TestRouterUnwiredEmitsError(t *testing.T) {
+	bus := &stubBus{done: make(chan struct{})}
+	deps := routerDeps(bus, nil, stubProvider{stream: func(ctx context.Context, emit func(dto.RawEvent)) error {
+		return nil
+	}})
+	l := New(deps)
+
+	_, err := l.Run(context.Background(), dto.Task{
+		SessionID: "s1", ModeName: "editor", DocumentID: "d1", UserInput: "hi",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitDone(t, bus)
+
+	events := busEvents(t, bus)
+	if len(events) == 0 || events[0].Type != "error" {
+		t.Fatalf("want an error event, got %+v", events)
+	}
+}
+
+// --------------------- small test helpers ---------------------
+
+func waitDone(t *testing.T, bus *stubBus) {
+	t.Helper()
+	select {
+	case <-bus.done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("turn did not complete")
+	}
+}
+
+func busEvents(t *testing.T, bus *stubBus) []dto.Event {
+	t.Helper()
+	bus.mu.Lock()
+	defer bus.mu.Unlock()
+	return append([]dto.Event(nil), bus.events...)
+}
+
+func hasEvent(events []dto.Event, typ string) bool {
+	for _, ev := range events {
+		if ev.Type == typ {
+			return true
+		}
+	}
+	return false
+}
