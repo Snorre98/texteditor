@@ -2,7 +2,7 @@
 Feature: Token metering
   Every model call reports a per-component token breakdown, attributed from the
   provider's own counts.
-  Normative per ADR-0011, ADR-0016, ADR-0022, ADR-0024.
+  Normative per ADR-0011, ADR-0016, ADR-0022, ADR-0024, ADR-0036.
 
   Scenario: Breakdown attributes each component
     Given a turn using mode "proofreader" with 2 tools and 3 RAG chunks
@@ -15,6 +15,14 @@ Feature: Token metering
     When a fourth tool is added to the mode's allowlist
     Then the next turn's tools-component token count increases
     And the increase is visible as a live meter event
+
+  Scenario: Mentioning a file moves the meter
+    Given a turn with one mentioned file
+    When the context assembler builds the payload
+    Then the breakdown reports a non-negative mentions component
+    And the meter event carries mentions
+    And adding a second mention increases the mentions component on the next turn
+    And the component sum still equals the provider-reported prompt total
 
   Scenario: Breakdown is rendered within the Q1 response-measure
     Given the provider's usage has landed

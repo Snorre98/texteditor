@@ -51,7 +51,7 @@ tools (ogen, Hey API, openapi-to-rust) consume the same spec.
 
 | Method | Path | Backs | Notes |
 |---|---|---|---|
-| GET | `/health` | API server | liveness |
+| GET | `/health` | API server | liveness; also advertises the actual bound `baseUrl` (Track 2, ADR-0021 §1) |
 | GET | `/models` | Fleet.ListModels | + live state |
 | POST | `/models/{name}/start` | Fleet.Start | blocking; typed error on timeout/port/binary |
 | POST | `/models/{name}/stop` | Fleet.Stop | idempotent |
@@ -73,6 +73,11 @@ tools (ogen, Hey API, openapi-to-rust) consume the same spec.
 
 `POST /documents {path} → {id, blocks}` opens/creates a document and returns its
 **surrogate id**. All later routes use the opaque `id`.
+
+*Amendment (Track 1.5 — recorded):* ADR-0035 adds `GET /directories?path=`
+(→ `Workspace.List`, one-level listing) and ADR-0036 adds `Task.mentions` and
+the `mentions` meter component. The spec amendments land in `api/openapi.yaml`
+at implementation, in lockstep with codegen regeneration.
 
 ### 5. Lifecycle verbs project as resource-oriented routes
 
@@ -110,6 +115,16 @@ rewritten to the committed wire above, and the vocabulary gains `rag` (loop →
 `retrieve`/`read_note` observation) so the ADR-0013 RAG-results panel has a
 stream data source. `interface.md §11` and `api/openapi.yaml` were amended
 in lockstep.
+
+*Amendment (Track 2, E1 session — recorded):* the `Health` schema gains an
+optional `baseUrl` field — the engine's actual bound base URL — so a
+dynamic-port client can discover the engine rather than assume a port
+(ADR-0021 §1). In fixed mode it equals the configured address; in dynamic mode
+it is the OS-assigned port. `servers[0]` remains the *fixed-mode* default.
+
+*Amendment (Track 1.5 — recorded):* the meter payload gains a required
+`mentions` field — the attributed tokens of the turn's file mentions
+(ADR-0036), summing into the scaled totals like every other component.
 
 ## Consequences
 

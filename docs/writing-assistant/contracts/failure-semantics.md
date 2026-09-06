@@ -2,7 +2,8 @@
 
 How the system handles each failure class: retry + backoff, degrade rules, and
 error surfacing. Source ADRs: ADR-0005/0007/0025 (serving), ADR-0016 (attribution
-scale-to-total), ADR-0024 (thinking approximation), ADR-0002 (loop).
+scale-to-total), ADR-0024 (thinking approximation), ADR-0002 (loop),
+ADR-0035/0036 (mention resolution).
 
 ## 1. Retry policy + backoff
 
@@ -81,6 +82,11 @@ Retries are **bounded (≤3)**; every failure is recorded in `meter_events`/logs
 | router unreachable mid-turn | `error` event, `router-unreachable`, then graceful answer |
 | edit context changed (stale guard) | structured `guard-failed` naming the changed block; model re-reads and retries |
 | edit structurally invalid | structured `invalid-structure` with issue list; model retries informed |
+| mention path missing / not a regular file | `error` SSE event, code `mention-not-found`, before any streaming (ADR-0036) |
+| mention read over the byte cap | `error` SSE event, code `mention-too-large`, before any streaming (ADR-0036) |
+| mention read I/O failure | `error` SSE event, code `mention-unreadable`, before any streaming (ADR-0036) |
+| mentions over the count cap | `error` SSE event, code `too-many-mentions`, before any streaming (ADR-0036) |
+| mention content over the token budget | labeled overflow line in the breakdown; the turn proceeds without the truncated tail (ADR-0036) |
 
 ## 6. Invariants
 

@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<!-- Template for the writing-assistant engine's always-on launchd agent (Plan
+     E1, ADR-0014 §2). tools/install-daemon.sh substitutes the __…__ placeholders
+     and installs the result to ~/Library/LaunchAgents. ENGINE_BIND stays
+     127.0.0.1 (localhost is the privacy default, ADR-0021 §2); the port is fixed
+     by the install script so local clients reach the daemon without discovery.
+     The dynamic-port mode (ENGINE_PORT=0) is reserved for the Tauri sidecar,
+     whose Rust core reads the actual base URL from /health (ADR-0021 §1). -->
+<dict>
+  <key>Label</key>
+  <string>com.texteditor.engine</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__BIN__</string>
+    <string>-bind</string>
+    <string>127.0.0.1</string>
+    <string>-port</string>
+    <string>__PORT__</string>
+    <string>-daemon</string>
+    <string>__DAEMON_URL__</string>
+    <string>-data</string>
+    <string>__DATA__</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>__DATA__/engine.log</string>
+  <key>StandardErrorPath</key>
+  <string>__DATA__/engine.err.log</string>
+</dict>
+</plist>

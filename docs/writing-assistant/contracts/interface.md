@@ -277,6 +277,11 @@ type TextFormatter interface {
 ## 5. Context assembler (Go, pure leaf)
 
 ```go
+type MentionContent struct { // ADR-0036: turn-scoped context attachment (read-only)
+    Path string
+    Text string
+}
+
 type AssemblerInput struct {
     Mode        Mode
     ModelName   string        // the actually-resolved serving model (usedName)
@@ -284,11 +289,12 @@ type AssemblerInput struct {
     Tools       []ToolDef     // the mode's allowlisted tools, in splices order
     RAGChunks   []Chunk
     History     []Message
+    Mentions    []MentionContent // ADR-0036; spliced after history, before user input
     UserInput   string
 }
 
 type Breakdown struct { // deterministic approximation, documented unit
-    SystemPrompt, Tools, Rag, History, User, Thinking int
+    SystemPrompt, Tools, Rag, History, Mentions, User, Thinking int
 }
 
 type Request struct {     // the fully-assembled provider request (pure DTO)
@@ -316,6 +322,12 @@ Pure: same inputs → same payload/breakdown. It does **not** call the Retriever
 request — messages, tools, serving model, merged params — which the loop hands
 verbatim to `Provider.Chat`/`Stream`, closing the §2 gap.)
 
+(Amended by ADR-0036: `AssemblerInput` gains `Mentions []MentionContent` and
+`Breakdown` gains `Mentions int` — mention text is spliced after history and
+before the user input, in mention order, each wrapped in a path marker line.
+The `Mentions` budget is `Mode.ContextBudget.MaxMentionTokens`; over-budget
+mentions are truncated from the tail with a labeled overflow line.)
+
 ## 6. Token metering (Go)
 
 ```go
@@ -326,7 +338,7 @@ type ProviderCounts struct {
 }
 
 type AttributedBreakdown struct {
-    SystemPrompt, Tools, Rag, History, User, Thinking int // scaled to exact totals
+    SystemPrompt, Tools, Rag, History, Mentions, User, Thinking int // scaled to exact totals
     ThinkingApprox   bool                                 // true when thinking was tokenized (ADR-0024)
 }
 
@@ -351,6 +363,11 @@ so the loop can enforce a session's `TokenBudget` (ADR-0026 §5) before a turn �
 the meter owns the cumulative tally, so the budget check reads it from here and
 surfaces `session-budget-exceeded`.)
 
+(Amended by ADR-0036: `AttributedBreakdown` gains `Mentions` and
+`meter_events.component` gains the `mentions` value (data-model §1.3); the
+`meter` SSE event gains a required `mentions` field. Components still sum to
+the scaled provider totals exactly (Q1).)
+
 ## 7. Agent loop (Go)
 
 ```go
@@ -359,12 +376,16 @@ type TurnOptions struct {
     Temperature *float64
     Model       string   // force a model for this turn (optional)
 }
+type Mention struct { // ADR-0036
+    Path string // absolute path; client resolves workspace-relative → absolute
+}
 type Task struct {
     SessionID  string      // the owning session (ADR-0026)
     ModeName   string
     DocumentID string
     UserInput  string
     Selection  *Selection
+    Mentions   []Mention   // turn-scoped context attachments (ADR-0036)
     Options    *TurnOptions
 }
 
@@ -378,6 +399,12 @@ orchestrator owning only the turn state machine (bounded by `mode.maxSteps`). It
 **session-scoped**: it reads `session.History` into the assembler and appends each
 turn's messages back to the session (ADR-0026).
 
+(Amended by ADR-0036: `Task` gains `Mentions []Mention`. `Run` resolves every
+mention through `Workspace.Read` **before** the turn state machine starts;
+failures are fail-fast, pre-streaming, typed SSE errors: `mention-not-found`,
+`mention-too-large`, `mention-unreadable`, `too-many-mentions`. Mentions are
+turn-scoped — they are not persisted into session history.)
+
 ## 8. Mode registry + Tool registry + Tool executor (Go)
 
 ```go
@@ -387,14 +414,14 @@ type Mode struct {
     DefaultModel  string
     ToolAllowlist []string
     Params        SamplingParams
-    ContextBudget ContextBudget // { MaxHistoryTokens, MaxRagTokens int }
+    ContextBudget ContextBudget // { MaxHistoryTokens, MaxRagTokens, MaxMentionTokens int }
     MaxSteps      int
     Agentic       bool
     Kind          string  // "model" | "assistant"
     Preamble      string
     ToolCalling   string  // "native" | "router" (default "native")
 }
-type ContextBudget struct{ MaxHistoryTokens, MaxRagTokens int }
+type ContextBudget struct{ MaxHistoryTokens, MaxRagTokens, MaxMentionTokens int }
 
 type ModeRegistry interface {
     List() []Mode
@@ -536,6 +563,32 @@ Edit semantics (ADR-0029):
 
 Commit cadence and block identity are ADR-0020 (two paths: AI edit == commit; manual
 edit == autosave snapshot; block IDs == stable UUIDs).
+
+## 9b. Workspace (Go, leaf)
+
+Read-only filesystem reach (ADR-0035). Source ADR-0035.
+
+```go
+type Entry struct {
+    Name  string // bare file/dir name
+    Path  string // absolute path
+    IsDir bool
+}
+
+type Workspace interface {
+    List(ctx context.Context, dir string) ([]Entry, error)
+    Read(ctx context.Context, path string, maxBytes int) ([]byte, error)
+}
+```
+
+- `List` is shallow, non-recursive, sorted by name (case-insensitive). Hidden
+  entries are returned; filtering for display is client-side presentation.
+- `Read` is bounded by `maxBytes` and returns raw bytes only — it never
+  registers, versions, or indexes anything. Mentioned-file context (ADR-0036)
+  reads through here, so a mention is provably side-effect-free.
+- Typed errors: `not-found`, `not-a-directory`, `not-regular`, `too-large`,
+  `read-failed`. The loop maps them to the mention SSE codes (ADR-0036 §2);
+  the API server maps `List` failures to `not-found` / `not-a-directory`.
 
 ## 10. Session store (Go, leaf)
 

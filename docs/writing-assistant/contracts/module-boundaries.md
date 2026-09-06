@@ -8,7 +8,7 @@ REST/HTTP exists only at process boundaries.
 
 Source ADRs: ADR-0001 (base model), ADR-0016 (module inventory + exact APIs),
 ADR-0018 (two-tier fleet manifest), ADR-0019 (mode/tool data), ADR-0020 (storage),
-ADR-0025 (control daemon), ADR-0026 (sessions).
+ADR-0025 (control daemon), ADR-0026 (sessions), ADR-0035 (Workspace).
 
 ## 1. Modules
 
@@ -29,6 +29,7 @@ ADR-0025 (control daemon), ADR-0026 (sessions).
 | **Chunker** (leaf) | chunking (paragraph-aligned, size-bounded) | `Chunk(tree []Block, maxTokens int) → ([]Chunk, error)` | splitting algorithm |
 | **TextFormatter** (leaf) | formatting: normalize + validate + format block content | `Normalize(kind, text)`, `Validate(kind, text)`, `Format(kind, text)` | hardcoded opinionated style, structural checks |
 | **Document store** | document, blocks, version history | `Open`, `Save`, `Blocks`, `ApplyEdit`, `Commit`, `Diff`, `History`, `Candidates` | git (go-git), block-UUID minting, candidate side-table, word-diff |
+| **Workspace** (leaf) | read-only filesystem reach: shallow directory listing + bounded raw reads | `List(ctx, dir) → []Entry`, `Read(ctx, path, maxBytes)` | `os.ReadDir`/`os.ReadFile`, path validation, byte caps (ADR-0035) |
 | **Session store** (leaf) | sessions + their messages | `ListByDocument`, `Create`, `Resume`, `Append`, `History` | `sessions.db` |
 | **API server** | the versioned REST/SSE surface (codegen'd) | HTTP routes + SSE endpoints per the OpenAPI spec | framing, validation, turnID↔client correlation |
 | **SSE event bus** | typed event fan-out | `Emit(event)`, `Subscribe(filter) → stream` | connection registry, bounded chans |
@@ -79,6 +80,7 @@ flowchart LR
         TextFormatter[TextFormatter]
         Doc[Document store]
         Sess[Session store]
+        WS[Workspace]
         Bus[SSE event bus]
     end
     subgraph serving[Serving]
@@ -112,6 +114,8 @@ flowchart LR
     Retriever --> Prov
     Retriever --> Chunker
     Doc --> TextFormatter
+    API --> WS
+    Loop --> WS
     Meter --> Bus
     Fleet --> Daemon
     Daemon --> Manifest
@@ -125,7 +129,7 @@ flowchart LR
 - The graph is **acyclic**; direction is inward (clients → engine → serving-data).
 - Leaf modules (no out-edges) hold pure/deterministic logic: `Mode registry`,
   `Tool registry`, `Context assembler`, `Chunker`, `TextFormatter`, `Session store`,
-  `Provider gateway`, and the `Fleet manifest`.
+  `Workspace`, `Provider gateway`, and the `Fleet manifest`.
 - The `Retriever` is **not** a leaf (depends on Fleet + Provider for the embed call
   and on the Chunker) — a deliberate consequence of ADR-0016.
 - The `Tool decider` is **not** a leaf (depends on Fleet + Provider to serve the
@@ -141,8 +145,8 @@ Precise Go signatures and pure-DTO type definitions live in
 `contracts/interface.md`:
 
 - **Fleet + Provider + Retriever + Assembler + Meter + Document store +
-  Session store + Event bus + TextFormatter** — exact Go interface signatures
-  (ADR-0016, ADR-0026, ADR-0029).
+  Session store + Event bus + TextFormatter + Workspace** — exact Go interface
+  signatures (ADR-0016, ADR-0026, ADR-0029, ADR-0035).
 - **Serving lifecycle** — the verb contract (ADR-0007), now transported by the
   control daemon (ADR-0025).
 - The **fleet manifest schema** (two-tier) — `contracts/data-model.md` §2
@@ -173,5 +177,5 @@ Precise Go signatures and pure-DTO type definitions live in
   machine-local LLM control plane every app consumes. The two-repo boundary is a
   contract (`daemon-http.md` + the manifest schema — canonical in
   `macos-dev-config`, mirrored here), never shared source (ADR-0032/0033).
-- The Provider, Context assembler, TextFormatter, and Mode/Tool registries are all pure
+- The Provider, Context assembler, TextFormatter, Workspace, and Mode/Tool registries are all pure
   leaves.

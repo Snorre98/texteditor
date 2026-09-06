@@ -161,6 +161,33 @@ func TestHealth(t *testing.T) {
 	}
 }
 
+func TestHealthAdvertisesBaseURL(t *testing.T) {
+	// /health carries the engine's actual base URL for dynamic-port discovery
+	// (ADR-0021 §1); when unset it is omitted (fixed/legacy mode).
+	bus := &fakeBus{}
+	srv, err := New(Deps{
+		Fleet:    stubFleet{models: []dto.Model{{Name: "gemma4-12b", BaseURL: "http://x/v1", Capabilities: dto.Capabilities{ContextLength: 131072}}}},
+		Modes:    stubModes{},
+		Tools:    stubTools{},
+		Doc:      stubDoc{},
+		Sessions: stubSessions{},
+		Loop:     &stubLoopEmitter{bus: bus},
+		BaseURL:  "http://127.0.0.1:41234",
+	}, bus)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("health = %d, body %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"baseUrl":"http://127.0.0.1:41234"`) {
+		t.Fatalf("health body missing baseUrl: %s", rec.Body.String())
+	}
+}
+
 func TestListModels(t *testing.T) {
 	srv, _ := newTestServer(t)
 	rec := httptest.NewRecorder()

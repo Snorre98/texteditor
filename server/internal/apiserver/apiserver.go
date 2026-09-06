@@ -22,7 +22,8 @@ import (
 )
 
 // Deps holds the injected engine modules the server adapts (composition root
-// wires these to the real gateways/stores).
+// wires these to the real gateways/stores). BaseURL is the engine's own bound
+// base URL, advertised via /health for dynamic-port discovery (ADR-0021 §1).
 type Deps struct {
 	Fleet    fleet.Interface
 	Modes    mode.Interface
@@ -30,6 +31,7 @@ type Deps struct {
 	Doc      document.Interface
 	Sessions session.Interface
 	Loop     loop.Interface
+	BaseURL  string
 }
 
 // Server wraps the generated ogen server with a handler adapter. ServeHTTP is
@@ -69,7 +71,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // ------------------------- typed non-streaming surface -------------------------
 
 func (h *handler) GetHealth(ctx context.Context) (*genapi.Health, error) {
-	return &genapi.Health{Status: genapi.HealthStatusOk}, nil
+	res := &genapi.Health{Status: genapi.HealthStatusOk}
+	if h.d.BaseURL != "" {
+		res.BaseUrl = genapi.NewOptString(h.d.BaseURL)
+	}
+	return res, nil
 }
 
 func (h *handler) ListModels(ctx context.Context) ([]genapi.Model, error) {

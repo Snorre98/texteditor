@@ -309,6 +309,13 @@ type EventBus interface {
 - Routes are the OpenAPI spec (ADR-0017). The server is a thin adapter: validate,
   dispatch to the locked services, stream events.
 
+*(Amended by ADR-0035/0036 — recorded, not silent:)* the inventory gains the
+**Workspace** leaf (`List`/`Read`, ADR-0035) — read-only filesystem reach kept
+out of the Document store — and three existing APIs grow a field for file
+mentions (ADR-0036): `Task.Mentions`, `AssemblerInput.Mentions` +
+`Breakdown.Mentions`, and `ContextBudget.MaxMentionTokens`. Precise signatures
+are in `contracts/interface.md`.
+
 ## Consequences
 
 - **+** Every seam is a sealed Go interface over pure DTOs — the locked-service

@@ -472,6 +472,10 @@ func (s *Guard) SetHash(val string) {
 // Ref: #/components/schemas/Health
 type Health struct {
 	Status HealthStatus `json:"status"`
+	// The engine's actual bound base URL (http://host:port). Populated so a dynamic-port client (ADR-0021
+	// §1) can discover the engine rather than assume a port. In fixed mode this equals the configured
+	// address; in dynamic mode it is the OS-assigned port. Recorded amendment to ADR-0017 §4.
+	BaseUrl OptString `json:"baseUrl"`
 }
 
 // GetStatus returns the value of Status.
@@ -479,9 +483,19 @@ func (s *Health) GetStatus() HealthStatus {
 	return s.Status
 }
 
+// GetBaseUrl returns the value of BaseUrl.
+func (s *Health) GetBaseUrl() OptString {
+	return s.BaseUrl
+}
+
 // SetStatus sets the value of Status.
 func (s *Health) SetStatus(val HealthStatus) {
 	s.Status = val
+}
+
+// SetBaseUrl sets the value of BaseUrl.
+func (s *Health) SetBaseUrl(val OptString) {
+	s.BaseUrl = val
 }
 
 type HealthStatus string

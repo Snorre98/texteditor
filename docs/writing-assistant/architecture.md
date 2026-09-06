@@ -149,6 +149,7 @@ flowchart TB
         TextFormatter[TextFormatter]
         Sess[Session store]
         Doc[Document store]
+        WS[Workspace]
         Bus[SSE event bus]
     end
     Daemon[Control daemon]
@@ -178,6 +179,8 @@ flowchart TB
     Ret --> Prov
     Ret --> Chunker
     Doc --> TextFormatter
+    API --> WS
+    Loop --> WS
     Fleet --> Daemon
     Daemon --> Manifest
     Daemon --> Exec
@@ -201,6 +204,7 @@ flowchart TB
 | Chunker | chunking (pure) | `Chunk(tree []Block, maxTokens int)` | splitting algorithm |
 | TextFormatter | formatting (pure) | `Normalize(kind, text)`, `Validate(kind, text)`, `Format(kind, text)` | hardcoded opinionated style |
 | Document store | document + versions | `Open`, `Save`, `Blocks`, `ApplyEdit`, `Commit`, `Diff`, `History`, `Candidates` | git, block UUIDs, candidate side-table |
+| Workspace (leaf) | read-only filesystem reach: directory listing + bounded raw reads | `List(ctx, dir) → []Entry`, `Read(ctx, path, maxBytes)` | `os.ReadDir`/`os.ReadFile`, path validation, byte caps |
 | Session store | sessions + their messages (one per selection/doc) | `ListByDocument`, `Create`, `Resume`, `Append`, `History` | `sessions.db` |
 | API server | REST/SSE surface (codegen'd) | routes per OpenAPI spec | framing, turnID↔session↔client correlation |
 | SSE event bus | typed event fan-out | `Emit`, `Subscribe` | connection registry, backpressure |
@@ -314,6 +318,7 @@ flowchart TB
 | Fleet policy | MoE over dense, 14B+ citation floor, temperature sheet — ADR-0015 |
 | Tool routing | optional `ToolDecider`: writer emits `request_tool`, specialist resolves tool+args; per-mode `toolCalling` toggle; fail-fast sync gate — ADR-0028 |
 | Edit formatting | the engine owns the bytes: whole-block edits, `TextFormatter` normalize/validate/format, block-level guard, structured edit result — ADR-0029 |
+| Workspace navigation | engine-served shallow directory listing (Workspace leaf) + turn-scoped, metered `@`-mentions that are read-only context, never versioned documents — ADR-0035, ADR-0036 |
 | Inference control surface | a future `InferenceControl` interface *behind* the Provider seam (a sibling of `ProviderGateway`, not a change to it); the "knobs" (logprobs, grammar, KV, speculative decoding) are decoupled from the OpenAI-compatible contract for the MVP — `research/vision-native-local-llm-text-editing.md` |
 | Deployment/security | sidecar spawn dynamic-port-default; localhost bind; Tailscale deny-by-default — ADR-0021 |
 
@@ -355,6 +360,10 @@ Full records in [adr/](adr/). Index:
 | 0030 | Fleet substrate: pure llama.cpp + MLX on Metal | Accepted |
 | 0031 | SSE server transport is hand-framed; ogen scope clarified | Accepted |
 | 0032 | Control daemon authored in texteditor; lifecycle decision-gaps closed | Accepted |
+| 0033 | Control daemon source moved to macos-dev-config (the machine-local LLM control plane) | Accepted |
+| 0034 | Repository layout: client/server split, contract at root | Accepted |
+| 0035 | Directory listing: engine-served Workspace capability | Accepted |
+| 0036 | File mentions: metered, turn-scoped context attachments | Accepted |
 
 ## 10. Quality Requirements
 
@@ -393,6 +402,7 @@ Each is an SEI general scenario with a concrete response-measure (ADR-0022).
 | sessions.feature | persisted sessions, per-session concurrency + budget | 0026 |
 | tool-routing.feature | writer-signals-router-decides, per-mode toggle, fail-fast gates | 0028 |
 | edit-integrity.feature | whole-block edits, engine-owned formatting, block-level guard, structured result | 0029 |
+| workspace.feature | engine-served directory listing, `@`-mentions as metered read-only context | 0035, 0036 |
 
 ### 10.3 Definition of done (documentation)
 

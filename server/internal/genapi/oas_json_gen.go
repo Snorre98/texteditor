@@ -1009,10 +1009,17 @@ func (s *Health) encodeFields(e *jx.Encoder) {
 		e.FieldStart("status")
 		s.Status.Encode(e)
 	}
+	{
+		if s.BaseUrl.Set {
+			e.FieldStart("baseUrl")
+			s.BaseUrl.Encode(e)
+		}
+	}
 }
 
-var jsonFieldsNameOfHealth = [1]string{
+var jsonFieldsNameOfHealth = [2]string{
 	0: "status",
+	1: "baseUrl",
 }
 
 // Decode decodes Health from json.
@@ -1033,6 +1040,16 @@ func (s *Health) Decode(d *jx.Decoder) error {
 				return nil
 			}(); err != nil {
 				return errors.Wrap(err, "decode field \"status\"")
+			}
+		case "baseUrl":
+			if err := func() error {
+				s.BaseUrl.Reset()
+				if err := s.BaseUrl.Decode(d); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"baseUrl\"")
 			}
 		default:
 			return d.Skip()

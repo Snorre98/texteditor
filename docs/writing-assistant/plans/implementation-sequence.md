@@ -36,7 +36,9 @@ Two tracks, in order:
   packaging (Plan E) and the Tauri markdown editor (Plan F). These are **required**,
   not optional: the two-way engine shipping (standalone daemon *and* Tauri sidecar)
   and the rich Tauri editor are the shipped product. Track 2 lives in its own
-  dedicated plan — [`implementation-sequence-future.md`](implementation-sequence-future.md).
+  dedicated plan — [`implementation-sequence-future.md`](implementation-sequence-future.md)
+  (what to build) with the phased execution detail in
+  [`implementation-sequence-track2.md`](implementation-sequence-track2.md) (order).
 
 The router (Plan D) is additive and off-by-default in both tracks: its *seam* is
 built in Track 1, its *enablement* is deferred (see Plan D).
@@ -298,4 +300,8 @@ the owning module: retry/backoff + `provider-unreachable` (Provider, A3.1),
 4. A5 → engine headless-driveable via `curl`/generated client (ADR-0002).
 5. C6–C8 → TUI with live token meter — **proof of concept reached**.
 6. D2–D5 → router seam built, off by default (D1 enablement deferred) — **landed**.
-7. → Track 2 (mandatory): see `implementation-sequence-future.md`.
+7. → Track 2 (mandatory): see `implementation-sequence-future.md` (what) +
+   `implementation-sequence-track2.md` (order). **E1 engine primitives landed
+   (dynamic port, `ENGINE_PORT`/`ENGINE_BIND`, `baseUrl` on `/health`, graceful
+   shutdown, standalone-daemon packaging); E2/E6/E7/F6–F8 gated on the Rust
+   toolchain.**

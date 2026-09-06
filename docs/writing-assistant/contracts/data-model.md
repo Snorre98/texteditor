@@ -2,7 +2,7 @@
 
 Precise spec for the durable data formats the system owns. Source ADRs: ADR-0016
 (per-service SQLite), ADR-0018 (two-tier manifest), ADR-0019 (mode/tool data),
-ADR-0020 (block IDs, candidates, chunking).
+ADR-0020 (block IDs, candidates, chunking), ADR-0036 (mentions meter component).
 
 ## 1. SQLite app databases — per-service files
 
@@ -79,7 +79,7 @@ produces it; `Index` rebuilds it). It may denormalize block text.
 | `ts` | INTEGER | unix epoch ms |
 | `session_id` | TEXT | → `sessions.id` (the owning session) |
 | `turn_id` | TEXT | groups events into one turn |
-| `component` | TEXT | `system` \| `tools` \| `rag` \| `history` \| `user` \| `thinking` \| `completion` |
+| `component` | TEXT | `system` \| `tools` \| `rag` \| `history` \| `mentions` \| `user` \| `thinking` \| `completion` |
 | `prompt_tokens` | INTEGER | attributed prompt tokens |
 | `completion_tokens` | INTEGER | attributed completion tokens |
 | `approx` | INTEGER | 1 when the component is a labeled approximation (thinking, ADR-0024) |
@@ -191,7 +191,7 @@ engine repo, versioned + `go:embed`'d, validated at startup.
 | `defaultModel` | string | yes | must resolve via the manifest |
 | `toolAllowlist` | string[] | no | subset of registered tool names |
 | `params` | object | no | `temperature`, `maxTokens` |
-| `contextBudget` | object | no | `maxHistoryTokens`, `maxRagTokens` |
+| `contextBudget` | object | no | `maxHistoryTokens`, `maxRagTokens`, `maxMentionTokens` (ADR-0036) |
 | `maxSteps` | integer | no | per-mode dispatch/observe bound |
 | `agentic` | boolean | no | multi-turn tool loop vs single-shot pass |
 | `kind` | string | no | `model` \| `assistant` (reserved) |

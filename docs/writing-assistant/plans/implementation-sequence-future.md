@@ -1,7 +1,10 @@
 # Implementation Sequence — Future (Mandatory)
 
 Track 2 of the roadmap, referenced from
-[`implementation-sequence.md`](implementation-sequence.md). These phases are
+[`implementation-sequence.md`](implementation-sequence.md). The phased execution
+detail (order, dependencies, recorded amendments) lives in
+[`implementation-sequence-track2.md`](implementation-sequence-track2.md); this
+document pins only *what* to build. These phases are
 **required, not optional**: the TUI (Plan C) is the proof-of-concept accelerator —
 the fastest path to a working system with a live token meter (ADR-0013) — but the
 shipped product is the engine deployed two ways (standalone daemon *and* Tauri
@@ -21,16 +24,20 @@ control on the machine). Ships the engine as two artifacts from one codebase.
 
 1. **Standalone daemon** — the single static Go binary run as a local daemon
    (ADR-0003, ADR-0014 §2). No Node/Python at runtime; no CGO (ADR-0003).
+   **(landed, E1 — `tools/build.sh`, `tools/install-daemon.sh`,
+   `deploy/com.texteditor.engine.plist`)**
 2. **Tauri sidecar** — the Rust core spawns the engine as a sidecar child process
    on launch; **stop = SIGTERM, then SIGKILL on timeout** (ADR-0021 §1).
 3. **Port policy** — dynamic-by-default (no `ENGINE_PORT` → engine picks a free
    port; the Rust core reads the actual base URL from `/health`+`/models` and
    injects it); fixed via `ENGINE_PORT` for remote/web use (ADR-0021 §1).
+   **(landed, E1 — `--port`/`ENGINE_PORT`, `0` = dynamic)**
 4. **Port discovery** — a "where am I" endpoint (+ optional mDNS on the LAN) so
-   clients discover rather than assume a port (ADR-0021 §1).
+   clients discover rather than assume a port (ADR-0021 §1). **(landed, E1 —
+   `baseUrl` on `/health`; mDNS deferred)**
 5. **Bind policy** — `127.0.0.1` default; `ENGINE_BIND=0.0.0.0` opts into LAN
    exposure, documented as the privacy trade-off (ADR-0021 §2). The pre-bind gate
-   (Plan B item 5) guards this.
+   (Plan B item 5) guards this. **(landed, E1 — `--bind`/`ENGINE_BIND` + warning)**
 6. **Web target** — the same UI served locally, engine self-hosted on the user's
    own machine/LAN; explicit self-hosting caveat, not a public-infrastructure
    default (ADR-0014, ADR-0021 §2).
@@ -87,7 +94,8 @@ second client.
 ## Milestones
 
 1. E1–E5 → engine ships as standalone daemon *and* Tauri sidecar with dynamic-port
-   discovery + localhost bind.
+   discovery + localhost bind. **(E1/E3/E4/E5 landed — engine primitives; E2
+   Tauri sidecar spawn is gated on the Rust toolchain, F8 scaffold)**
 2. E6–E7 → web target + capability adapter.
 3. F6–F8 → Tauri editor with selection bubbles, side-by-side candidates, and
    autosave-backed manual editing.

@@ -11,9 +11,13 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"strconv"
+	"syscall"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -46,7 +50,8 @@ func main() {
 func run() error {
 	var (
 		dataDir   = flag.String("data", defaultDataDir(), "directory for SQLite files + git worktrees")
-		addr      = flag.String("addr", "127.0.0.1:9100", "API listen address")
+		bind      = flag.String("bind", envOr("ENGINE_BIND", "127.0.0.1"), "address to bind (ENGINE_BIND=0.0.0.0 opts into LAN exposure, ADR-0021 §2)")
+		port      = flag.Int("port", envInt("ENGINE_PORT", 0), "port to bind (0 = dynamic free port; ENGINE_PORT fixes it, ADR-0021 §1)")
 		daemonURL = flag.String("daemon", envOr("DAEMON_URL", "http://127.0.0.1:9300"), "control daemon base URL (ADR-0025)")
 	)
 	flag.Parse()
@@ -199,6 +204,17 @@ func run() error {
 		Decider:   deciderGW,
 	})
 
+	// --- Bind: dynamic port by default (ADR-0021 §1); ENGINE_BIND=0.0.0.0 opts
+	// into LAN exposure (ADR-0021 §2). The listener is bound before the API
+	// server is built so the actual base URL can be advertised via /health. ---
+	if *bind == "0.0.0.0" {
+		log.Printf("warning: binding 0.0.0.0 exposes the engine (documents + edit history) to the LAN — localhost is the privacy default (ADR-0021 §2)")
+	}
+	ln, baseURL, err := bindListener(*bind, *port)
+	if err != nil {
+		return err
+	}
+
 	// --- API server ---
 	srv, err := apiserver.New(apiserver.Deps{
 		Fleet:    fleetGW,
@@ -207,19 +223,35 @@ func run() error {
 		Doc:      docStore,
 		Sessions: sessStore,
 		Loop:     loopGW,
+		BaseURL:  baseURL,
 	}, bus)
 	if err != nil {
 		return err
 	}
 
 	httpSrv := &http.Server{
-		Addr:              *addr,
 		Handler:           srv,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
-	log.Printf("texteditor listening on http://%s (daemon %s)", *addr, *daemonURL)
-	return httpSrv.ListenAndServe()
+	// Graceful shutdown on SIGTERM/SIGINT (ADR-0021 §1: the sidecar stop contract
+	// is SIGTERM then SIGKILL on timeout — the engine exits cleanly on SIGTERM).
+	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	errc := make(chan error, 1)
+	go func() { errc <- httpSrv.Serve(ln) }()
+
+	log.Printf("texteditor listening on %s (daemon %s)", baseURL, *daemonURL)
+
+	select {
+	case err := <-errc:
+		return err
+	case <-ctx.Done():
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		return httpSrv.Shutdown(shutdownCtx)
+	}
 }
 
 // makeToolHandlers returns the real tool handlers bound at the composition root,
@@ -379,6 +411,28 @@ func envOr(k, d string) string {
 		return v
 	}
 	return d
+}
+
+// envInt reads an integer env var, falling back to d when unset or unparseable.
+func envInt(k string, d int) int {
+	if v := os.Getenv(k); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
+		log.Printf("warning: %s=%q is not an integer; using default %d", k, v, d)
+	}
+	return d
+}
+
+// bindListener binds the engine's listener per the port/bind policy (ADR-0021):
+// port 0 = dynamic free port, else fixed. It returns the listener and the
+// derived base URL for /health advertisement.
+func bindListener(bind string, port int) (net.Listener, string, error) {
+	ln, err := net.Listen("tcp", net.JoinHostPort(bind, strconv.Itoa(port)))
+	if err != nil {
+		return nil, "", fmt.Errorf("listen %s: %w", net.JoinHostPort(bind, strconv.Itoa(port)), err)
+	}
+	return ln, "http://" + ln.Addr().String(), nil
 }
 
 func defaultDataDir() string {
