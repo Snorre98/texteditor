@@ -12,3 +12,7 @@
 
 # Engine runtime data (git history worktree, etc.)
 /var/
+
+# TUI (client) runtime
+tui/node_modules/
+tui/openapi-ts-error-*.log

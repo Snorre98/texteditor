@@ -1,0 +1,26 @@
+{
+  "name": "texteditor-tui",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "OpenTUI + Solid client for the writing-assistant engine (ADR-0013/0017/0023). Dumb client: generated from api/openapi.yaml, no domain logic.",
+  "scripts": {
+    "gen": "openapi-ts",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test",
+    "dev": "bun run src/index.tsx",
+    "start": "bun run src/index.tsx"
+  },
+  "dependencies": {
+    "@opentui/core": "^0.5.10",
+    "@opentui/solid": "^0.5.10",
+    "@hey-api/client-fetch": "0.7.2",
+    "solid-js": "1.9.12",
+    "zod": "^4.5.0"
+  },
+  "devDependencies": {
+    "@hey-api/openapi-ts": "0.62.0",
+    "@types/bun": "^1.4.1",
+    "typescript": "^5.7.0"
+  }
+}
