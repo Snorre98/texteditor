@@ -90,12 +90,14 @@ row: ADR-0001/0016 map to it and to §2/§5.2/§8.
 - ADR-0008 §2 → superseded by ADR-0030 (source kinds narrowed to `hf`/`gguf`/
   `needle`; `ollama`/`lmstudio` provisioning dropped; Metal made a hard
   constraint).
-- ADR-0025 §3 → *clarified* (not reversed) by ADR-0032: "lives in
-  `macos-dev-config`" means the daemon's *deployment* (a drop-shipped binary), not
-  its *source* — which is authored in `texteditor` (`cmd/fleetdaemon`). ADR-0032
-  also pins the previously-implicit serving lifecycle mechanics (serve.sh manifest
-  seam, lanes/port-enforcement home, pre-bind gate owner, ACL↔manifest projection,
-  launchd shape, and release tracking).
+- ADR-0025 §3 → *clarified* (not reversed) by ADR-0032, then amended by ADR-0033:
+  "lives in `macos-dev-config`" means the daemon's *deployment* (a binary) *and*
+  its *source* — ADR-0032 first pinned the source in `texteditor`
+  (`cmd/fleetdaemon`); ADR-0033 moved it to `macos-dev-config`, making that repo
+  the machine-local LLM control plane end to end. ADR-0032 also pins the
+  previously-implicit serving lifecycle mechanics (serve.sh manifest seam,
+  lanes/port-enforcement home, pre-bind gate owner, ACL↔manifest projection,
+  launchd shape) — those stand under ADR-0033.
 
 Superseded ADRs remain in the log, untouched; supersession is recorded in the
 superseding ADR's header and in the §9 index.

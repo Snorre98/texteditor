@@ -164,8 +164,8 @@ must complete before A3.4 starts.
    from the daemon, no `jq` parse) — ADR-0007, ADR-0018 §2, ADR-0025/0027.
 4. Control daemon (HTTP transport over the verb contract, sole manifest reader) —
    ADR-0025, ADR-0021 §3 (bind + Tailscale ACL), ADR-0027. Source is authored in
-   `texteditor` (`cmd/fleetdaemon/`); the binary is drop-shipped to
-   `macos-dev-config` — ADR-0032.
+   `macos-dev-config` (`cmd/fleetdaemon/`) and built there to `bin/` — ADR-0033
+   (superseding ADR-0032 §1's texteditor-home split).
 5. Tailscale ACL entries + pre-bind gate — ADR-0021 §3.
 6. **Always-on agents** (`launchd/`) — install/load a named agent for
    reboot-persistent serving (plist templating, `launchctl` load) —

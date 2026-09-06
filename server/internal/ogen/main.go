@@ -17,14 +17,16 @@ import (
 func main() {
 	// Resolve the repo root from this source file, so `go generate` works from
 	// any package directory (the generator may run with CWD = the package dir).
+	// This file lives in server/internal/ogen, so the repo root (which holds
+	// api/ alongside server/) is three levels up (ADR-0034).
 	_, thisFile, _, ok := runtime.Caller(0)
 	if !ok {
 		fatal(fmt.Errorf("cannot locate source file"))
 	}
-	root := filepath.Clean(filepath.Join(filepath.Dir(thisFile), "..", ".."))
+	root := filepath.Clean(filepath.Join(filepath.Dir(thisFile), "..", "..", ".."))
 
 	specPath := filepath.Join(root, "api", "openapi.yaml")
-	targetDir := filepath.Join(root, "internal", "genapi")
+	targetDir := filepath.Join(root, "server", "internal", "genapi")
 
 	opts := gen.Options{}
 	data, err := opts.SetLocation(specPath, gen.RemoteOptions{})

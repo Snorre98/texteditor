@@ -2,14 +2,14 @@
 
 The OpenTUI + Solid client for the writing-assistant engine (Plan C, C6–C8).
 A **dumb client** (ADR-0013 §3): the whole surface is generated from the locked
-contract `../api/openapi.yaml` (ADR-0017), every response is zod-validated at
+contract `../../api/openapi.yaml` (ADR-0017), every response is zod-validated at
 the boundary, and all domain logic lives in the engine.
 
 ## Layout
 
 ```
 src/
-  generated/       Hey API + Zod output (bun run gen — committed, like internal/genapi)
+  generated/       Hey API + Zod output (bun run gen — committed, like server/internal/genapi)
   api/
     client.ts      validated calls over the generated sdk (responseValidator + baseUrl rewrite)
     discovery.ts   port discovery, fixed mode (ADR-0021 §1): ENGINE_URL > ENGINE_PORT > 9100 + /health probe
@@ -23,13 +23,13 @@ src/
 
 ```sh
 bun install
-bun run gen       # regenerate src/generated from ../api/openapi.yaml
+bun run gen       # regenerate src/generated from ../../api/openapi.yaml
 bun test          # discovery/decoder/store/component tests (28)
 bun run typecheck
 
 # engine must be up (it binds 127.0.0.1:9100 by default):
-#   go run ./cmd/texteditor           (engine — needs the control daemon)
-#   go run ./cmd/fleetdaemon          (control daemon, see ../macos-dev-config)
+#   go run ../server/cmd/texteditor           (engine — needs the control daemon)
+#   cd ../../../macos-dev-config && go run ./cmd/fleetdaemon   (control daemon, ADR-0033)
 
 ENGINE_PORT=9100 TEXTEDITOR_DOC=/path/to/note.md bun run src/index.tsx
 # or: bun run src/index.tsx /path/to/note.md

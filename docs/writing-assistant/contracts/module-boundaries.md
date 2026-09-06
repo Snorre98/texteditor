@@ -38,7 +38,7 @@ ADR-0025 (control daemon), ADR-0026 (sessions).
 | Module | Owns (concern) | Public API (defined operations) | Hidden internals |
 |---|---|---|---|
 | **Fleet manifest** (data) | what models *can* be served (two-tier: daemons + models) | manifest schema + `Read() → []Model` (validated by the shared loader) | file location, git-ignored local overrides |
-| **Control daemon** | HTTP transport over the verb contract; **sole reader of the manifest** | daemon HTTP contract (`list/start/stop/status/log/reach/provision`) | mapping HTTP → `serve.sh`; verb execution; manifest parse + lanes + provision + live state. Authored in `texteditor` at `cmd/fleetdaemon/`, drop-shipped here as a binary (ADR-0032) |
+| **Control daemon** | HTTP transport over the verb contract; **sole reader of the manifest** | daemon HTTP contract (`list/start/stop/status/log/reach/provision`) | mapping HTTP → `serve.sh`; verb execution; manifest parse + lanes + provision + live state. Authored **and built** in `macos-dev-config` at `cmd/fleetdaemon/` (ADR-0033); `texteditor` holds only a mirror of the contract |
 | **Lifecycle executor** (`serve.sh`) | running/stopping model servers (runner logic) | verb contract (invoked by the daemon) | per-runner CLI flags, health checks, delegate wrappers; receives the parsed manifest from the daemon (ADR-0025/0027) as per-invocation env vars (`RUNNER`/`MODEL`/`HOST`/`PORT`/`SERVE_PORT_<NAME>`), does not parse `models.json` |
 | **Always-on agents** (`launchd/`) | reboot-persistent serving | install/load a named agent | plist templating, `launchctl` load; one always-on daemon agent (KeepAlive); runners are on-demand, not agent-managed |
 | **Tailscale ACL** | remote inference authorization | deny-by-default ACL matching `tag:inference-client` → `tag:inference-server` ports | tailnet tag assignment; projected from the manifest, reconciled at daemon startup |
@@ -168,8 +168,10 @@ Precise Go signatures and pure-DTO type definitions live in
 - The control daemon is the sole reader of `models.json`; `serve.sh` receives the
   parsed manifest from the daemon (ADR-0027, as per-invocation env vars per ADR-0032),
   and the engine reads neither.
-- The control daemon's source is authored in `texteditor` (`cmd/fleetdaemon`); its
-  binary is drop-shipped to `macos-dev-config`. The two-repo boundary is a
-  contract (`daemon-http.md` + the manifest schema), never shared source (ADR-0032).
+- The control daemon's source and binary both live in `macos-dev-config`
+  (`cmd/fleetdaemon/`, built to `bin/`) since ADR-0033; the daemon is the
+  machine-local LLM control plane every app consumes. The two-repo boundary is a
+  contract (`daemon-http.md` + the manifest schema — canonical in
+  `macos-dev-config`, mirrored here), never shared source (ADR-0032/0033).
 - The Provider, Context assembler, TextFormatter, and Mode/Tool registries are all pure
   leaves.

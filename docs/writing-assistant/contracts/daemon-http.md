@@ -1,14 +1,22 @@
+<!-- MIRROR — canonical: macos-dev-config/docs/contracts/daemon-http.md (ADR-0033 §3). Edit the canonical copy and re-sync; a test in internal/fleet checks drift when the sibling repo is present. -->
 # Control-daemon HTTP contract
 
-The engine's Fleet gateway reaches serving **only** through the control daemon's
-HTTP contract (ADR-0025, ADR-0027). This page pins the transport so the engine
-client (`fleet.NewDaemon`) and the daemon binary (in `macos-dev-config`, Plan B)
-can be built independently against one shape. It projects the lifecycle **verbs**
-(ADR-0007, `contracts/interface.md §12`) onto REST, mirroring the engine's own
-OpenAPI route style (ADR-0017 §5). The daemon is the **sole reader** of
-`models.json` (ADR-0027); the engine never reads the manifest or invokes `serve.sh`.
+> **Canonical copy.** This file lives in `macos-dev-config` (the machine-local
+> LLM control plane, ADR-0033). `texteditor` keeps a mirror at
+> `texteditor/docs/writing-assistant/contracts/daemon-http.md` with a sync check;
+> edit here, not there.
 
-Source ADRs: ADR-0007, ADR-0018, ADR-0025, ADR-0027, ADR-0030.
+Every local-LLM app reaches serving **only** through the control daemon's HTTP
+contract: the texteditor engine via its Fleet gateway client (`fleet.NewDaemon`),
+PresentationToMarkdown via its own client (its ADR-0034). This page pins the
+transport so the daemon binary (this repo, `cmd/fleetdaemon`) and its consumers
+can be built independently against one shape. It projects the lifecycle **verbs**
+(ADR-0007, `texteditor/docs/writing-assistant/contracts/interface.md §12`) onto
+REST. The daemon is the **sole reader** of `models.json` (ADR-0027); consumers
+never read the manifest or invoke `serve.sh`.
+
+Source ADRs: ADR-0007, ADR-0018, ADR-0025, ADR-0027, ADR-0030, ADR-0033
+(all in `texteditor/docs/writing-assistant/adr/`).
 
 ## 1. Transport conventions
 
@@ -37,15 +45,20 @@ Source ADRs: ADR-0007, ADR-0018, ADR-0025, ADR-0027, ADR-0030.
 ### `list` — `GET /list`
 
 Returns every servable model (the resolve/provision units of the two-tier
-manifest), each with the `daemon`'s host/port and its `defaults`/`capabilities`/
-`modeTags`. The engine maps this to `Fleet.ListModels()` and uses `defaults` in
-`Resolve`'s merge.
+manifest), each with the `daemon`'s host/port/runner and its
+`defaults`/`capabilities`/`modeTags`. The engine maps this to
+`Fleet.ListModels()` and uses `defaults` in `Resolve`'s merge. `runner` and
+`daemon` were added by ADR-0033 §4 so consumers can do runner-specific memory
+management and target `start`/`stop`; the engine client ignores them
+(daemon-owned fields).
 
 ```json
 {
   "models": [
     {
       "name": "mistral-24b",
+      "runner": "mlx-lm",
+      "daemon": "mistral-24b",
       "host": "127.0.0.1",
       "port": 8085,
       "capabilities": { "contextLength": 131072, "thinkingMode": false, "supportsSystemPrompt": true },
@@ -117,21 +130,31 @@ Base URL + a client `curl` example (read-only).
 { "name": "mistral-24b", "baseURL": "http://127.0.0.1:8085/v1", "curl": "curl http://127.0.0.1:8085/v1/models" }
 ```
 
-## 3. The engine client (`fleet.NewDaemon`)
+## 3. Consumers
 
-The Fleet gateway consumes the daemon contract as follows:
+### The engine client (`fleet.NewDaemon`, texteditor)
 
 | `FleetGateway` op | Daemon verb | Notes |
 |---|---|---|
-| `ListModels()` | `list` | maps to `[]dto.Model` (drops daemon-owned `defaults` into an internal entry) |
+| `ListModels()` | `list` | maps to `[]dto.Model` (drops daemon-owned `defaults`/`runner`/`daemon` into an internal entry) |
 | `Status(name)` | `status` | maps `state` → `dto.LiveState` |
 | `Start(name)` | `start` | blocking; typed errors `port-in-use`/`binary-missing`/`model-not-found`/`start-timeout` |
 | `Stop(name)` | `stop` | idempotent |
 | `Provision(ctx, name)` | `provision` | returns `provisionID` |
 | `Resolve(name, opts)` | `list` + `status` | merge `defaults ← mode.params ← overrides`; enforce capability gates; fold the fallback ladder (ADR-0015) — engine-side, over daemon-returned data |
 
+### PresentationToMarkdown (its ADR-0034)
+
+PtM resolves feature endpoints from `list` (no hardcoded ports), reports health
+via `status`, starts on-demand servers via `start`, and picks runner-specific
+memory-release paths from `runner` (mlx-vlm `/unload`, ollama
+`keep_alive:0`-style hooks). It never shells out to `serve.sh` and never reads
+`models.json`.
+
 The engine never sees `runner`, `source`, or `provisioning` fields beyond what the
-contract exposes; those remain daemon-owned (ADR-0016 §1).
+contract exposes; those remain daemon-owned (ADR-0016 §1) — with the single
+ADR-0033 §4 exception that `runner`/`daemon` are exposed for consumer-side memory
+management.
 
 ## 4. Error-code table (`interface.md §12.1`, confirmed)
 
