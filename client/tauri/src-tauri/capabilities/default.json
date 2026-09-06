@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Capability for the main editor window: core APIs only. The custom commands (get_engine_base_url, pick_directory, pick_file) are registered in the invoke handler and do not need ACL entries; the engine is reached over plain HTTP to 127.0.0.1.",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

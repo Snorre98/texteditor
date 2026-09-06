@@ -34,3 +34,12 @@ node_modules/
 # Rust build artifacts (client/tauri, ADR-0034)
 target/
 
+
+# Bundled engine sidecar (built from server/, placed under src-tauri/binaries/
+# with the target-triple suffix — ADR-0021 §1 "bundled, not installed").
+client/tauri/src-tauri/binaries/
+
+# Frontend build output (client/tauri, vite)
+client/tauri/dist/
+# Tauri-generated permission schemas (regenerated on first tauri build)
+client/tauri/src-tauri/gen/

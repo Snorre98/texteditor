@@ -303,5 +303,8 @@ the owning module: retry/backoff + `provider-unreachable` (Provider, A3.1),
 7. → Track 2 (mandatory): see `implementation-sequence-future.md` (what) +
    `implementation-sequence-track2.md` (order). **E1 engine primitives landed
    (dynamic port, `ENGINE_PORT`/`ENGINE_BIND`, `baseUrl` on `/health`, graceful
-   shutdown, standalone-daemon packaging); E2/E6/E7/F6–F8 gated on the Rust
-   toolchain.**
+   shutdown, standalone-daemon packaging); the client half landed too — F6
+   (openapi-to-rust generated Rust client), E2 (Tauri sidecar spawn/discovery/
+   SIGTERM→SIGKILL stop, headlessly tested), E6/E7 (web target caveat +
+   capability adapter), and the F8 Tauri 2 + Vue 3 shell. Remaining: F7 Vue
+   state over the generated client + the F8 CodeMirror UI.**

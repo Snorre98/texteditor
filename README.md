@@ -17,6 +17,8 @@ Fleet gateway talks to over HTTP (ADR-0025/0027).
 api/openapi.yaml   the single contract every client codegens from (ADR-0017)
 server/            the Go engine (cmd/texteditor + internal/* + shared/dto)
 client/tui/        the OpenTUI + Solid client (dumb, generated from the spec)
+client/tauri/      the Tauri 2 + Vue 3 editor (dumb; generated Rust client +
+                   engine spawned as a bundled sidecar, ADR-0021 §1)
 docs/writing-assistant/   architecture, ADRs, contracts, behavior specs
 tools/             build + install-daemon scripts
 deploy/            launchd agent template (standalone daemon)
@@ -26,6 +28,9 @@ deploy/            launchd agent template (standalone daemon)
 
 - **Go** 1.26 (engine; no CGO).
 - **Bun** (TUI build/run only — no Node at runtime).
+- **Rust + `openapi-to-rust`** (the Tauri editor client, `client/tauri/`; see its
+  README — on this Mac the toolchain lives on the external SSD:
+  `RUSTUP_HOME=/Volumes/Ex-SSD/caches/rust CARGO_HOME=/Volumes/Ex-SSD/caches/cargo`).
 - **`macos-dev-config`** (separate repo) running the **control daemon** — the
   engine reaches serving through it and never reads `models.json` directly
   (ADR-0025/0027).
@@ -122,11 +127,14 @@ See [`tools/install-daemon.sh`](tools/install-daemon.sh) and
 ```sh
 cd server && CGO_ENABLED=0 go test ./...     # engine (boundary-tested; ADR-0022 Q5)
 cd client/tui && bun test && bun run typecheck
+cd client/tauri/src-tauri && cargo test      # sidecar handshake (needs the daemon)
+cd client/tauri && bun run typecheck && bun test
 ```
 
 ## Contract-first
 
 Any route/shape change lands in [`api/openapi.yaml`](api/openapi.yaml) **first**,
-then `go generate ./...` (ogen server) and `bun run gen` (TS client) are
+then `go generate ./...` (ogen server), `bun run gen` (TS client), and
+`openapi-to-rust generate -c client/tauri/openapi-to-rust.toml` (Rust client) are
 regenerated from it. The generated code is committed and never hand-shaped; spec
 extensions are recorded amendments in the ADRs (ADR-0002/0017).

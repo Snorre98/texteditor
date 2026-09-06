@@ -28,6 +28,8 @@ control on the machine). Ships the engine as two artifacts from one codebase.
    `deploy/com.texteditor.engine.plist`)**
 2. **Tauri sidecar** — the Rust core spawns the engine as a sidecar child process
    on launch; **stop = SIGTERM, then SIGKILL on timeout** (ADR-0021 §1).
+   **(landed, E2 — `client/tauri/src-tauri/src/sidecar.rs`, headlessly tested
+   against the real engine binary)**
 3. **Port policy** — dynamic-by-default (no `ENGINE_PORT` → engine picks a free
    port; the Rust core reads the actual base URL from `/health`+`/models` and
    injects it); fixed via `ENGINE_PORT` for remote/web use (ADR-0021 §1).
@@ -40,10 +42,12 @@ control on the machine). Ships the engine as two artifacts from one codebase.
    (Plan B item 5) guards this. **(landed, E1 — `--bind`/`ENGINE_BIND` + warning)**
 6. **Web target** — the same UI served locally, engine self-hosted on the user's
    own machine/LAN; explicit self-hosting caveat, not a public-infrastructure
-   default (ADR-0014, ADR-0021 §2).
+   default (ADR-0014, ADR-0021 §2). **(landed, E6 — documented caveat + the web
+   adapter branch + `ENGINE_BIND`/ACL note)**
 7. **Capability adapter (per target)** — the single per-target seam: Tauri `invoke`
    IPC vs Web File System Access API; all app logic stays in the engine, unchanged
-   (ADR-0014).
+   (ADR-0014). **(landed, E7 — `client/tauri/src/capability/` + the Rust `rfd`
+   dialog commands)**
 
 ---
 
@@ -58,6 +62,8 @@ second client.
    (locked now, not deferred) — ADR-0017 §3, ADR-0003. The spec models streaming in
    standard OpenAPI (`text/event-stream`), no ogen-only extensions, so this tool
    consumes the exact spec the Go/TS clients do (ADR-0017 §3).
+   **(landed — `client/tauri/src-tauri/src/generated/`, committed; fit recorded
+   in `openapi-to-rust.toml` and `implementation-sequence-track2.md` F6)**
 2. `tauri-typegen` — deferred; covers Tauri's internal Rust↔JS IPC, not the Go API
    (ADR-0003).
 
@@ -94,11 +100,16 @@ second client.
 ## Milestones
 
 1. E1–E5 → engine ships as standalone daemon *and* Tauri sidecar with dynamic-port
-   discovery + localhost bind. **(E1/E3/E4/E5 landed — engine primitives; E2
-   Tauri sidecar spawn is gated on the Rust toolchain, F8 scaffold)**
-2. E6–E7 → web target + capability adapter.
+   discovery + localhost bind. **(landed — E1/E3/E4/E5 engine primitives; E2
+   Tauri sidecar spawn/discovery/stop handshake built in the F8 scaffold and
+   headlessly tested; F6 Rust client generated and committed)**
+2. E6–E7 → web target + capability adapter. **(landed — one `CapabilityAdapter`
+   with Tauri `invoke` and web File System Access API branches; the web target
+   is the documented self-hosting caveat, not a public-infra default)**
 3. F6–F8 → Tauri editor with selection bubbles, side-by-side candidates, and
-   autosave-backed manual editing.
+   autosave-backed manual editing. **(F6 + F8 shell landed — Tauri 2 + Vue 3
+   scaffold with sidecar wiring compiles; F7 Vue state over the generated
+   client and the F8 CodeMirror UI follow)**
 
 After Track 2, the three targets (TUI, desktop WebView, web) run one engine over
 one contract (ADR-0014) — the frontend-swap guarantee realized end to end.

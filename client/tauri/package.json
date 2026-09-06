@@ -1,0 +1,27 @@
+{
+  "name": "texteditor-tauri",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Tauri editor client for the writing-assistant engine (ADR-0013/0014/0017). Dumb client: the UI talks to the engine over the OpenAPI contract; the Rust core bundles + spawns the engine sidecar (ADR-0021 §1) and hosts native file dialogs (E7). No Node at runtime (Bun/Node build-time only).",
+  "scripts": {
+    "dev": "vite",
+    "build": "vue-tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "tauri": "tauri",
+    "typecheck": "vue-tsc --noEmit",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.11.1",
+    "vue": "^3.5.42"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.11.4",
+    "@vitejs/plugin-vue": "^6.0.8",
+    "esbuild": "^0.28.2",
+    "typescript": "^5.9.0",
+    "vite": "^8.2.2",
+    "vue-tsc": "^3.3.11"
+  }
+}

@@ -24,12 +24,12 @@ daemon packaging, Rust is deferred until its phase.
 
 | # | Phase | Side | Rust? | Depends on |
 |---|---|---|---|---|
-| E1 | Deployment primitives (E1+E3+E4+E5) | engine (Go) | no | — |
-| F6 | Rust client (`openapi-to-rust`) | client | yes | E1 (spec amended) |
-| E2 | Tauri sidecar spawn | client | yes | F8 scaffold |
+| E1 | Deployment primitives (E1+E3+E4+E5) | engine (Go) | no | — **(landed)** |
+| F6 | Rust client (`openapi-to-rust`) | client | yes | E1 (spec amended) **(landed)** |
+| E2 | Tauri sidecar spawn | client | yes | F8 scaffold **(landed)** |
 | F7 | Vue state | client | no (node/bun) | F6 |
-| F8 | Tauri 2 + Vue 3 + CodeMirror 6 UI | client | yes | F6/F7 |
-| E6/E7 | Web target + capability adapter | client | no | F8 |
+| F8 | Tauri 2 + Vue 3 + CodeMirror 6 UI | client | yes | F6/F7 **(shell landed; UI next)** |
+| E6/E7 | Web target + capability adapter | client | no | F8 **(landed)** |
 
 ---
 
@@ -100,8 +100,32 @@ Touches `server/cmd/texteditor/main.go`, `server/internal/apiserver/apiserver.go
 
 ## Phase F6 — Rust client API + DTOs (gated: Rust toolchain)
 
-Prereq: E1's spec amendment is locked (so `openapi-to-rust` consumes the same
-spec the Go/TS clients do — ADR-0017 §3).
+**Status: landed.** Rust toolchain installed under `/Volumes/Ex-SSD/caches/`
+(`RUSTUP_HOME`/`CARGO_HOME`, the `macos-dev-config` `tools/dev-cache.sh`
+convention); `client/tauri/src-tauri/` scaffolded with a `Cargo.toml` (the
+reserved home, ADR-0034 §2); the client generated from `../../api/openapi.yaml`
+with **`openapi-to-rust` v0.15.0** and committed (`src-tauri/src/generated/`).
+`cargo check` green.
+
+**`openapi-to-rust` fit against the committed spec (recorded, not a spec
+change):**
+
+- `x-ogen-raw-response` is ignored; standard `text/event-stream` is read, so
+  `POST /turn` generates `start_turn` returning a live byte stream with
+  `Accept: text/event-stream` — the `/turn` SSE stream is modeled.
+- `Health.baseUrl` → `Health.base_url: Option<String>`; the `servers[0]`
+  `http://127.0.0.1:9100` becomes the generated client's default base URL, and
+  `HttpClient::with_base_url` is the injection seam the sidecar uses.
+- `Task.mentions`, `MeterEvent.mentions` (required), `GET /directories`
+  (`list_directory`), and the full SSE vocabulary (`Event`/`EventType` +
+  `TokenEvent`/`MeterEvent`/`CandidateEvent`/`DiffEvent`/`RagEvent`/`DoneEvent`/
+  `ErrorEvent`/`BackpressureEvent`) are all captured as typed schemas.
+- **Spec-shape observation (not a blocker):** the SSE vocabulary is a set of
+  *separate* payload schemas keyed by the SSE `event:` name — not a single
+  discriminator-tagged union — so the tool's opt-in typed "event union"
+  streaming client is not configured. F7 decodes the raw stream against the
+  per-type schemas, exactly as the TUI's Zod decoders do (ADR-0031 §4's "typed
+  SSE decoders keyed by event name").
 
 1. Install the Rust toolchain (`rustup`, `CARGO_HOME`/`RUSTUP_HOME` on
    `/Volumes/Ex-SSD` to spare the full internal disk — flag the ~1 GB cost).
@@ -116,6 +140,23 @@ spec the Go/TS clients do — ADR-0017 §3).
 ---
 
 ## Phase E2 + F8 scaffold — Tauri 2 app + sidecar spawn
+
+**Status: landed (scaffold + handshake; CodeMirror UI is F8 proper, later).**
+`src-tauri/src/sidecar.rs` (plain tokio + libc, no Tauri dep) implements the
+spawn/discovery/stop handshake; `src-tauri/src/shell.rs` (behind the `tauri`
+feature) wires it into the Tauri 2 shell: spawn on `setup`, `invoke`-exposed
+`get_engine_base_url`, stop on `RunEvent::Exit`. `tests/sidecar.rs` exercises
+the acceptance gate headlessly against the real engine binary
+(`cargo test` green; `cargo check`/`cargo build --features tauri` green).
+
+**Discovery bootstrap (recorded implementation choice, not an ADR change):**
+the engine logs `texteditor listening on http://…` to **stderr** (Go `log`),
+so the Rust core bootstraps the base URL from that line, then adopts
+`GET /health` → `baseUrl` as the advertised source of truth — ADR-0021 §1's
+"reads the chosen port from /health" is the authoritative step; the log line is
+only how the core first learns where to probe. Stop = SIGTERM, then SIGKILL
+after a 5 s grace (matching the engine's own `httpSrv.Shutdown`); the
+SIGTERM → SIGKILL escalation is unit-tested with a SIGTERM-ignoring process.
 
 1. **E2 · sidecar spawn** — Rust core spawns the engine binary on launch as a
    Tauri sidecar child process; reads `/health` → `baseUrl` and rewrites the
@@ -145,6 +186,16 @@ streaming simultaneously (ADR-0026 §1/§4).
 
 ## Phase E6/E7 — Web target + capability adapter
 
+**Status: landed.** E7: `src/capability/` (frontend) — one `CapabilityAdapter`
+interface with a Tauri branch (`invoke("pick_directory")`/`invoke("pick_file")`
+→ `src-tauri/src/capability.rs` `rfd` dialogs) and a web branch (File System
+Access API, `src/capability/web.ts`); `src/engine.ts` resolves the engine base
+URL per target (Tauri `invoke` handshake vs `VITE_ENGINE_URL`/`VITE_ENGINE_PORT`/
+spec default) and `/health`-probes it. E6: the web-target caveat is documented
+in `client/tauri/README.md` and the web adapter — self-hosting on the user's own
+machine/LAN, `ENGINE_BIND=0.0.0.0` opt-in, ACL in macos-dev-config. Frontend
+`vue-tsc`/`bun test`/`vite build` green.
+
 - **E7 · capability adapter** — the single per-target seam: Tauri `invoke` IPC
   vs Web File System Access API; all app logic stays in the engine (ADR-0014).
 - **E6 · web target** — same Vue UI served locally, engine self-hosted on the
@@ -160,14 +211,19 @@ streaming simultaneously (ADR-0026 §1/§4).
 - Serving only via Fleet → daemon (ADR-0025/0027); single static Go binary, no
   CGO.
 - Contract-first: route/shape changes surface as **recorded amendments** (E1's
-  `baseUrl` is the only one this phase).
+  `baseUrl` is the only one this phase — no spec change in F6/E2/E6/E7).
 - Boundary tests green at each step (`go test ./...`; `bun test` + `tsc --noEmit`
-  in `client/tui`).
+  in `client/tui`; `cargo test` + `cargo check --features tauri` in
+  `client/tauri/src-tauri`).
 
 ## Milestones (from `implementation-sequence-future.md`)
 
 1. E1–E5 → engine ships as standalone daemon *and* Tauri sidecar with
-   dynamic-port discovery + localhost bind.
-2. E6–E7 → web target + capability adapter.
+   dynamic-port discovery + localhost bind. **(E1/E3/E4/E5 + E2 landed — the
+   sidecar spawn/discovery/stop handshake is built and headlessly tested;
+   F6 landed)**
+2. E6–E7 → web target + capability adapter. **(landed — one adapter, Tauri
+   `invoke` + web File System Access API branches)**
 3. F6–F8 → Tauri editor with selection bubbles, side-by-side candidates, and
-   autosave-backed manual editing.
+   autosave-backed manual editing. **(F6 + F8 shell landed; F7 Vue state and
+   the F8 CodeMirror UI follow)**

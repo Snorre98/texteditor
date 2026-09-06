@@ -34,3 +34,13 @@ libc = "0.2"
 # feature. tauri = "2"; rfd = "0.15".
 tauri = { version = "2", optional = true }
 rfd = { version = "0.15", optional = true }
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+# The Tauri shell binary is only built when the `tauri` feature is on, so the
+# generated client + sidecar stay testable with no WebView dependency.
+[[bin]]
+name = "texteditor-tauri"
+path = "src/main.rs"
+required-features = ["tauri"]

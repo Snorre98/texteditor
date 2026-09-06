@@ -12,5 +12,15 @@
 pub mod capability;
 pub mod generated;
 pub mod sidecar;
+#[cfg(feature = "tauri")]
+pub mod shell;
 
 pub use generated::*;
+
+/// Run the Tauri shell (F8): spawn the engine sidecar, hand the discovered base
+/// URL to the webview, and stop the engine on quit. Only compiled with the
+/// `tauri` feature.
+#[cfg(feature = "tauri")]
+pub fn run() {
+    shell::run();
+}
