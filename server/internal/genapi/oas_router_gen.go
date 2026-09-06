@@ -17,10 +17,13 @@ var (
 	rn3AllowedHeaders = map[string]string{
 		"POST": "Content-Type",
 	}
+	rn30AllowedHeaders = map[string]string{
+		"PUT": "Content-Type",
+	}
 	rn7AllowedHeaders = map[string]string{
 		"POST": "Content-Type",
 	}
-	rn33AllowedHeaders = map[string]string{
+	rn34AllowedHeaders = map[string]string{
 		"POST": "Content-Type",
 	}
 )
@@ -349,6 +352,33 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 										s.notAllowed(w, r, notAllowedParams{
 											allowedMethods: "GET",
 											allowedHeaders: nil,
+											acceptPost:     "",
+											acceptPatch:    "",
+										})
+									}
+
+									return
+								}
+
+							case 't': // Prefix: "tree"
+
+								if l := len("tree"); len(elem) >= l && elem[0:l] == "tree" {
+									elem = elem[l:]
+								} else {
+									break
+								}
+
+								if len(elem) == 0 {
+									// Leaf node.
+									switch r.Method {
+									case "PUT":
+										s.handleSaveDocumentRequest([1]string{
+											args[0],
+										}, elemIsEscaped, w, r)
+									default:
+										s.notAllowed(w, r, notAllowedParams{
+											allowedMethods: "PUT",
+											allowedHeaders: rn30AllowedHeaders,
 											acceptPost:     "",
 											acceptPatch:    "",
 										})
@@ -759,7 +789,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 						default:
 							s.notAllowed(w, r, notAllowedParams{
 								allowedMethods: "POST",
-								allowedHeaders: rn33AllowedHeaders,
+								allowedHeaders: rn34AllowedHeaders,
 								acceptPost:     "application/json",
 								acceptPatch:    "",
 							})
@@ -1130,6 +1160,31 @@ func (s *Server) FindPath(method string, u *url.URL) (r Route, _ bool) {
 										r.operationID = "getHistory"
 										r.operationGroup = ""
 										r.pathPattern = "/documents/{id}/history"
+										r.args = args
+										r.count = 1
+										return r, true
+									default:
+										return
+									}
+								}
+
+							case 't': // Prefix: "tree"
+
+								if l := len("tree"); len(elem) >= l && elem[0:l] == "tree" {
+									elem = elem[l:]
+								} else {
+									break
+								}
+
+								if len(elem) == 0 {
+									// Leaf node.
+									switch method {
+									case "PUT":
+										r.name = SaveDocumentOperation
+										r.summary = "Replace the document's block tree (manual autosave, ADR-0038)"
+										r.operationID = "saveDocument"
+										r.operationGroup = ""
+										r.pathPattern = "/documents/{id}/tree"
 										r.args = args
 										r.count = 1
 										return r, true

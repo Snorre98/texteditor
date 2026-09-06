@@ -32,7 +32,7 @@ embeds a sibling module's package type.
 | `JSONSchema` | `ToolDef` | 0b |
 | `Document` | Document store | 0b |
 | `Block` | Document store, Chunker | 0b |
-| `BlockEdit`, `Revision`, `Candidate`, `WordEdit` | Document store | 9 |
+| `BlockEdit`, `Revision`, `Candidate`, `WordEdit`, `BlockWrite` | Document store | 9 |
 | `Event`, `RawEvent` | EventBus, Provider | 2, 11 |
 | `ToolDef` | Tool registry | 8 |
 | `BlockKind`, `TextFormatterIssue` | `TextFormatter` | 4b |
@@ -527,6 +527,14 @@ type Guard struct {
     BlockID string // a sibling/context block the edit relies on
     Hash    string // short hash of its canonical content
 }
+// BlockWrite is one block in a manual whole-tree save (ADR-0038). ID is nil for
+// a new block (the engine mints); a changed kind/parent retypes/moves. No hash/guards.
+type BlockWrite struct {
+    ID       *string
+    ParentID *string
+    Kind     BlockKind
+    Text     string
+}
 type Revision struct { ID, Message string; Timestamp int64 }
 type Candidate struct {
     BlockID string
@@ -537,7 +545,7 @@ type WordEdit struct { BlockID string; Insertions, Deletions []string }
 
 type DocumentStore interface {
     Open(path string) (documentID string, err error)
-    Save(doc Document) error
+    SaveTree(documentID string, tree []BlockWrite) (Revision, error) // manual autosave (ADR-0038)
     Blocks(documentID string) ([]Block, error)
     ApplyEdit(ctx context.Context, documentID string, edit BlockEdit) (Revision, error) // stages a candidate
     Commit(documentID string, msg string) error                                          // accept → one commit
@@ -557,13 +565,20 @@ Edit semantics (ADR-0029):
   `edit.Guards` atomically** before staging. A guard whose `Hash` no longer matches
   the block's current canonical content fails with a typed `guard-failed` error
   naming the changed blocks. A successful stage returns the candidate's `Revision`.
-- `Commit` and `Save` **format** the accepted/edited blocks to the opinionated
+- `Commit` and `SaveTree` **format** the accepted/edited blocks to the opinionated
   style before persisting.
 - **Canonical-content invariant:** blocks are always stored canonical; therefore
   content hashes are stable per revision.
 
 Commit cadence and block identity are ADR-0020 (two paths: AI edit == commit; manual
 edit == autosave snapshot; block IDs == stable UUIDs).
+
+`SaveTree` semantics (ADR-0038): the incoming `[]BlockWrite` is a whole-tree
+snapshot — array order is position. A block with a nil `ID` is minted; an existing
+block absent from the tree is dropped; a changed `Kind`/`ParentID` retypes/moves.
+The engine reconciles, normalizes on write and formats on commit, and commits an
+`autosave @ <ts>` snapshot iff the tree changed (otherwise it returns the current
+HEAD with no new commit). A manual save of a block drops its open candidates.
 
 ## 9b. Workspace (Go, leaf)
 

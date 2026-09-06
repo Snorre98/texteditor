@@ -57,7 +57,9 @@ func (stubTools) AllowlistFor(dto.Mode) []dto.ToolDef { return nil }
 type stubDoc struct{}
 
 func (stubDoc) Open(string) (string, error) { return "d1", nil }
-func (stubDoc) Save(dto.Document) error     { return nil }
+func (stubDoc) SaveTree(string, []dto.BlockWrite) (dto.Revision, error) {
+	return dto.Revision{ID: "r1", Message: "autosave @ 1", Timestamp: 1}, nil
+}
 func (stubDoc) Blocks(string) ([]dto.Block, error) {
 	return []dto.Block{{ID: "b1", Kind: dto.BlockKindParagraph, Text: "hello"}}, nil
 }
@@ -240,6 +242,21 @@ func TestOpenDocument(t *testing.T) {
 	}
 }
 
+func TestSaveDocument(t *testing.T) {
+	srv, _ := newTestServer(t)
+	rec := httptest.NewRecorder()
+	body := `{"blocks":[{"kind":"paragraph","text":"human typed"},{"id":"b1","kind":"paragraph","text":"kept"}]}`
+	req := httptest.NewRequest(http.MethodPut, "/documents/d1/tree", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("save = %d body %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "autosave") {
+		t.Fatalf("save body = %s, want autosave revision", rec.Body.String())
+	}
+}
+
 func TestApplyEdit(t *testing.T) {
 	srv, _ := newTestServer(t)
 	rec := httptest.NewRecorder()
@@ -394,5 +411,97 @@ func TestStartTurnDecodesMentions(t *testing.T) {
 	defer loop.mu.Unlock()
 	if len(loop.mentions) != 2 || loop.mentions[0] != "/notes/a.md" || loop.mentions[1] != "/notes/b.md" {
 		t.Fatalf("decoded mentions = %v, want [/notes/a.md /notes/b.md]", loop.mentions)
+	}
+}
+
+func newCORSServer(t *testing.T, origins []string) *Server {
+	t.Helper()
+	bus := &fakeBus{}
+	srv, err := New(Deps{
+		Fleet:       stubFleet{},
+		Modes:       stubModes{},
+		Tools:       stubTools{},
+		Doc:         stubDoc{},
+		Sessions:    stubSessions{},
+		Loop:        &stubLoopEmitter{bus: bus},
+		CORSOrigins: origins,
+	}, bus)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return srv
+}
+
+func TestCORSDisabledByDefault(t *testing.T) {
+	// No allowlist = no CORS headers, exactly the standalone-daemon/TUI behavior.
+	srv, _ := newTestServer(t)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	req.Header.Set("Origin", "tauri://localhost")
+	srv.ServeHTTP(rec, req)
+	if rec.Header().Get("Access-Control-Allow-Origin") != "" {
+		t.Fatalf("unexpected allow-origin header when CORS is disabled: %q", rec.Header().Get("Access-Control-Allow-Origin"))
+	}
+}
+
+func TestCORSAllowsListedOrigin(t *testing.T) {
+	srv := newCORSServer(t, []string{"tauri://localhost", "http://localhost:5173"})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	req.Header.Set("Origin", "tauri://localhost")
+	srv.ServeHTTP(rec, req)
+	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "tauri://localhost" {
+		t.Fatalf("allow-origin = %q, want tauri://localhost", got)
+	}
+	if got := rec.Header().Get("Vary"); !strings.Contains(got, "Origin") {
+		t.Fatalf("Vary = %q, want to include Origin", got)
+	}
+}
+
+func TestCORSRejectsUnlistedOrigin(t *testing.T) {
+	srv := newCORSServer(t, []string{"tauri://localhost"})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	req.Header.Set("Origin", "http://evil.example")
+	srv.ServeHTTP(rec, req)
+	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "" {
+		t.Fatalf("unlisted origin must get no allow-origin, got %q", got)
+	}
+}
+
+func TestCORSPreflightShortCircuits(t *testing.T) {
+	srv := newCORSServer(t, []string{"tauri://localhost"})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodOptions, "/turn", nil)
+	req.Header.Set("Origin", "tauri://localhost")
+	req.Header.Set("Access-Control-Request-Method", "POST")
+	req.Header.Set("Access-Control-Request-Headers", "content-type, accept")
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("preflight = %d, want 204", rec.Code)
+	}
+	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "tauri://localhost" {
+		t.Fatalf("preflight allow-origin = %q", got)
+	}
+	if got := rec.Header().Get("Access-Control-Allow-Headers"); got != "content-type, accept" {
+		t.Fatalf("preflight allow-headers = %q, want content-type, accept", got)
+	}
+	if got := rec.Header().Get("Access-Control-Allow-Methods"); !strings.Contains(got, "POST") || !strings.Contains(got, "PUT") {
+		t.Fatalf("preflight allow-methods = %q, want POST + PUT", got)
+	}
+}
+
+func TestCORSPreflightRejectsUnlistedOrigin(t *testing.T) {
+	srv := newCORSServer(t, []string{"tauri://localhost"})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodOptions, "/turn", nil)
+	req.Header.Set("Origin", "http://evil.example")
+	req.Header.Set("Access-Control-Request-Method", "POST")
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("preflight = %d, want 204 (fail-closed)", rec.Code)
+	}
+	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "" {
+		t.Fatalf("unlisted preflight must not be answered, got %q", got)
 	}
 }

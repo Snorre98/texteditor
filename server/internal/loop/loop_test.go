@@ -91,7 +91,9 @@ func (s stubFleet) Fingerprint(string) (string, error)                      { re
 type stubDoc struct{}
 
 func (stubDoc) Open(string) (string, error)        { return "", nil }
-func (stubDoc) Save(dto.Document) error            { return nil }
+func (stubDoc) SaveTree(string, []dto.BlockWrite) (dto.Revision, error) {
+	return dto.Revision{}, nil
+}
 func (stubDoc) Blocks(string) ([]dto.Block, error) { return nil, nil }
 func (stubDoc) ApplyEdit(context.Context, string, dto.BlockEdit) (dto.Revision, error) {
 	return dto.Revision{}, nil

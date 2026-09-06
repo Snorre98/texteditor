@@ -306,5 +306,8 @@ the owning module: retry/backoff + `provider-unreachable` (Provider, A3.1),
    shutdown, standalone-daemon packaging); the client half landed too — F6
    (openapi-to-rust generated Rust client), E2 (Tauri sidecar spawn/discovery/
    SIGTERM→SIGKILL stop, headlessly tested), E6/E7 (web target caveat +
-   capability adapter), and the F8 Tauri 2 + Vue 3 shell. Remaining: F7 Vue
-   state over the generated client + the F8 CodeMirror UI.**
+   capability adapter), F7 (Vue state over the generated client, direct-HTTP
+   transport per ADR-0037, per-session turn map), and F8 (CodeMirror 6 editor
+   with selection bubbles, side-by-side candidates, and autosave-backed manual
+   editing via `PUT /documents/{id}/tree`, ADR-0038). Track 2 complete: the
+   three targets run one engine over one contract (ADR-0014).**

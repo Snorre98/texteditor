@@ -27,7 +27,7 @@ import (
 // working tree (ADR-0020 §2).
 type DocumentStore interface {
 	Open(path string) (documentID string, err error)
-	Save(doc dto.Document) error
+	SaveTree(documentID string, tree []dto.BlockWrite) (dto.Revision, error)
 	Blocks(documentID string) ([]dto.Block, error)
 	ApplyEdit(ctx context.Context, documentID string, edit dto.BlockEdit) (dto.Revision, error)
 	Commit(documentID string, msg string) error
@@ -203,36 +203,149 @@ func (s *store) insertBlock(docID, id string, parent *string, pKind string, kind
 	return err
 }
 
-// Save formats (ADR-0029: autosave) and snapshots a document's current blocks.
-func (s *store) Save(doc dto.Document) error {
-	blocks, err := s.Blocks(doc.ID)
+// SaveTree reconciles a manual whole-tree snapshot (ADR-0038): array order =
+// position, `id` absent → mint a UUID (ADR-0020 §3), a block in the current tree
+// but absent from the request is dropped, a changed kind/parent retypes/moves. It
+// normalizes on write and formats on commit (ADR-0029 §6), drops every block's
+// open candidates (human keystrokes supersede AI proposals), and commits an
+// `autosave @ <ts>` snapshot iff anything changed — an unchanged tree returns the
+// current HEAD with no new commit.
+func (s *store) SaveTree(documentID string, tree []dto.BlockWrite) (dto.Revision, error) {
+	s.lockFor(documentID).Lock()
+	defer s.lockFor(documentID).Unlock()
+
+	type curRow struct {
+		id     string
+		parent *string
+		kind   dto.BlockKind
+	}
+	rows, err := s.db.Query(
+		`SELECT id, parent_id, kind FROM blocks WHERE document_id = ? ORDER BY position`,
+		documentID,
+	)
 	if err != nil {
-		return err
+		return dto.Revision{}, err
 	}
-	var texts []string
-	for _, b := range blocks {
-		formatted, _ := s.tf.Format(b.Kind, b.Text)
-		texts = append(texts, formatted)
+	defer rows.Close()
+	var cur []curRow
+	curByID := map[string]bool{}
+	for rows.Next() {
+		var r curRow
+		var parent sql.NullString
+		var kind string
+		if err := rows.Scan(&r.id, &parent, &kind); err != nil {
+			return dto.Revision{}, err
+		}
+		if parent.Valid {
+			r.parent = &parent.String
+		}
+		r.kind = dto.BlockKind(kind)
+		cur = append(cur, r)
+		curByID[r.id] = true
 	}
+	if err := rows.Err(); err != nil {
+		return dto.Revision{}, err
+	}
+
+	type block struct {
+		id     string
+		parent *string
+		kind   dto.BlockKind
+		text   string
+	}
+	out := make([]block, 0, len(tree))
+	texts := make([]string, 0, len(tree))
+	for _, bw := range tree {
+		id := ""
+		if bw.ID != nil {
+			id = *bw.ID
+		}
+		// Existing IDs stay stable; a nil or stale ID mints a fresh UUID.
+		if id == "" || !curByID[id] {
+			id = uuid.NewString()
+		}
+		text, _ := s.tf.Format(bw.Kind, bw.Text)
+		out = append(out, block{id: id, parent: bw.ParentID, kind: bw.Kind, text: text})
+		texts = append(texts, text)
+	}
+
 	canonical := serializeBlocks(texts)
 
-	s.lockFor(doc.ID).Lock()
-	defer s.lockFor(doc.ID).Unlock()
+	// changed = structure or content differs (a no-op returns the current HEAD).
+	changed := len(cur) != len(out)
+	if !changed {
+		for i := range cur {
+			if cur[i].id != out[i].id || cur[i].kind != out[i].kind || !strPtrEq(cur[i].parent, out[i].parent) {
+				changed = true
+				break
+			}
+		}
+	}
 
-	h, err := s.histFor(doc.ID)
+	h, err := s.histFor(documentID)
 	if err != nil {
-		return err
+		return dto.Revision{}, err
+	}
+	currentText, err := h.readFile(s.workfileName)
+	if err != nil {
+		return dto.Revision{}, err
+	}
+	if canonical != currentText {
+		changed = true
+	}
+	if !changed {
+		return s.currentRevision(documentID)
+	}
+
+	// Drop open candidates (human keystrokes supersede the AI proposal), rewrite
+	// the structure rows in position order, write the worktree, and commit.
+	if _, err := s.db.Exec(
+		`DELETE FROM candidates WHERE block_id IN (SELECT id FROM blocks WHERE document_id = ?)`,
+		documentID,
+	); err != nil {
+		return dto.Revision{}, err
+	}
+	if _, err := s.db.Exec(`DELETE FROM blocks WHERE document_id = ?`, documentID); err != nil {
+		return dto.Revision{}, err
+	}
+	for i, b := range out {
+		if err := s.insertBlock(documentID, b.id, b.parent, "", b.kind, i); err != nil {
+			return dto.Revision{}, err
+		}
 	}
 	if err := h.writeFile(s.workfileName, []byte(canonical)); err != nil {
-		return err
+		return dto.Revision{}, err
 	}
-	if _, err := h.commit(fmt.Sprintf("autosave @ %d", time.Now().Unix())); err != nil {
-		return err
+	now := time.Now().Unix()
+	msg := fmt.Sprintf("autosave @ %d", now)
+	hash, err := h.commit(msg)
+	if err != nil {
+		return dto.Revision{}, err
 	}
-	if _, err := s.db.Exec(`UPDATE documents SET updated_at = ? WHERE id = ?`, time.Now().Unix(), doc.ID); err != nil {
-		return err
+	if _, err := s.db.Exec(`UPDATE documents SET updated_at = ? WHERE id = ?`, now, documentID); err != nil {
+		return dto.Revision{}, err
 	}
-	return nil
+	return dto.Revision{ID: hash, Message: msg, Timestamp: now}, nil
+}
+
+// currentRevision returns the newest revision (or a zero revision with no commits).
+func (s *store) currentRevision(documentID string) (dto.Revision, error) {
+	hist, err := s.History(documentID)
+	if err != nil {
+		return dto.Revision{}, err
+	}
+	if len(hist) == 0 {
+		return dto.Revision{}, nil
+	}
+	return hist[0], nil
+}
+
+// strPtrEq compares two optional strings for pointer equality.
+func strPtrEq(a, b *string) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return *a == *b
 }
 
 // Blocks reconstructs the block tree from structure rows + the worktree file,

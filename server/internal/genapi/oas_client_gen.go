@@ -104,6 +104,17 @@ type Invoker interface {
 	//
 	// POST /models/{name}/provision
 	ProvisionModel(ctx context.Context, params ProvisionModelParams) (*ProvisionResponse, error)
+	// SaveDocument invokes saveDocument operation.
+	//
+	// The manual-edit wire path (ADR-0038): the client's whole block-tree snapshot. Array order =
+	// position; a block with no `id` is new (the engine mints a UUID, ADR-0020 §3); an `id` present in
+	// the current tree but absent from the request is deleted; a changed `kind`/`parentId` is
+	// retyped/moved. The engine reconciles, normalizes on write and formats on commit, and commits
+	// `autosave @ <ts>` iff anything changed (a no-op returns the current HEAD). A manual save of a block
+	// drops its open candidates.
+	//
+	// PUT /documents/{id}/tree
+	SaveDocument(ctx context.Context, request *SaveTreeRequest, params SaveDocumentParams) (*Revision, error)
 	// StartModel invokes startModel operation.
 	//
 	// POST /models/{name}/start
@@ -1753,6 +1764,113 @@ func (c *Client) sendProvisionModel(ctx context.Context, params ProvisionModelPa
 
 	stage = "DecodeResponse"
 	result, err := decodeProvisionModelResponse(resp)
+	if err != nil {
+		return res, errors.Wrap(err, "decode response")
+	}
+
+	return result, nil
+}
+
+// SaveDocument invokes saveDocument operation.
+//
+// The manual-edit wire path (ADR-0038): the client's whole block-tree snapshot. Array order =
+// position; a block with no `id` is new (the engine mints a UUID, ADR-0020 §3); an `id` present in
+// the current tree but absent from the request is deleted; a changed `kind`/`parentId` is
+// retyped/moved. The engine reconciles, normalizes on write and formats on commit, and commits
+// `autosave @ <ts>` iff anything changed (a no-op returns the current HEAD). A manual save of a block
+// drops its open candidates.
+//
+// PUT /documents/{id}/tree
+func (c *Client) SaveDocument(ctx context.Context, request *SaveTreeRequest, params SaveDocumentParams) (*Revision, error) {
+	res, err := c.sendSaveDocument(ctx, request, params)
+	return res, err
+}
+
+func (c *Client) sendSaveDocument(ctx context.Context, request *SaveTreeRequest, params SaveDocumentParams) (res *Revision, err error) {
+	otelAttrs := []attribute.KeyValue{
+		otelogen.OperationID("saveDocument"),
+		semconv.HTTPRequestMethodKey.String("PUT"),
+		semconv.URLTemplateKey.String("/documents/{id}/tree"),
+	}
+	otelAttrs = append(otelAttrs, c.cfg.Attributes...)
+
+	// Run stopwatch.
+	startTime := time.Now()
+	defer func() {
+		// Use floating point division here for higher precision (instead of Millisecond method).
+		elapsedDuration := time.Since(startTime)
+		c.duration.Record(ctx, float64(elapsedDuration)/float64(time.Millisecond), metric.WithAttributes(otelAttrs...))
+	}()
+
+	// Increment request counter.
+	c.requests.Add(ctx, 1, metric.WithAttributes(otelAttrs...))
+
+	// Start a span for this request.
+	ctx, span := c.cfg.Tracer.Start(ctx, SaveDocumentOperation,
+		trace.WithAttributes(otelAttrs...),
+		clientSpanKind,
+	)
+	// Track stage for error reporting.
+	var stage string
+	defer func() {
+		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, stage)
+			c.errors.Add(ctx, 1, metric.WithAttributes(otelAttrs...))
+		}
+		span.End()
+	}()
+
+	stage = "BuildURL"
+	u := uri.Clone(c.requestURL(ctx))
+	var pathParts [3]string
+	pathParts[0] = "/documents/"
+	{
+		// Encode "id" parameter.
+		e := uri.NewPathEncoder(uri.PathEncoderConfig{
+			Param:   "id",
+			Style:   uri.PathStyleSimple,
+			Explode: false,
+		})
+		if err := func() error {
+			return e.EncodeValue(conv.StringToString(params.ID))
+		}(); err != nil {
+			return res, errors.Wrap(err, "encode path")
+		}
+		encoded, err := e.Result()
+		if err != nil {
+			return res, errors.Wrap(err, "encode path")
+		}
+		pathParts[1] = encoded
+	}
+	pathParts[2] = "/tree"
+	uri.AddPathParts(u, pathParts[:]...)
+
+	stage = "EncodeRequest"
+	r, err := ht.NewRequest(ctx, "PUT", u)
+	if err != nil {
+		return res, errors.Wrap(err, "create request")
+	}
+	if err := encodeSaveDocumentRequest(request, r); err != nil {
+		return res, errors.Wrap(err, "encode request")
+	}
+
+	stage = "SendRequest"
+	resp, err := c.cfg.Client.Do(r)
+	if err != nil {
+		return res, errors.Wrap(err, "do request")
+	}
+	body := resp.Body
+	defer func() {
+		// Drain the body to EOF before closing, so the underlying
+		// connection can be reused by the Transport regardless of the
+		// response status code. See https://github.com/ogen-go/ogen/issues/1670.
+		_, _ = io.Copy(io.Discard, body)
+		_ = body.Close()
+	}()
+
+	stage = "DecodeResponse"
+	result, err := decodeSaveDocumentResponse(resp)
 	if err != nil {
 		return res, errors.Wrap(err, "decode response")
 	}

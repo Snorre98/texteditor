@@ -194,22 +194,104 @@ func TestBlockNotFound(t *testing.T) {
 	}
 }
 
-func TestSaveAutosaves(t *testing.T) {
+func TestSaveTreeAutosaves(t *testing.T) {
 	s := newTestStore(t)
 	id := openDoc(t, s, "a paragraph")
 
-	doc := dto.Document{ID: id, RootBlockID: "r"}
-	if err := s.Save(doc); err != nil {
+	blocks, _ := s.Blocks(id)
+	rev, err := s.SaveTree(id, []dto.BlockWrite{
+		{ID: &blocks[0].ID, Kind: dto.BlockKindParagraph, Text: "a changed paragraph"},
+	})
+	if err != nil {
 		t.Fatal(err)
 	}
+	if rev.ID == "" || rev.Message == "" {
+		t.Fatalf("saveTree revision = %+v, want populated", rev)
+	}
 
-	// Save is the autosave path: one snapshot commit exists.
+	// SaveTree is the autosave path: one snapshot commit exists.
 	hist, err := s.History(id)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(hist) != 1 {
 		t.Fatalf("history = %d, want 1 autosave commit", len(hist))
+	}
+	after, _ := s.Blocks(id)
+	if after[0].Text != "a changed paragraph" {
+		t.Fatalf("saved text = %q", after[0].Text)
+	}
+}
+
+func TestSaveTreeNoopWhenUnchanged(t *testing.T) {
+	s := newTestStore(t)
+	id := openDoc(t, s, "a paragraph")
+
+	blocks, _ := s.Blocks(id)
+	if _, err := s.SaveTree(id, []dto.BlockWrite{
+		{ID: &blocks[0].ID, Kind: dto.BlockKindParagraph, Text: "a paragraph"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// An unchanged tree is a no-op: no new commit.
+	hist, _ := s.History(id)
+	if len(hist) != 0 {
+		t.Fatalf("history = %d, want 0 (no-op save must not commit)", len(hist))
+	}
+}
+
+func TestSaveTreeMintsAndDrops(t *testing.T) {
+	s := newTestStore(t)
+	id := openDoc(t, s, "block one\n\nblock two")
+
+	blocks, _ := s.Blocks(id)
+	if len(blocks) != 2 {
+		t.Fatalf("blocks = %d, want 2", len(blocks))
+	}
+	// Reorder + mint a new block + drop the second. New block has no ID; the
+	// engine mints it (ADR-0038 §2).
+	tree := []dto.BlockWrite{
+		{Kind: dto.BlockKindParagraph, Text: "fresh block"},     // new (no id)
+		{ID: &blocks[0].ID, Kind: dto.BlockKindParagraph, Text: "block one"}, // kept
+	}
+	if _, err := s.SaveTree(id, tree); err != nil {
+		t.Fatal(err)
+	}
+	after, _ := s.Blocks(id)
+	if len(after) != 2 {
+		t.Fatalf("after blocks = %d, want 2", len(after))
+	}
+	if after[0].ID == blocks[0].ID || after[0].ID == blocks[1].ID {
+		t.Fatalf("new block must mint a fresh ID, got %q", after[0].ID)
+	}
+	if after[0].Text != "fresh block" || after[1].Text != "block one" {
+		t.Fatalf("order/text wrong: %+v", after)
+	}
+	if after[1].ID != blocks[0].ID {
+		t.Fatalf("kept block must retain its stable ID")
+	}
+}
+
+func TestSaveTreeDropsOpenCandidates(t *testing.T) {
+	s := newTestStore(t)
+	id := openDoc(t, s, "before edit")
+
+	blocks, _ := s.Blocks(id)
+	if _, err := s.ApplyEdit(context.Background(), id, dto.BlockEdit{BlockID: blocks[0].ID, Text: "candidate"}); err != nil {
+		t.Fatal(err)
+	}
+	if cands, _ := s.Candidates(id, blocks[0].ID); len(cands) != 1 {
+		t.Fatalf("candidates = %d, want 1 staged", len(cands))
+	}
+
+	// A manual save of the block drops its open candidates (ADR-0038 §5).
+	if _, err := s.SaveTree(id, []dto.BlockWrite{
+		{ID: &blocks[0].ID, Kind: dto.BlockKindParagraph, Text: "human typed"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if cands, _ := s.Candidates(id, blocks[0].ID); len(cands) != 0 {
+		t.Fatalf("candidates = %d, want 0 after manual save", len(cands))
 	}
 }
 

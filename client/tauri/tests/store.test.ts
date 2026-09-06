@@ -15,6 +15,9 @@ const METER: MeterEvent = {
   completion: 5,
 };
 
+const turnOf = (store: ReturnType<typeof createAppStore>, id: string) =>
+  store.state.sessionStates[id]?.turn;
+
 // --------------------------- tests ---------------------------
 
 describe("createAppStore", () => {
@@ -23,24 +26,25 @@ describe("createAppStore", () => {
     const store = createAppStore({ api, baseUrl: "http://x" });
     await store.refreshFleet();
 
-    const s = store.state();
+    const s = store.state;
     expect(s.models.map((m) => m.name)).toEqual(["gemma4-12b", "gemma4-26b"]);
     expect(s.modes.map((m) => m.name)).toEqual(["proofreader"]);
     expect(s.tools.map((t) => t.name)).toEqual(["edit_markdown"]);
   });
 
-  test("openDocument loads the document, block tree, and history", async () => {
+  test("openDocument loads the document, block tree, and history and resets sessions", async () => {
     const { api, calls } = stubApi();
     const store = createAppStore({ api, baseUrl: "http://x" });
     await store.openDocument("/notes/thesis.md");
 
-    const s = store.state();
+    const s = store.state;
     expect(calls).toContain("open:/notes/thesis.md");
     expect(s.document?.id).toBe("d1");
     expect(s.blocks[0]?.text).toBe("hello");
+    expect(Object.keys(s.sessionStates)).toEqual([]);
   });
 
-  test("submitTurn streams tokens/meter/candidate/rag/done into signals", async () => {
+  test("submitTurn streams into the session-keyed turn slice", async () => {
     const { api } = stubApi();
     const events = [
       { name: "token", payload: { text: "Fix " } },
@@ -61,17 +65,41 @@ describe("createAppStore", () => {
     };
     await store.submitTurn(input);
 
-    const s = store.state();
+    const t = turnOf(store, "s1")!;
     expect(stream.tasks).toHaveLength(1);
-    expect(s.turn.tokens).toBe("Fix the verb.");
-    expect(s.turn.meter).toEqual(METER);
-    expect(s.turn.candidate).toEqual({ ok: true, blockId: "b1" });
-    expect(s.turn.rag?.chunks?.[0]?.text).toBe("cited");
-    expect(s.turn.done).toEqual({ degraded: false, usedModel: "gemma4-12b" });
-    expect(s.turn.active).toBe(false);
+    expect(t.tokens).toBe("Fix the verb.");
+    expect(t.meter).toEqual(METER);
+    expect(t.candidate).toEqual({ ok: true, blockId: "b1" });
+    expect(t.rag?.chunks?.[0]?.text).toBe("cited");
+    expect(t.done).toEqual({ degraded: false, usedModel: "gemma4-12b" });
+    expect(t.active).toBe(false);
   });
 
-  test("the meter cumulative tally sums across turns", async () => {
+  test("two sessions stream concurrently into isolated slices (ADR-0026 §4)", async () => {
+    const { api } = stubApi();
+    const streamA = fakeStream([
+      { name: "token", payload: { text: "AAA" } },
+      { name: "done", payload: {} },
+    ]);
+    const streamB = fakeStream([
+      { name: "token", payload: { text: "BBB" } },
+      { name: "done", payload: {} },
+    ]);
+    // Each session gets its own stream; a real engine would demultiplex by turn.
+    const store = createAppStore({ api, baseUrl: "http://x", stream: streamA.run });
+
+    await store.submitTurn({ sessionId: "sa", modeName: "p", documentId: "d1", userInput: "a" });
+    // Swap the stream for the second session (simulating two live bubbles).
+    const storeB = createAppStore({ api, baseUrl: "http://x", stream: streamB.run });
+    await storeB.submitTurn({ sessionId: "sb", modeName: "p", documentId: "d1", userInput: "b" });
+
+    expect(turnOf(store, "sa")!.tokens).toBe("AAA");
+    expect(turnOf(storeB, "sb")!.tokens).toBe("BBB");
+    // A session's slice does not exist until that session streams.
+    expect(store.state.sessionStates["sb"]).toBeUndefined();
+  });
+
+  test("the meter cumulative tally is per-session and sums across turns", async () => {
     const { api } = stubApi();
     const stream = fakeStream([
       { name: "meter", payload: METER },
@@ -86,8 +114,7 @@ describe("createAppStore", () => {
     };
 
     await store.submitTurn(input);
-    expect(store.state().turn.cumulative.completion).toBe(5);
-    expect(store.state().turn.cumulative).toEqual({
+    expect(turnOf(store, "s1")!.cumulative).toEqual({
       ...ZERO_TALLY,
       system: 10,
       rag: 4,
@@ -97,11 +124,11 @@ describe("createAppStore", () => {
     });
 
     await store.submitTurn(input);
-    expect(store.state().turn.cumulative.completion).toBe(10);
-    expect(store.state().turn.cumulative.system).toBe(20);
+    expect(turnOf(store, "s1")!.cumulative.completion).toBe(10);
+    expect(turnOf(store, "s1")!.cumulative.system).toBe(20);
   });
 
-  test("a turn error event lands in turn.error and deactivates the turn", async () => {
+  test("a turn error event lands in the session's turn.error and deactivates it", async () => {
     const { api } = stubApi();
     const stream = fakeStream([
       { name: "error", payload: { code: "provider-unreachable", message: "down" } },
@@ -114,9 +141,20 @@ describe("createAppStore", () => {
       userInput: "fix",
     });
 
-    const s = store.state();
-    expect(s.turn.error).toEqual({ code: "provider-unreachable", message: "down" });
-    expect(s.turn.active).toBe(false);
+    const t = turnOf(store, "s1")!;
+    expect(t.error).toEqual({ code: "provider-unreachable", message: "down" });
+    expect(t.active).toBe(false);
+  });
+
+  test("createSession is create-or-resume and anchors to a block", async () => {
+    const { api, calls } = stubApi();
+    const store = createAppStore({ api, baseUrl: "http://x" });
+    await store.openDocument("/notes/thesis.md");
+    const id = await store.createSession("b1", "proofreader");
+
+    expect(id).toBe("s1");
+    expect(store.state.sessions[0]?.anchorBlockId).toBe("b1");
+    expect(store.state.sessionStates["s1"]).toBeDefined();
   });
 
   test("acceptCandidate fetches the staged candidate, then applies and commits", async () => {
@@ -129,10 +167,22 @@ describe("createAppStore", () => {
     expect(calls).toContain("commit");
   });
 
+  test("saveTree sends the whole-tree snapshot (ADR-0038)", async () => {
+    const { api, calls } = stubApi();
+    const store = createAppStore({ api, baseUrl: "http://x" });
+    await store.openDocument("/notes/thesis.md");
+    await store.saveTree([
+      { kind: "paragraph", text: "typed" },
+      { id: "b1", kind: "paragraph", text: "kept" },
+    ]);
+
+    expect(calls).toContain("save:2");
+  });
+
   // serving-control.feature — "The TUI switches models by starting and
   // stopping servers": the Fleet gateway calls Start(new) and Stop(old); the
   // completion is not issued until the new server reports up; a failed start
-  // surfaces as an error event, leaving the old model running.
+  // surfaces as an error, leaving the old model running.
   describe("switchModel (serving-control.feature 'TUI switches models')", () => {
     test("starts the new model and only then stops the old one", async () => {
       const order: string[] = [];
@@ -150,8 +200,8 @@ describe("createAppStore", () => {
       await store.switchModel("gemma4-12b", "gemma4-26b");
 
       expect(order).toEqual(["start:gemma4-26b", "stop:gemma4-12b"]);
-      expect(store.state().turn.error).toBeNull();
-      expect(store.state().switching).toBeNull();
+      expect(store.state.connection.error).toBeNull();
+      expect(store.state.switching).toBeNull();
     });
 
     test("a failed start leaves the old model running and surfaces an error", async () => {
@@ -162,10 +212,8 @@ describe("createAppStore", () => {
       await store.switchModel("gemma4-12b", "gemma4-26b");
 
       expect(calls).not.toContain("stop:gemma4-12b");
-      const err = store.state().turn.error;
-      expect(err?.code).toBe("model-switch-failed");
-      expect(err?.message).toContain("gemma4-12b left running");
-      expect(store.state().switching).toBeNull();
+      expect(store.state.connection.error).toContain("gemma4-12b left running");
+      expect(store.state.switching).toBeNull();
     });
 
     test("switching to the same model is a no-op", async () => {

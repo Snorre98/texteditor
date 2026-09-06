@@ -31,6 +31,20 @@ pub const DEFAULT_DISCOVER_TIMEOUT: Duration = Duration::from_secs(15);
 /// so a graceful SIGTERM has room to drain before the SIGKILL escalation.
 pub const DEFAULT_STOP_GRACE: Duration = Duration::from_secs(5);
 
+/// The local webview origins the sidecar passes to the engine's CORS allowlist
+/// (ADR-0037). Tauri 2 serves the frontend from `tauri://localhost` (macOS/Linux)
+/// or `http(s)://tauri.localhost` (Windows); `http://localhost:5173` is the Vite
+/// dev origin. The exact origin is platform-dependent and is confirmed against
+/// the shipped webview at run time — passing the superset is fail-closed-safe
+/// (an allowlist entry that is never used is harmless; a missing one would block
+/// the handshake).
+pub const DEFAULT_CORS_ORIGINS: &[&str] = &[
+    "tauri://localhost",
+    "http://tauri.localhost",
+    "https://tauri.localhost",
+    "http://localhost:5173",
+];
+
 /// The `texteditor listening on http://…` marker the engine logs to stderr.
 const LISTENING_MARKER: &str = "listening on ";
 
@@ -58,6 +72,8 @@ pub struct EngineOptions {
     pub data_dir: Option<PathBuf>,
     /// Optional control-daemon base URL (defaults to the engine's own).
     pub daemon_url: Option<String>,
+    /// CORS origin allowlist passed to the engine (ADR-0037); empty = CORS off.
+    pub cors_origins: Vec<String>,
     /// How long to wait for the startup base-URL advertisement.
     pub discover_timeout: Duration,
     /// How long to allow a graceful SIGTERM stop before escalating to SIGKILL.
@@ -72,6 +88,7 @@ impl EngineOptions {
             port: None,
             data_dir: None,
             daemon_url: None,
+            cors_origins: DEFAULT_CORS_ORIGINS.iter().map(|s| s.to_string()).collect(),
             discover_timeout: DEFAULT_DISCOVER_TIMEOUT,
             stop_grace: DEFAULT_STOP_GRACE,
         }
@@ -130,6 +147,9 @@ pub async fn spawn_engine(opts: &EngineOptions) -> Result<EngineHandle, EngineEr
     }
     if let Some(daemon) = &opts.daemon_url {
         cmd.arg("-daemon").arg(daemon);
+    }
+    if !opts.cors_origins.is_empty() {
+        cmd.arg("-cors-origins").arg(opts.cors_origins.join(","));
     }
     // The engine logs to stderr (Go `log`); stdout is unused. We own the stop
     // signal, so do not kill-on-drop at the tokio layer.

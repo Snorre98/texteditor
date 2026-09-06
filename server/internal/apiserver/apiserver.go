@@ -25,22 +25,25 @@ import (
 // Deps holds the injected engine modules the server adapts (composition root
 // wires these to the real gateways/stores). BaseURL is the engine's own bound
 // base URL, advertised via /health for dynamic-port discovery (ADR-0021 §1).
+// CORSOrigins is the explicit origin allowlist (ADR-0037); empty = CORS disabled.
 type Deps struct {
-	Fleet     fleet.Interface
-	Modes     mode.Interface
-	Tools     tool.Registry
-	Doc       document.Interface
-	Sessions  session.Interface
-	Loop      loop.Interface
-	Workspace workspace.Interface
-	BaseURL   string
+	Fleet       fleet.Interface
+	Modes       mode.Interface
+	Tools       tool.Registry
+	Doc         document.Interface
+	Sessions    session.Interface
+	Loop        loop.Interface
+	Workspace   workspace.Interface
+	BaseURL     string
+	CORSOrigins []string
 }
 
-// Server wraps the generated ogen server with a handler adapter. ServeHTTP is
-// delegated to the generated router.
+// Server wraps the generated ogen server with a handler adapter. ServeHTTP
+// applies the CORS policy (when enabled) then delegates to the generated router.
 type Server struct {
-	srv *genapi.Server
-	d   Deps
+	srv  *genapi.Server
+	d    Deps
+	cors *corsPolicy
 }
 
 // New builds the API server. bus must implement Emit (for SSE fan-out via
@@ -52,7 +55,7 @@ func New(d Deps, bus EventSource) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Server{srv: srv, d: d}, nil
+	return &Server{srv: srv, d: d, cors: newCORSPolicy(d.CORSOrigins)}, nil
 }
 
 // EventSource is the sealed subset of the event bus the /turn handler needs:
@@ -67,6 +70,9 @@ type handler struct {
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if s.cors != nil && s.cors.apply(w, r) {
+		return
+	}
 	s.srv.ServeHTTP(w, r)
 }
 
@@ -209,6 +215,31 @@ func (h *handler) CommitDocument(ctx context.Context, p genapi.CommitDocumentPar
 		return nil, err
 	}
 	return &genapi.Revision{}, nil
+}
+
+// SaveDocument backs PUT /documents/{id}/tree (ADR-0038): the manual-edit whole-
+// tree snapshot. The engine reconciles, mints IDs for new blocks, formats, and
+// commits `autosave @ <ts>` iff changed.
+func (h *handler) SaveDocument(ctx context.Context, req *genapi.SaveTreeRequest, p genapi.SaveDocumentParams) (*genapi.Revision, error) {
+	tree := make([]dto.BlockWrite, 0, len(req.Blocks))
+	for _, b := range req.Blocks {
+		bw := dto.BlockWrite{
+			Kind: dto.BlockKind(b.Kind),
+			Text: b.Text,
+		}
+		if v, ok := b.ID.Get(); ok {
+			bw.ID = &v
+		}
+		if v, ok := b.ParentId.Get(); ok {
+			bw.ParentID = &v
+		}
+		tree = append(tree, bw)
+	}
+	rev, err := h.d.Doc.SaveTree(p.ID, tree)
+	if err != nil {
+		return nil, err
+	}
+	return revisionToGen(rev), nil
 }
 
 func (h *handler) GetHistory(ctx context.Context, p genapi.GetHistoryParams) ([]genapi.Revision, error) {

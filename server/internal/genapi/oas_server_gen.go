@@ -85,6 +85,17 @@ type Handler interface {
 	//
 	// POST /models/{name}/provision
 	ProvisionModel(ctx context.Context, params ProvisionModelParams) (*ProvisionResponse, error)
+	// SaveDocument implements saveDocument operation.
+	//
+	// The manual-edit wire path (ADR-0038): the client's whole block-tree snapshot. Array order =
+	// position; a block with no `id` is new (the engine mints a UUID, ADR-0020 §3); an `id` present in
+	// the current tree but absent from the request is deleted; a changed `kind`/`parentId` is
+	// retyped/moved. The engine reconciles, normalizes on write and formats on commit, and commits
+	// `autosave @ <ts>` iff anything changed (a no-op returns the current HEAD). A manual save of a block
+	// drops its open candidates.
+	//
+	// PUT /documents/{id}/tree
+	SaveDocument(ctx context.Context, req *SaveTreeRequest, params SaveDocumentParams) (*Revision, error)
 	// StartModel implements startModel operation.
 	//
 	// POST /models/{name}/start

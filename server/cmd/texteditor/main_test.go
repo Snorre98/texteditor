@@ -38,6 +38,29 @@ func TestEnvInt(t *testing.T) {
 	}
 }
 
+func TestSplitList(t *testing.T) {
+	cases := []struct {
+		in   string
+		want []string
+	}{
+		{"", nil},
+		{"tauri://localhost", []string{"tauri://localhost"}},
+		{"tauri://localhost, http://localhost:5173", []string{"tauri://localhost", "http://localhost:5173"}},
+		{" a , , b ", []string{"a", "b"}},
+	}
+	for _, c := range cases {
+		got := splitList(c.in)
+		if len(got) != len(c.want) {
+			t.Fatalf("splitList(%q) = %v, want %v", c.in, got, c.want)
+		}
+		for i := range got {
+			if got[i] != c.want[i] {
+				t.Fatalf("splitList(%q) = %v, want %v", c.in, got, c.want)
+			}
+		}
+	}
+}
+
 func TestBindListenerDynamic(t *testing.T) {
 	ln, baseURL, err := bindListener("127.0.0.1", 0)
 	if err != nil {

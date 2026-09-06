@@ -184,6 +184,126 @@ func (s *BlockKind) UnmarshalText(data []byte) error {
 	}
 }
 
+// One block in a manual tree save. `id` absent = new block (engine mints a UUID, ADR-0020 §3); `id`
+// present = existing block matched by stable UUID. No `hash`/`guards` — those are AI-edit concerns
+// (ADR-0029 §4).
+// Ref: #/components/schemas/BlockWrite
+type BlockWrite struct {
+	ID       OptString      `json:"id"`
+	ParentId OptString      `json:"parentId"`
+	Kind     BlockWriteKind `json:"kind"`
+	Text     string         `json:"text"`
+}
+
+// GetID returns the value of ID.
+func (s *BlockWrite) GetID() OptString {
+	return s.ID
+}
+
+// GetParentId returns the value of ParentId.
+func (s *BlockWrite) GetParentId() OptString {
+	return s.ParentId
+}
+
+// GetKind returns the value of Kind.
+func (s *BlockWrite) GetKind() BlockWriteKind {
+	return s.Kind
+}
+
+// GetText returns the value of Text.
+func (s *BlockWrite) GetText() string {
+	return s.Text
+}
+
+// SetID sets the value of ID.
+func (s *BlockWrite) SetID(val OptString) {
+	s.ID = val
+}
+
+// SetParentId sets the value of ParentId.
+func (s *BlockWrite) SetParentId(val OptString) {
+	s.ParentId = val
+}
+
+// SetKind sets the value of Kind.
+func (s *BlockWrite) SetKind(val BlockWriteKind) {
+	s.Kind = val
+}
+
+// SetText sets the value of Text.
+func (s *BlockWrite) SetText(val string) {
+	s.Text = val
+}
+
+type BlockWriteKind string
+
+const (
+	BlockWriteKindParagraph  BlockWriteKind = "paragraph"
+	BlockWriteKindHeading    BlockWriteKind = "heading"
+	BlockWriteKindListItem   BlockWriteKind = "list_item"
+	BlockWriteKindCodeFence  BlockWriteKind = "code_fence"
+	BlockWriteKindBlockquote BlockWriteKind = "blockquote"
+	BlockWriteKindTable      BlockWriteKind = "table"
+)
+
+// AllValues returns all BlockWriteKind values.
+func (BlockWriteKind) AllValues() []BlockWriteKind {
+	return []BlockWriteKind{
+		BlockWriteKindParagraph,
+		BlockWriteKindHeading,
+		BlockWriteKindListItem,
+		BlockWriteKindCodeFence,
+		BlockWriteKindBlockquote,
+		BlockWriteKindTable,
+	}
+}
+
+// MarshalText implements encoding.TextMarshaler.
+func (s BlockWriteKind) MarshalText() ([]byte, error) {
+	switch s {
+	case BlockWriteKindParagraph:
+		return []byte(s), nil
+	case BlockWriteKindHeading:
+		return []byte(s), nil
+	case BlockWriteKindListItem:
+		return []byte(s), nil
+	case BlockWriteKindCodeFence:
+		return []byte(s), nil
+	case BlockWriteKindBlockquote:
+		return []byte(s), nil
+	case BlockWriteKindTable:
+		return []byte(s), nil
+	default:
+		return nil, errors.Errorf("invalid value: %q", s)
+	}
+}
+
+// UnmarshalText implements encoding.TextUnmarshaler.
+func (s *BlockWriteKind) UnmarshalText(data []byte) error {
+	switch BlockWriteKind(data) {
+	case BlockWriteKindParagraph:
+		*s = BlockWriteKindParagraph
+		return nil
+	case BlockWriteKindHeading:
+		*s = BlockWriteKindHeading
+		return nil
+	case BlockWriteKindListItem:
+		*s = BlockWriteKindListItem
+		return nil
+	case BlockWriteKindCodeFence:
+		*s = BlockWriteKindCodeFence
+		return nil
+	case BlockWriteKindBlockquote:
+		*s = BlockWriteKindBlockquote
+		return nil
+	case BlockWriteKindTable:
+		*s = BlockWriteKindTable
+		return nil
+	default:
+		return errors.Errorf("invalid value: %q", data)
+	}
+}
+
 // Ref: #/components/schemas/Candidate
 type Candidate struct {
 	BlockId OptString `json:"blockId"`
@@ -1673,6 +1793,22 @@ func (s *SamplingParams) SetTemperature(val OptFloat64) {
 // SetMaxTokens sets the value of MaxTokens.
 func (s *SamplingParams) SetMaxTokens(val OptInt) {
 	s.MaxTokens = val
+}
+
+// The manual-edit whole-tree snapshot (ADR-0038). Array order = position.
+// Ref: #/components/schemas/SaveTreeRequest
+type SaveTreeRequest struct {
+	Blocks []BlockWrite `json:"blocks"`
+}
+
+// GetBlocks returns the value of Blocks.
+func (s *SaveTreeRequest) GetBlocks() []BlockWrite {
+	return s.Blocks
+}
+
+// SetBlocks sets the value of Blocks.
+func (s *SaveTreeRequest) SetBlocks(val []BlockWrite) {
+	s.Blocks = val
 }
 
 // Ref: #/components/schemas/Selection

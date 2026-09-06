@@ -23,6 +23,7 @@ const (
 	ListToolsOperation          OperationName = "ListTools"
 	OpenDocumentOperation       OperationName = "OpenDocument"
 	ProvisionModelOperation     OperationName = "ProvisionModel"
+	SaveDocumentOperation       OperationName = "SaveDocument"
 	StartModelOperation         OperationName = "StartModel"
 	StartTurnOperation          OperationName = "StartTurn"
 	StopModelOperation          OperationName = "StopModel"

@@ -17,6 +17,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -54,6 +55,7 @@ func run() error {
 		bind      = flag.String("bind", envOr("ENGINE_BIND", "127.0.0.1"), "address to bind (ENGINE_BIND=0.0.0.0 opts into LAN exposure, ADR-0021 §2)")
 		port      = flag.Int("port", envInt("ENGINE_PORT", 0), "port to bind (0 = dynamic free port; ENGINE_PORT fixes it, ADR-0021 §1)")
 		daemonURL = flag.String("daemon", envOr("DAEMON_URL", "http://127.0.0.1:9300"), "control daemon base URL (ADR-0025)")
+		cors      = flag.String("cors-origins", envOr("ENGINE_CORS_ORIGINS", ""), "comma-separated CORS origin allowlist (empty = CORS disabled, ADR-0037)")
 	)
 	flag.Parse()
 
@@ -220,14 +222,15 @@ func run() error {
 
 	// --- API server ---
 	srv, err := apiserver.New(apiserver.Deps{
-		Fleet:     fleetGW,
-		Modes:     modeReg,
-		Tools:     registry,
-		Doc:       docStore,
-		Sessions:  sessStore,
-		Loop:      loopGW,
-		Workspace: ws,
-		BaseURL:   baseURL,
+		Fleet:       fleetGW,
+		Modes:       modeReg,
+		Tools:       registry,
+		Doc:         docStore,
+		Sessions:    sessStore,
+		Loop:        loopGW,
+		Workspace:   ws,
+		BaseURL:     baseURL,
+		CORSOrigins: splitList(*cors),
 	}, bus)
 	if err != nil {
 		return err
@@ -415,6 +418,20 @@ func envOr(k, d string) string {
 		return v
 	}
 	return d
+}
+
+// splitList splits a comma-separated list, trimming whitespace and dropping empties.
+func splitList(s string) []string {
+	if s == "" {
+		return nil
+	}
+	var out []string
+	for _, p := range strings.Split(s, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // envInt reads an integer env var, falling back to d when unset or unparseable.

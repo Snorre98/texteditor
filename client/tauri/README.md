@@ -10,6 +10,7 @@ at runtime (Bun/Node build-time only, ADR-0013 §2).
 
 ```
 openapi-to-rust.toml   F6 codegen config (input: ../../api/openapi.yaml)
+openapi-ts.config.ts   F7 codegen config (input: ../../api/openapi.yaml)
 src-tauri/             the Rust core
   Cargo.toml           crate texteditor-tauri (feature "tauri" gates the shell)
   src/generated/       F6 — Rust client generated with openapi-to-rust (committed)
@@ -18,8 +19,13 @@ src-tauri/             the Rust core
   src/main.rs          E2+F8 — Tauri shell: spawn sidecar on launch, stop on exit
   tests/sidecar.rs     E2 acceptance (spawns the real engine, asserts the handshake)
 src/                   the Vue 3 + CodeMirror frontend (F7/F8)
-  generated/           F7 — Hey API + Zod client, regenerated (mirrors the TUI)
-  sse.ts               F7 — hand-framed /turn SSE decoder (port of the TUI's)
+  generated/           F7 — Hey API + Zod client (regenerate: `bun run gen`)
+  api/sse.ts           F7 — hand-framed /turn SSE decoder (port of the TUI's)
+  api/client.ts        F7 — zod-validated API boundary (mirrors the TUI's)
+  state/store.ts       F7 — Vue reactive store, per-session turn map (ADR-0026 §4)
+  editor/              F8 — CodeMirror editor, selection bubble, merge candidates,
+                           autosave cadence (Editor.vue, CandidateMerge.vue,
+                           blocks.ts, autosave.ts)
   capability/          E7 adapter — one interface, Tauri invoke + web FS Access API
 ```
 
@@ -39,11 +45,14 @@ src/                   the Vue 3 + CodeMirror frontend (F7/F8)
 From `client/tauri/`:
 
 ```sh
-openapi-to-rust generate -c openapi-to-rust.toml
+openapi-to-rust generate -c openapi-to-rust.toml   # Rust client (src-tauri/src/generated/)
+bun run gen                                        # TS client (src/generated/, Hey API + Zod)
 ```
 
-The generated client is committed and never hand-shaped (`src-tauri/src/generated/`).
-It consumes the exact spec the Go (`ogen`) and TS (Hey API + Zod) clients do.
+Both are committed and never hand-shaped; they consume the exact spec the Go
+(`ogen`) and TS (Hey API + Zod) clients do, and re-run in lockstep on any spec
+change (`go generate ./...` in `server/`, `bun run gen` here and in `client/tui/`,
+`openapi-to-rust generate`).
 
 **Streaming fit (recorded):** the generator reads standard `text/event-stream`
 (ignoring the `x-ogen-raw-response` marker, ADR-0031 §4) and emits `start_turn`
@@ -75,6 +84,18 @@ State is keyed per session — `sessionStates: Record<sessionId, {messages, turn
 so several selection-anchored bubbles plus the doc-level chat stream concurrently
 (ADR-0026 §1/§4); the TUI's single `turn`/`messages` slice is generalized to that
 map.
+
+## Manual-edit route (F8, ADR-0038)
+
+Human keystrokes autosave as a whole-tree snapshot over `PUT /documents/{id}/tree`
+(operationId `saveDocument`, `SaveTreeRequest { blocks: BlockWrite[] }`). The client
+serializes its block tree (`editor/blocks.ts`) and sends one tree per silence
+interval (`editor/autosave.ts`); the engine reconciles (mints/drops/retypes/moves),
+formats, and commits `autosave @ <ts>` iff changed. Block IDs are engine-minted
+UUIDs — the client never mints; a new block has no `id`. A manual save of a block
+drops its open candidates (human keystrokes supersede the AI proposal). This is a
+recorded contract amendment: `api/openapi.yaml` + the three codegens re-run in
+lockstep (see above).
 
 ## Sidecar handshake (E2, ADR-0021 §1)
 

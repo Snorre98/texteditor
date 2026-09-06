@@ -200,6 +200,34 @@ paths:
               schema:
                 $ref: '#/components/schemas/Revision'
 
+  /documents/{id}/tree:
+    put:
+      operationId: saveDocument
+      summary: Replace the document's block tree (manual autosave, ADR-0038)
+      description: >
+        The manual-edit wire path (ADR-0038): the client's whole block-tree
+        snapshot. Array order = position; a block with no `id` is new (the engine
+        mints a UUID, ADR-0020 §3); an `id` present in the current tree but absent
+        from the request is deleted; a changed `kind`/`parentId` is retyped/moved.
+        The engine reconciles, normalizes on write and formats on commit, and
+        commits `autosave @ <ts>` iff anything changed (a no-op returns the current
+        HEAD). A manual save of a block drops its open candidates.
+      parameters:
+        - $ref: '#/components/parameters/DocumentID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SaveTreeRequest'
+      responses:
+        '200':
+          description: resulting revision
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Revision'
+
   /documents/{id}/history:
     get:
       operationId: getHistory
@@ -550,6 +578,34 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/Guard'
+
+    SaveTreeRequest:
+      type: object
+      description: The manual-edit whole-tree snapshot (ADR-0038). Array order = position.
+      required: [blocks]
+      properties:
+        blocks:
+          type: array
+          items:
+            $ref: '#/components/schemas/BlockWrite'
+
+    BlockWrite:
+      type: object
+      description: >
+        One block in a manual tree save. `id` absent = new block (engine mints a
+        UUID, ADR-0020 §3); `id` present = existing block matched by stable UUID.
+        No `hash`/`guards` — those are AI-edit concerns (ADR-0029 §4).
+      required: [kind, text]
+      properties:
+        id:
+          type: string
+        parentId:
+          type: string
+        kind:
+          type: string
+          enum: [paragraph, heading, list_item, code_fence, blockquote, table]
+        text:
+          type: string
 
     Revision:
       type: object

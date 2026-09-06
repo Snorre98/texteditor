@@ -111,6 +111,11 @@ pub struct Selection {
 pub struct Mention {
     pub path: String,
 }
+///The manual-edit whole-tree snapshot (ADR-0038). Array order = position.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SaveTreeRequest {
+    pub blocks: Vec<BlockWrite>,
+}
 ///The retrieve/read_note structured result surfacing retrieval to the UI.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct RagEvent {
@@ -531,6 +536,55 @@ impl ::std::fmt::Display for CandidateEventError {
     }
 }
 impl AsRef<str> for CandidateEventError {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+/**One block in a manual tree save. `id` absent = new block (engine mints a UUID, ADR-0020 §3); `id` present = existing block matched by stable UUID. No `hash`/`guards` — those are AI-edit concerns (ADR-0029 §4).
+*/
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct BlockWrite {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    pub kind: BlockWriteKind,
+    #[serde(rename = "parentId", skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<String>,
+    pub text: String,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, Default)]
+pub enum BlockWriteKind {
+    #[default]
+    #[serde(rename = "paragraph")]
+    Paragraph,
+    #[serde(rename = "heading")]
+    Heading,
+    #[serde(rename = "list_item")]
+    ListItem,
+    #[serde(rename = "code_fence")]
+    CodeFence,
+    #[serde(rename = "blockquote")]
+    Blockquote,
+    #[serde(rename = "table")]
+    Table,
+}
+impl BlockWriteKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Paragraph => "paragraph",
+            Self::Heading => "heading",
+            Self::ListItem => "list_item",
+            Self::CodeFence => "code_fence",
+            Self::Blockquote => "blockquote",
+            Self::Table => "table",
+        }
+    }
+}
+impl ::std::fmt::Display for BlockWriteKind {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+impl AsRef<str> for BlockWriteKind {
     fn as_ref(&self) -> &str {
         self.as_str()
     }

@@ -4,7 +4,8 @@ import type { Task } from "../src/generated/types.gen";
 
 // The wire fixtures below are byte-exact copies of the API server's framing
 // (internal/apiserver apiserver_test.go — `event: token` + `data: {...}`),
-// plus the emitter payloads locked by the amended ADR-0017 §6.
+// plus the emitter payloads locked by the amended ADR-0017 §6. Ported verbatim
+// from client/tui/tests/sse.test.ts (ADR-0037 §4).
 
 describe("parseSseMessage", () => {
   test("decodes the hand-framed message block", () => {

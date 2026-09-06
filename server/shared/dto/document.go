@@ -21,6 +21,17 @@ type BlockEdit struct {
 	Guards  []Guard // optional block-level context guards (ADR-0029)
 }
 
+// BlockWrite is one block in a manual whole-tree save (interface.md §9,
+// ADR-0038). ID is nil for a new block (the engine mints a UUID, ADR-0020 §3);
+// a changed Kind/ParentID retypes/moves. No hash/guards — those are AI-edit
+// concerns (ADR-0029 §4). Array order in a tree is position.
+type BlockWrite struct {
+	ID       *string
+	ParentID *string
+	Kind     BlockKind
+	Text     string
+}
+
 // Revision is a versioned checkpoint of a document (interface.md §9).
 type Revision struct {
 	ID        string

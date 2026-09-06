@@ -73,6 +73,9 @@ second client.
   the TUI's Solid state (ADR-0023, ADR-0013 §2).
 - Session-scoped state: multiple selection-anchored bubbles + doc-level chat
   streaming simultaneously (ADR-0026 §1/§4).
+  **(landed — `client/tauri/src/state/store.ts`, per-session
+  `{messages, turn}` map; transport is direct HTTP from the webview per ADR-0037,
+  with the engine CORS middleware as the enabler)**
 
 ### F8 · Client UI
 
@@ -86,6 +89,9 @@ second client.
    silence interval (10 s / N min), distinct from AI-edit commits (ADR-0020 §1).
 5. **Session bubbles** — create-or-resume anchored to a block; reopening a
    selection reopens its session (ADR-0026 §1–§3).
+   **(landed — `client/tauri/src/editor/`; the manual-edit wire path is the new
+   `PUT /documents/{id}/tree` route, ADR-0038, a recorded contract amendment with
+   three-codegen lockstep)**
 
 ---
 
@@ -107,9 +113,10 @@ second client.
    with Tauri `invoke` and web File System Access API branches; the web target
    is the documented self-hosting caveat, not a public-infra default)**
 3. F6–F8 → Tauri editor with selection bubbles, side-by-side candidates, and
-   autosave-backed manual editing. **(F6 + F8 shell landed — Tauri 2 + Vue 3
-   scaffold with sidecar wiring compiles; F7 Vue state over the generated
-   client and the F8 CodeMirror UI follow)**
+   autosave-backed manual editing. **(landed — F6 Rust client, F7 Vue state
+   (direct-HTTP transport, ADR-0037), F8 CodeMirror editor (selection bubbles,
+   `@codemirror/merge` candidates, autosave via `PUT /documents/{id}/tree`,
+   ADR-0038))**
 
 After Track 2, the three targets (TUI, desktop WebView, web) run one engine over
 one contract (ADR-0014) — the frontend-swap guarantee realized end to end.

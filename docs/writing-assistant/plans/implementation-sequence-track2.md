@@ -168,21 +168,30 @@ SIGTERM → SIGKILL escalation is unit-tested with a SIGTERM-ignoring process.
 
 ## Phase F7 — Client state (Vue)
 
-Vue 3 reactivity over the generated Rust client; reactive patterns transfer from
-the TUI's Solid store (`client/tui/src/state/store.ts`, ADR-0023).
-Session-scoped state: multiple selection-anchored bubbles + doc-level chat
-streaming simultaneously (ADR-0026 §1/§4).
+**Status: landed.** Vue 3 reactivity over the generated client (`src/state/store.ts`),
+mirroring the TUI's Solid store (`client/tui/src/state/store.ts`, ADR-0023).
+**Transport (recorded, ADR-0037):** direct HTTP from the webview — a regenerated
+Hey API + Zod client (`src/generated/`), a ported `sse.ts` (`src/api/sse.ts`), and
+a zod-validated API boundary (`src/api/client.ts`). Session-scoped state: `{messages,
+turn}` is keyed per session (`sessionStates: Record<sessionId, …>`, ADR-0026 §1/§4),
+so several selection-anchored bubbles plus the doc-level chat stream concurrently.
+The enabler is the engine CORS middleware (`--cors-origins`/`ENGINE_CORS_ORIGINS`,
+an explicit allowlist, no `*`); the sidecar passes the local webview origins.
 
 ## Phase F8 — Client UI (CodeMirror)
 
-1. Selection popover chat bubble (CodeMirror tooltip API); side-by-side
-   candidates via `@codemirror/merge` (ADR-0013 §2).
-2. Native file browsing/OS integration in the Rust core; **all edits +
-   versioning go through the engine** (ADR-0013 §3).
-3. Manual-edit cadence: keystrokes batch into an autosave snapshot on silence
-   (10 s / N min), distinct from AI-edit commits (ADR-0020 §1).
-4. Session bubbles: create-or-resume anchored to a block; re-selecting a block
-   reopens its session (ADR-0026 §1–§3).
+**Status: landed.** `src/editor/Editor.vue` (CodeMirror 6, markdown) with:
+
+1. **Selection popover chat bubble** via the CodeMirror tooltip API — create-or-
+   resume a session anchored to the selected block; re-selecting the block reopens
+   its session (ADR-0026 §1–§3).
+2. **Side-by-side candidates** via `@codemirror/merge` (`CandidateMerge.vue`, ADR-0013 §2).
+3. **Native file browsing** in the Rust core (`pick_file`/`pick_directory`, E7);
+   the returned path feeds `POST /documents`. All edits + versioning through the
+   engine (ADR-0013 §3).
+4. **Manual-edit cadence** — keystrokes batch into an autosave snapshot on a silence
+   interval (`editor/autosave.ts`, 10 s default), distinct from AI-edit commits
+   (ADR-0020 §1); the wire path is `PUT /documents/{id}/tree` (ADR-0038).
 
 ## Phase E6/E7 — Web target + capability adapter
 
@@ -225,5 +234,5 @@ machine/LAN, `ENGINE_BIND=0.0.0.0` opt-in, ACL in macos-dev-config. Frontend
 2. E6–E7 → web target + capability adapter. **(landed — one adapter, Tauri
    `invoke` + web File System Access API branches)**
 3. F6–F8 → Tauri editor with selection bubbles, side-by-side candidates, and
-   autosave-backed manual editing. **(F6 + F8 shell landed; F7 Vue state and
-   the F8 CodeMirror UI follow)**
+   autosave-backed manual editing. **(landed — F6, F7, F8, E2, E6, E7 all landed;
+   the three targets run one engine over one contract, ADR-0014)**
