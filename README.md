@@ -58,8 +58,12 @@ cd server && CGO_ENABLED=0 go build \
 # 2. deps
 cd ../client/tauri && bun install
 
+# 2b — Rust lives on the external SSD; add it to PATH if `cargo` isn't found:
+export RUSTUP_HOME=/Volumes/Ex-SSD/caches/rust CARGO_HOME=/Volumes/Ex-SSD/caches/cargo
+export PATH="$CARGO_HOME/bin:$PATH"
+
 # 3. dev run (control daemon must be up — the app spawns the engine itself)
-bun run tauri dev
+bun run tauri:dev
 ```
 
 **What you can do:**
@@ -83,7 +87,7 @@ ENGINE_PORT=9100 ./tools/install-daemon.sh
 **Tauri app** — the shipped desktop bundle, engine included:
 
 ```sh
-cd client/tauri && bun run tauri build
+cd client/tauri && bun run tauri:build
 ```
 
 **Web** — the same UI self-hosted: run the engine with `ENGINE_BIND=0.0.0.0`

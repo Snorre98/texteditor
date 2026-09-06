@@ -81,10 +81,22 @@ runner, and no CI yet (see `docs/writing-assistant/status.md`).
 - **Capability adapter** (ADR-0014): the single per-target seam — Tauri `invoke`
   (`rfd` dialogs in `src-tauri/src/capability.rs`) vs the Web File System Access
   API (`src/capability/web.ts`).
+- **Feature gate**: `[features] default = []`, `tauri = ["dep:tauri", "dep:rfd"]`
+  (so the generated client + sidecar stay testable without the WebView stack).
+  The Tauri CLI builds with `--no-default-features`, so it must be told to
+  activate the feature — use the `tauri:dev`/`tauri:build` scripts (which pass
+  `--features tauri`). Plain `cargo test` (sidecar handshake, no feature) stays
+  fast; `cargo check --features tauri` verifies the shell.
 - **Sidecar binary naming**: `src-tauri/binaries/texteditor-<target-triple>`
   (e.g. `texteditor-aarch64-apple-darwin`); build it from `server/` (see the
-  README). Rust toolchain on this Mac lives on the external SSD
-  (`RUSTUP_HOME=/Volumes/Ex-SSD/caches/rust`, `CARGO_HOME=/Volumes/Ex-SSD/caches/cargo`).
+  README). **Rust lives on the external SSD** — if `cargo` isn't on PATH
+  (`tauri:dev`, `tauri:build`, and `cargo test` all shell out to it), export it
+  first:
+
+  ```sh
+  export RUSTUP_HOME=/Volumes/Ex-SSD/caches/rust CARGO_HOME=/Volumes/Ex-SSD/caches/cargo
+  export PATH="$CARGO_HOME/bin:$PATH"
+  ```
 
 ## Conventions
 

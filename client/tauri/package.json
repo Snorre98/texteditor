@@ -9,6 +9,8 @@
     "build": "vue-tsc --noEmit && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
+    "tauri:dev": "tauri dev --features tauri",
+    "tauri:build": "tauri build --features tauri",
     "gen": "openapi-ts",
     "typecheck": "vue-tsc --noEmit",
     "test": "bun test"
