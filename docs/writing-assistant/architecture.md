@@ -364,6 +364,7 @@ Full records in [adr/](adr/). Index:
 | 0034 | Repository layout: client/server split, contract at root | Accepted |
 | 0035 | Directory listing: engine-served Workspace capability | Accepted |
 | 0036 | File mentions: metered, turn-scoped context attachments | Accepted |
+| 0037 | API server CORS policy: explicit origin allowlist for the webview/web targets | Accepted |
 
 ## 10. Quality Requirements
 

@@ -43,6 +43,7 @@ row: ADR-0001/0016 map to it and to §2/§5.2/§8.
 | 0034 | §5, §7 | — | — | — |
 | 0035 | §3.2, §5.2, §8 | workspace | interface, module-boundaries | — |
 | 0036 | §5.2, §6, §8 | workspace, token-metering | interface, data-model, failure-semantics | Q1 |
+| 0037 | §7 | client-swap | — | — |
 
 ## Behavior contract ↔ quality scenario coverage
 
@@ -62,7 +63,7 @@ row: ADR-0001/0016 map to it and to §2/§5.2/§8.
 | provider-hotswap.feature | 0005, 0009, 0015, 0016, 0019 |
 | token-metering.feature | 0011, 0016, 0022, 0024, 0036 |
 | versioning.feature | 0004, 0020 |
-| client-swap.feature | 0002, 0013, 0016, 0017, 0023 |
+| client-swap.feature | 0002, 0013, 0016, 0017, 0023, 0037 |
 | sessions.feature | 0026 |
 | tool-routing.feature | 0028 |
 | edit-integrity.feature | 0029 |

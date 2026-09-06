@@ -18,6 +18,8 @@ src-tauri/             the Rust core
   src/main.rs          E2+F8 — Tauri shell: spawn sidecar on launch, stop on exit
   tests/sidecar.rs     E2 acceptance (spawns the real engine, asserts the handshake)
 src/                   the Vue 3 + CodeMirror frontend (F7/F8)
+  generated/           F7 — Hey API + Zod client, regenerated (mirrors the TUI)
+  sse.ts               F7 — hand-framed /turn SSE decoder (port of the TUI's)
   capability/          E7 adapter — one interface, Tauri invoke + web FS Access API
 ```
 
@@ -50,6 +52,29 @@ schemas keyed by the SSE `event:` name — not a single discriminator-tagged uni
 so the tool's opt-in typed "event union" client does not apply; the F7 client
 decodes the raw stream against the per-type schemas (`TokenEvent`/`MeterEvent`/
 …), exactly as the TUI's Zod decoders do.
+
+## F7 transport decision (recorded, ADR-0037)
+
+The webview talks to the engine **directly over HTTP** — `fetch` +
+`ReadableStream` SSE — not through the Rust core. This is the ADR-0014 shape: the
+Vue+CodeMirror frontend does REST+SSE to the engine, and the capability adapter is
+the *only* per-target seam. (Routing every call through `invoke`/Tauri events would
+be a second per-target transport difference the web target cannot reproduce.)
+
+- **Rust core** — the generated client (`src-tauri/src/generated/`) is used for
+  `/health` discovery only (`sidecar.rs`); the frontend is the real client.
+- **Frontend** — a regenerated Hey API + Zod client (`src/generated/`) plus a
+  ported `sse.ts` (hand-framed decoder), mirroring the TUI exactly (ADR-0017 §2,
+  ADR-0031 §4).
+- **CORS** — the engine must serve `Access-Control-Allow-Origin` for this to work
+  (the macOS webview cannot disable CORS, and the engine serves none today). The
+  sidecar passes `--cors-origins` with the local webview origins when it spawns the
+  engine; ADR-0037 defines the allowlist and the OPTIONS-preflight handling.
+
+State is keyed per session — `sessionStates: Record<sessionId, {messages, turn}>` —
+so several selection-anchored bubbles plus the doc-level chat stream concurrently
+(ADR-0026 §1/§4); the TUI's single `turn`/`messages` slice is generalized to that
+map.
 
 ## Sidecar handshake (E2, ADR-0021 §1)
 
@@ -91,7 +116,9 @@ REST/SSE. Explicit caveat: **self-hosting on the user's own machine/LAN, not a
 public-infrastructure default** (the privacy trade-off). It requires
 `ENGINE_BIND=0.0.0.0` (LAN opt-in) and is guarded by the Tailscale
 deny-by-default ACL in `macos-dev-config` (`tailscale/acl.hujson`, ADR-0021 §3) —
-that ACL lives in macos-dev-config, not here.
+that ACL lives in macos-dev-config, not here. Cross-origin `fetch` from the served
+UI also requires the engine's CORS allowlist to include the serving origin
+(`ENGINE_CORS_ORIGINS`, ADR-0037).
 
 ## Build (Tauri shell, F8)
 
