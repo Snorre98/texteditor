@@ -1,140 +1,118 @@
 # texteditor
 
-A local-first writing assistant: a single static Go **engine** (REST/SSE) plus a
-terminal **TUI** client. Every token that goes into a model call is metered and
-visible; all domain logic lives in the engine, and the TUI is a dumb,
-spec-generated client (ADR-0013 §3).
+A local-first writing assistant. One Go **engine** (REST/SSE, all logic and
+state), two **clients**: a terminal **TUI** and a **Tauri** desktop editor. Every
+token that goes into a model call is metered and visible.
 
-Architecture, ADRs, contracts, and behavior specs live in
-[`docs/writing-assistant/`](docs/writing-assistant/architecture.md). The engine
-is reached *only* through the OpenAPI contract [`api/openapi.yaml`](api/openapi.yaml);
-serving is controlled by `macos-dev-config`'s control daemon, which the engine's
-Fleet gateway talks to over HTTP (ADR-0025/0027).
-
-## Layout
-
-```
-api/openapi.yaml   the single contract every client codegens from (ADR-0017)
-server/            the Go engine (cmd/texteditor + internal/* + shared/dto)
-client/tui/        the OpenTUI + Solid client (dumb, generated from the spec)
-client/tauri/      the Tauri 2 + Vue 3 editor (dumb; generated Rust client +
-                   engine spawned as a bundled sidecar, ADR-0021 §1)
-docs/writing-assistant/   architecture, ADRs, contracts, behavior specs
-tools/             build + install-daemon scripts
-deploy/            launchd agent template (standalone daemon)
-```
+Serving is reached only through the control daemon in the sibling
+[`macos-dev-config`](../macos-dev-config) repo — the engine never reads
+`models.json` or starts servers itself. Architecture + status:
+[`docs/writing-assistant/`](docs/writing-assistant/architecture.md).
 
 ## Prerequisites
 
-- **Go** 1.26 (engine; no CGO).
-- **Bun** (TUI build/run only — no Node at runtime).
-- **Rust + `openapi-to-rust`** (the Tauri editor client, `client/tauri/`; see its
-  README — on this Mac the toolchain lives on the external SSD:
-  `RUSTUP_HOME=/Volumes/Ex-SSD/caches/rust CARGO_HOME=/Volumes/Ex-SSD/caches/cargo`).
-- **`macos-dev-config`** (separate repo) running the **control daemon** — the
-  engine reaches serving through it and never reads `models.json` directly
-  (ADR-0025/0027).
+- **Go 1.26** (engine, no CGO) · **Bun** (TUI; Tauri build only)
+- **Rust** (Tauri only — see [deploy](#deploy-the-tauri-editor))
+- The **control daemon** running (engine fails fast at startup without it)
+- **Provisioned models** — download at least one before first use (see
+  [constraints](#constraints))
 
-## Quick start — run the TUI
-
-From the repo root:
+## Use the TUI
 
 ```sh
-# 1. control daemon (separate repo) — serves the fleet over HTTP on :9300
+# 1. control daemon (sibling repo)
 cd ../macos-dev-config && go run ./cmd/fleetdaemon
 
-# 2. engine — binds 127.0.0.1 (dynamic port by default)
-cd ../texteditor/server && go run ./cmd/texteditor
-# (log line prints the actual base URL; --port 9100 pins it)
+# 2. engine (pinned port for a stable URL)
+cd ../texteditor/server && go run ./cmd/texteditor --port 9100
 
-# 3. TUI (new terminal)
-cd ../texteditor/client/tui
-bun install
-bun run gen          # regenerate src/generated from ../../api/openapi.yaml
+# 3. TUI — first time only
+cd ../texteditor/client/tui && bun install && bun run gen
+
+# 4. open a document and start editing
 bun run src/index.tsx /path/to/note.md
 ```
 
-## Engine flags / env
+**What you can do:**
 
-| Flag | Env | Default | |
-|---|---|---|---|
-| `--bind` | `ENGINE_BIND` | `127.0.0.1` | `0.0.0.0` opts into LAN exposure (ADR-0021 §2) |
-| `--port` | `ENGINE_PORT` | `0` | `0` = dynamic free port; pin it for a stable URL |
-| `--daemon` | `DAEMON_URL` | `http://127.0.0.1:9300` | control daemon base URL (ADR-0025) |
-| `--data` | — | `~/.local/share/texteditor` | SQLite files + git worktrees |
+- Chat with your document in any mode — `editor`, `proofreader`, `grammar`,
+  `drafter` — type in the chat input and press `enter`.
+- Review the AI's edit in the diff preview, press `a` to accept (commits through
+  the engine), or keep typing to discard.
+- Watch the **live token meter** — every prompt/response cost, per component.
+- Switch model/mode from the panels; the engine starts the chosen model via the
+  daemon automatically.
+- Ask it to retrieve from your notes (`retrieve`/`read_note` tools) — results
+  show in the RAG panel with provenance.
 
-The bound base URL is advertised on `GET /health` (`baseUrl`) so clients can
-discover it rather than assume (ADR-0021 §1).
+**Keys:** `enter` send · `a` accept candidate · `esc` quit.
 
-## TUI
-
-The TUI is a **dumb client**: its whole surface is generated from the contract
-(Hey API + Zod), every response is zod-validated at the boundary, and all domain
-logic lives in the engine. See [`client/tui/README.md`](client/tui/README.md) for
-the codegen notes and full layout.
-
-Connection / discovery (fixed mode — `client/tui/src/api/discovery.ts`):
-
-1. `ENGINE_URL` — full base URL override (web/LAN).
-2. `ENGINE_PORT` — a fixed port on 127.0.0.1.
-3. the spec's `servers[0]` default `http://127.0.0.1:9100`.
-
-…then verified against `/health`; an unreachable engine is an explicit error
-screen, never a silent failure.
-
-Open a document with a path argument or `TEXTEDITOR_DOC`:
+## Use the Tauri editor
 
 ```sh
-bun run src/index.tsx /path/to/note.md
-TEXTEDITOR_DOC=/path/to/note.md bun run src/index.tsx
-ENGINE_URL=http://127.0.0.1:9123 bun run src/index.tsx /path/to/note.md
+# 1. build the engine as the bundled sidecar (from the repo root)
+cd server && CGO_ENABLED=0 go build \
+  -o ../client/tauri/src-tauri/binaries/texteditor-aarch64-apple-darwin \
+  ./cmd/texteditor
+
+# 2. deps
+cd ../client/tauri && bun install
+
+# 3. dev run (control daemon must be up — the app spawns the engine itself)
+bun run tauri dev
 ```
 
-### Panels
+**What you can do:**
 
-Markdown editor · chat (session bubbles + live stream) · live token meter ·
-model/mode switcher · RAG results · diff preview.
+- Open a file or folder with the native dialog.
+- **Select text → a chat bubble appears** — anchored to that block; re-selecting
+  the block reopens the same session.
+- Review AI edits **side-by-side** (`@codemirror/merge`) and accept.
+- Edit by hand — keystrokes autosave as snapshots (every ~10 s), kept separate
+  from AI commits.
 
-### Keys
+## Deploy
 
-- `esc` — quit
-- `a` — accept the staged candidate (diff preview: apply + commit through the engine)
-- chat input `enter` — submit a turn (`POST /turn`, SSE stream)
-
-### TUI scripts (`client/tui/`)
-
-```sh
-bun install && bun run gen   # install + regenerate from the spec
-bun test                     # discovery/decoder/store/component tests
-bun run typecheck            # tsc --noEmit
-bun run src/index.tsx        # run
-```
-
-## Standalone daemon (optional)
-
-Ship the engine as a per-user launchd agent (KeepAlive) on a fixed port 9100:
+**Standalone engine daemon** (TUI/web use, launchd, port 9100):
 
 ```sh
-./tools/build.sh           # -> bin/texteditor (single static binary, no CGO)
+./tools/build.sh                       # → bin/texteditor (single static binary)
 ENGINE_PORT=9100 ./tools/install-daemon.sh
 ```
 
-See [`tools/install-daemon.sh`](tools/install-daemon.sh) and
-[`deploy/com.texteditor.engine.plist`](deploy/com.texteditor.engine.plist).
-
-## Tests
+**Tauri app** — the shipped desktop bundle, engine included:
 
 ```sh
-cd server && CGO_ENABLED=0 go test ./...     # engine (boundary-tested; ADR-0022 Q5)
-cd client/tui && bun test && bun run typecheck
-cd client/tauri/src-tauri && cargo test      # sidecar handshake (needs the daemon)
-cd client/tauri && bun run typecheck && bun test
+cd client/tauri && bun run tauri build
 ```
 
-## Contract-first
+**Web** — the same UI self-hosted: run the engine with `ENGINE_BIND=0.0.0.0`
+(LAN exposure is an explicit opt-in) and serve `client/tauri`'s build output;
+see `client/tauri/README.md` for the CORS/ACL details.
 
-Any route/shape change lands in [`api/openapi.yaml`](api/openapi.yaml) **first**,
-then `go generate ./...` (ogen server), `bun run gen` (TS client), and
-`openapi-to-rust generate -c client/tauri/openapi-to-rust.toml` (Rust client) are
-regenerated from it. The generated code is committed and never hand-shaped; spec
-extensions are recorded amendments in the ADRs (ADR-0002/0017).
+## Functionality
+
+- **Modes** — `editor` · `proofreader` · `grammar` · `drafter` (declarative:
+  prompt + model + tools, `server/config/modes/`).
+- **Tools** — `edit_markdown` (block replace), `retrieve`, `read_note`, `diff`
+  (`server/config/tools/`).
+- **Versioning** — git-backed document history + per-block AI candidates.
+- **Token meter** — per-turn, per-component, per-model.
+
+## Constraints
+
+- The **control daemon must be reachable** — the engine refuses startup otherwise.
+- **Provision models first** (`hf download <repo>` in `macos-dev-config`; repos
+  in `models.json`) or starting a model fails with `model-not-found`. Big models
+  need the SSD mounted and ~18 GB RAM — run one at a time.
+- **Localhost by default** (`127.0.0.1`); anything else is explicit opt-in
+  (`ENGINE_BIND`, `ENGINE_PORT`, `ENGINE_CORS_ORIGINS`).
+- **Clients are dumb** — all edits and versioning go through the engine; there
+  is no shared client/engine code.
+- The **tool router** (`toolCalling: "router"`) is off — `native` tool-calling is
+  the baseline until the deferred fine-tune lands (see
+  [`status.md`](docs/writing-assistant/status.md)).
+
+## Developing
+
+Layout, codegen, flags, and the test matrix: [`docs/contribute.md`](docs/contribute.md).

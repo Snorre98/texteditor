@@ -208,11 +208,22 @@ Two parts, separated on purpose (per `research/parked-needle-router.md`):
   set > ~15, a measured tool-calling accuracy/refusal problem, or a measurably weak
   writer on an agentic mode) — `research/parked-needle-router.md`.
 
-- **D1 · Enablement (deferred).** `serve-needle.sh` + OpenAI facade resident in
-  `macos-dev-config`; manifest gains `daemon "needle"` (`delegate` runner) and
-  model `needle-router` (`source.kind: "needle"`, `source.fingerprint`) — ADR-0028
-  §7, ADR-0018 §3. Fine-tune + serve + flip a mode is deferred, gated by the
-  triggers above.
+- **D1 · Enablement (landed: the seam; the fine-tune deferred).** The serving
+  side now exists end-to-end, minus the actual ML fine-tune:
+  `macos-dev-config/cmd/serve-needle` (Go OpenAI facade over the needle binary,
+  stub-verified — confident → `finish_reason:"tool"` + `{"name","args",
+  "confidence"}`, refusal/empty → empty completion) wrapped by
+  `tools/serve-needle.sh` (verb-convention `delegate`), the `needle`/
+  `needle-router` manifest entries (`runner:"delegate"`, `source.kind:"needle"`,
+  `source.fingerprint:""`), `tools/needle-finetune.sh` (the archive + fingerprint
+  scaffold with a `TODO` training slot), and `server/cmd/toolhash` (the
+  drift-free tool-set hash + vocabulary). The facade protocol is a canonical
+  contract (`docs/contracts/needle-facade.md` in macos-dev-config) mirrored in
+  `contracts/needle-facade.md` with a drift check. **Only the fine-tune → .cact →
+  record fingerprint → flip a mode** remains — the single ML-touch-point is the
+  facade's stdout parser, pinned by the contract (§2). No enablement trigger
+  fired; recorded as the operator's explicit decision to make the router
+  ML-ready (see `research/parked-needle-router.md`).
 - **D2 · `ToolDecider` service** — Retriever-style (ADR-0016 §8): resolves
   `needle-router` via Fleet, calls Provider; `SignalTool()` + `Decide(ctx, intent,
   RouterContext)`. Not a leaf — depends on Fleet + Provider. **(landed)**
@@ -251,6 +262,22 @@ canonical in macos-dev-config) via the new `FleetGateway.Fingerprint(name)` op
 (recorded amendment to `interface.md` §1). Both gates live in the
 `internal/routergate` leaf, invoked by `cmd/texteditor` between the Mode registry
 and loop wiring; the engine-side tool-set hash is `routergate.ToolSetHash`.
+
+### D1 locked decisions (router enablement — the seam landed, the ML job deferred)
+
+1. **Serving side owned in `macos-dev-config`, tied back by contract.** The
+   facade's protocol is canonical there (`docs/contracts/needle-facade.md`);
+   texteditor keeps a mirror (`contracts/needle-facade.md`, MIRROR banner) with
+   a drift check (`internal/routergate/contract_mirror_test.go`) — the existing
+   `daemon-http.md` pattern (ADR-0033 §3). A second needle `.cact`/variant
+   conforms to one contract or the sync test fails.
+2. **Smoke-test against a committed stub needle** (`cmd/serve-needle/testdata/
+   needle-stub.sh`) — the facade's protocol mapping is curl-verifiable without a
+   real `.cact`.
+3. **`cmd/toolhash` lives in texteditor** — the single drift-free source of the
+   tool-set hash (`routergate.ToolSetHash`) + vocabulary the fine-tune consumes.
+4. **Manifest `needle`/`needle-router` entries land now** with an empty
+   `source.fingerprint` (safe: no mode flips, so `routergate.Check` is a no-op).
 
 ---
 
@@ -299,8 +326,11 @@ the owning module: retry/backoff + `provider-unreachable` (Provider, A3.1),
 3. A4 → interfaces sealed, Q5 at 100%.
 4. A5 → engine headless-driveable via `curl`/generated client (ADR-0002).
 5. C6–C8 → TUI with live token meter — **proof of concept reached**.
-6. D2–D5 → router seam built, off by default (D1 enablement deferred) — **landed**.
-7. → Track 2 (mandatory): see `implementation-sequence-future.md` (what) +
+6. D2–D5 → router seam built, off by default — **landed**.
+7. D1 → router enablement seam (facade + manifest entries + `cmd/toolhash` +
+   finetune scaffold, stub-verified) — **landed; the ML fine-tune is the single
+   deferred job** (see the D1 row above).
+8. → Track 2 (mandatory): see `implementation-sequence-future.md` (what) +
    `implementation-sequence-track2.md` (order). **E1 engine primitives landed
    (dynamic port, `ENGINE_PORT`/`ENGINE_BIND`, `baseUrl` on `/health`, graceful
    shutdown, standalone-daemon packaging); the client half landed too — F6

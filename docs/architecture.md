@@ -1,15 +1,18 @@
 # Academic Writing Assistant — General Architecture
 
-A local-first, single-machine assistant for academic writing and editing. You drive it from a terminal UI today and a richer markdown editor later; it reasons over your own notes and ingested literature, edits markdown in place, and — deliberately — makes every token that goes into a model call visible, so the system itself becomes the way you learn what costs tokens and what doesn't.
+A local-first, single-machine assistant for academic writing and editing. You drive it from a terminal UI or a Tauri markdown editor; it reasons over your own notes and ingested literature, edits markdown in place, and — deliberately — makes every token that goes into a model call visible, so the system itself becomes the way you learn what costs tokens and what doesn't.
+
+> **Status:** see [`writing-assistant/status.md`](writing-assistant/status.md) for
+> what is complete and what is TODO, cross-checked against the ADR set and the code.
 
 It is **not** an inference engine (that's delegated) and **not** a full IDE.
 
 ## Stack
 
 - **Engine/backend** — **Go**, a single static binary running as a local daemon.
-- **TUI (today)** — [OpenTUI](https://opentui.com), the terminal-UI library from the OpenCode team (Zig core, TypeScript bindings; write TS directly or via React/Solid).
-- **Markdown editor (later)** — **Tauri 2** (Rust core + system WebView) with a Vue 3 + CodeMirror 6 frontend, in the spirit of [Texodus](https://github.com/w512/texodus). No Node at runtime; Node/Bun is build-time only.
-- **Model serving** — external, over REST (Ollama or MLX-LM).
+- **TUI** — [OpenTUI](https://opentui.com), the terminal-UI library from the OpenCode team (Zig core, TypeScript bindings; write TS directly or via React/Solid).
+- **Markdown editor** — **Tauri 2** (Rust core + system WebView) with a Vue 3 + CodeMirror 6 frontend, in the spirit of [Texodus](https://github.com/w512/texodus). No Node at runtime; Node/Bun is build-time only.
+- **Model serving** — external, over REST, reached through the machine's control daemon (`macos-dev-config`); runners are `llama.cpp | mlx-lm | mlx-vlm | delegate` on the Metal GPU (ADR-0030).
 - **Database** — SQLite via `modernc.org/sqlite` (pure Go, no CGO), the single-file app DB.
 - **Contract** — a single OpenAPI/JSON Schema spec (see below), the source of truth shared by every client.
 
@@ -34,7 +37,7 @@ It is **not** an inference engine (that's delegated) and **not** a full IDE.
                            │ REST (OpenAI-compatible)
 ┌──────────────────────────▼─────────────────────────────────────┐
 │ Layer 0 — Model serving (external, swappable)                   │
-│   Ollama / MLX-LM → local models on localhost:11434             │
+│   control daemon → llama.cpp / mlx-lm / mlx-vlm / delegate      │
 └────────────────────────────────────────────────────────────────┘
 ```
 
@@ -48,29 +51,35 @@ Clients only render, send commands, stream responses, display the token meter, a
 
 ### Codegen toolchain
 
-- **Go server** — `oapi-codegen` (or `ogen` for SSE support).
-- **TS TUI** — `Hey API` (matches OpenCode) — Zod only if you want runtime validation, otherwise types alone suffice. **This is the one codegen decision to lock for the TUI phase.**
-- **Rust/Tauri** — `progenitor` or `openapi-to-rust` (the latter if you want SSE handled for you). *Deferred to the markdown-editor phase.*
+- **Go server** — `ogen` (SSE support).
+- **TS TUI** — `Hey API` + Zod for runtime validation. **Locked.**
+- **Rust/Tauri** — `openapi-to-rust`. **Locked + landed** (F6).
 - **tauri-typegen** — *deferred to the markdown-editor phase*; covers Tauri's internal Rust↔JS command IPC (not the Go API) and needs more research.
 
 ## Layer 0 — Model serving (treated as external)
 
-Ollama (or MLX-LM) serves the models over an OpenAI-compatible REST API. The engine never loads weights; it only talks REST. This turns the whole model fleet — a fast 12B for editing, a 26B-A4B / 35B-A3B MoE for quality, a 24B for prose — into a uniform, hot-swappable resource.
+The control daemon (`macos-dev-config`) is the sole reader of the fleet manifest
+(`models.json`) and serves each model over an OpenAI-compatible REST API through
+one of the Metal runners (`llama.cpp | mlx-lm | mlx-vlm`) or a `delegate` wrapper.
+The engine never loads weights and never reads the manifest; it reaches serving
+only through the daemon's HTTP contract (ADR-0025/0027/0033). This turns the
+whole model fleet — a fast 3B for cheap edits, a 26B-A4B / 35B-A3B MoE for
+quality, a 24B for prose — into a uniform, hot-swappable resource.
 
 ## Layer 2 — Engine (Go; itself modular)
 
-1. **Provider gateway** — a thin abstraction over the REST endpoint(s). Maps a model *name* to a URL, sampling params, and capabilities (context length, thinking mode). Swapping Ollama ↔ MLX ↔ a hosted API changes only this module.
+1. **Provider gateway** — a thin abstraction over the REST endpoint(s). Maps a model *name* to a URL, sampling params, and capabilities (context length, thinking mode). Swapping runners changes only this module.
 2. **Agent loop / orchestrator** — the turn-taking loop: task → plan → dispatch tool(s) → observe → repeat → answer. Mirrors OpenCode's loop, but the tools are writing tools, not shell/git.
-3. **Mode registry** — *declarative* configurations, not code. Each mode is `{ name, system prompt, default model, tool allowlist, params, context budget }`. Modes like `editor`, `drafter`, `proofreader`, `literature-reviewer`. Switching mode is a config change, not a rebuild — the "quickly change model/persona" feature, in the spirit of OpenCode's modes and agents.
-4. **Tool registry** — writing-specific tools, each with a JSON schema: `retrieve(citation)`, `read_note`, `edit_markdown`, `suggest_revision`, `diff`, `cite`, `search_vault`. Schemas are data, so the system can show you their token cost.
+3. **Mode registry** — *declarative* configurations, not code. Each mode is `{ name, system prompt, default model, tool allowlist, params, context budget, toolCalling }`. Shipped modes: `editor`, `drafter`, `proofreader`, `grammar` (a `literature-reviewer` persona is future work). Switching mode is a config change, not a rebuild — the "quickly change model/persona" feature, in the spirit of OpenCode's modes and agents.
+4. **Tool registry** — writing-specific tools, each with a JSON schema. Shipped: `diff`, `edit_markdown`, `read_note`, `retrieve` (future: `suggest_revision`, `cite`, `search_vault`). Schemas are data, so the system can show you their token cost.
 5. **Context assembler** — *the pedagogical core*. One function that takes the active mode, tool schemas, retrieved RAG chunks, conversation history, and user input, and produces the exact token payload, reporting a per-component token breakdown.
 6. **Retriever module** — a loosely-coupled `Retriever` interface (e.g. `Query(ctx, embedding, topK) → ranked chunks`) backed by SQLite. The rest of the engine depends only on the interface, never on the storage backend.
-7. **Token metering / observability** — reads `prompt_eval_count` / `eval_count` straight from Ollama's responses (so the engine never reimplements a tokenizer) and attributes prompt tokens to their sources (system prompt, tools, RAG, history, thinking). Emits events clients render live.
+7. **Token metering / observability** — reads `prompt_eval_count` / `eval_count` straight from the serving runner's responses (so the engine never reimplements a tokenizer) and attributes prompt tokens to their sources (system prompt, tools, RAG, history, thinking). Emits events clients render live.
 8. **Document store + versioning** — owns the document, its block structure, and its full edit history. **git** owns version history; **SQLite** owns metadata, block IDs, and search (see "Storage & the app database").
 
 ## Storage & the app database
 
-SQLite (via `modernc.org/sqlite`, pure Go, no CGO) is the single local file holding everything non-git:
+SQLite (via `modernc.org/sqlite`, pure Go, no CGO) is the local store holding everything non-git, split into per-service files (`app.db`, `index.db`, `meter.db`, `sessions.db`):
 
 - **document metadata** and **stable block IDs** (paragraphs/headings/tables)
 - **embeddings** (via `sqlite-vec`, a `vec0` table for KNN)
@@ -83,8 +92,8 @@ The **Retriever** sits behind a Go interface, so the storage backend (SQLite-vec
 
 ## Layer 3 — Clients
 
-- **OpenTUI TUI (today)** — panels: markdown editor, chat, live token meter, model/mode switcher, RAG results, diff preview. OpenTUI ships native `Markdown`, `Diff`, and `TextTable` renderables.
-- **Tauri markdown editor (later)** — CodeMirror 6 editor (syntax highlighting, large-doc performance), live GFM preview, Mermaid, workspace sidebar, plus assistant affordances: a **popover chat bubble** on selected text (CodeMirror's selection + tooltip API) and **side-by-side candidate views** (`@codemirror/merge`).
+- **OpenTUI TUI** — panels: markdown editor, chat, live token meter, model/mode switcher, RAG results, diff preview. OpenTUI ships native `Markdown`, `Diff`, and `TextTable` renderables.
+- **Tauri markdown editor** — CodeMirror 6 editor (syntax highlighting, large-doc performance), live GFM preview, Mermaid, workspace sidebar, plus assistant affordances: a **popover chat bubble** on selected text (CodeMirror's selection + tooltip API) and **side-by-side candidate views** (`@codemirror/merge`).
 
 Both talk to the *same* API. The Tauri app can keep native file browsing/OS integration, but all edits and versioning go through the engine so history is consistent across clients.
 
@@ -157,5 +166,5 @@ Ingest literature → chunk with a deliberate strategy (chunk size and shape are
 - **TUI vs. markdown editor** — the TUI is the fastest path and ideal for the live token-metering loop; the Tauri editor adds smooth highlighting, live preview, and Google-Docs-style version browsing. Both are thin clients over the same API, so you build the engine once.
 - **Renderer choice (OpenTUI)** — TS directly against the core, or via React/Solid (Solid is what OpenCode uses).
 - **No Node at runtime** — Tauri ships Rust + system WebView; Bun/Node is build-time only (Vite).
-- **Streaming** — SSE with typed events (`token`, `meter`, `candidate`, `diff`, `done`, `error`); a drop-in NDJSON path mirrors Ollama if ever needed.
+- **Streaming** — SSE with typed events (`token`, `meter`, `candidate`, `diff`, `done`, `error`); a drop-in NDJSON path mirrors the OpenAI-compatible runners if ever needed.
 - **File I/O** — hybrid: frontends own on-disk files (native open/save/watch/dialogs); the engine owns versioned content (git + block IDs + SQLite) plus an optional path-watch for the TUI/headless use.

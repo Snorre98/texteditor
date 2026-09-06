@@ -84,3 +84,26 @@ serving) only if one or more of these fires:
    set (e.g. an 8B writer doing agentic retrieval).
 4. An always-on or edge/second-device target is added (e.g. a wake-word or embedded
    device) where 14 MB-at-500-tok/s and bounded 28 MB RAM genuinely matter.
+
+## Enablement status (D1 split)
+
+**Trigger fired: none — explicit operator decision (2026-09-06).** None of the
+four triggers has fired (tool set is ~4 tools, one user, no measured native
+tool-calling failure, no always-on/edge target). D1's *seam* half is therefore
+landed now as the operator's explicit decision to make the router
+"ready for ML" without waiting for a trigger; the *fine-tune* half remains
+deferred.
+
+- **Landed now (the seam, D1 minus the ML job):** the `serve-needle` facade
+  (`macos-dev-config/cmd/serve-needle` + `tools/serve-needle.sh`, protocol
+  mirrored at `contracts/needle-facade.md`), the `needle`/`needle-router`
+  manifest entries (empty fingerprint), `cmd/toolhash` (the drift-free tool-set
+  hash + vocabulary in `texteditor`), and the `needle-finetune.sh` scaffold
+  (the `TODO` slot for the training invocation). The facade's stdout parser is
+  stub-verified; the protocol mapping (confident → `finish_reason:"tool"` +
+  `{"name","args","confidence"}`, refusal → empty completion) is contract-pinned.
+- **Deferred (the ML job):** run the Needle 2 fine-tune over the `cmd/toolhash`
+  vocabulary → produce `needle2.cact` → `needle-finetune.sh` archives it and
+  records `source.fingerprint` → flip one mode to `toolCalling:"router"` → the
+  `router-tools-stale` gate clears. The one assumption to finalize at ML time is
+  the `.cact` stdout format (`needle-facade.md §2`).
