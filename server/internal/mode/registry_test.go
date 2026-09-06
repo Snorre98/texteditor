@@ -8,15 +8,14 @@ import (
 	"texteditor/config"
 )
 
-// validInput matches the embedded config data (4 modes, 4 models, 4 tools).
+// validInput matches the embedded config data (4 modes, 3 models, 4 tools).
 func validInput() ValidationInput {
 	return ValidationInput{
-		Models: []string{"gemma4-12b", "gemma4-26b", "mistral-24b", "llama3.1-8b"},
+		Models: []string{"gemma4-26b-moe", "mistral-24b", "llama3.1-8b"},
 		ModelTags: map[string][]string{
-			"gemma4-12b":  {"proofreader"},
-			"gemma4-26b":  {"editor"},
-			"mistral-24b": {"drafter"},
-			"llama3.1-8b": {"grammar"},
+			"gemma4-26b-moe": {"editor", "proofreader"},
+			"mistral-24b":    {"drafter"},
+			"llama3.1-8b":    {"grammar"},
 		},
 		Tools: []string{"edit_markdown", "retrieve", "read_note", "diff"},
 	}
@@ -42,7 +41,7 @@ func TestNewLoadsAllModes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if m.DefaultModel != "gemma4-12b" {
+	if m.DefaultModel != "gemma4-26b-moe" {
 		t.Fatalf("defaultModel = %q", m.DefaultModel)
 	}
 	if len(m.ToolAllowlist) == 0 {

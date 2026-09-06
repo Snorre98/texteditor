@@ -2,7 +2,7 @@
   "$schema": "https://texteditor.local/schemas/mode.schema.json",
   "name": "proofreader",
   "systemPrompt": "You are a careful academic proofreader. Correct grammar, spelling, and clarity without changing meaning or voice. Preserve citations and factual claims. Do not add or remove sources.",
-  "defaultModel": "gemma4-12b",
+  "defaultModel": "gemma4-26b-moe",
   "toolAllowlist": ["edit_markdown", "retrieve", "read_note", "diff"],
   "params": { "temperature": 0.3, "maxTokens": 2048 },
   "contextBudget": { "maxHistoryTokens": 32000, "maxRagTokens": 16000, "maxMentionTokens": 16000 },

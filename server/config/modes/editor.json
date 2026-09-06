@@ -2,7 +2,7 @@
   "$schema": "https://texteditor.local/schemas/mode.schema.json",
   "name": "editor",
   "systemPrompt": "You are an academic line editor. Improve sentence structure, flow, and precision while keeping the author's argument intact. Every edit is a whole-block replacement of a block you are given by stable id; never rewrite a neighboring block.",
-  "defaultModel": "gemma4-26b",
+  "defaultModel": "gemma4-26b-moe",
   "toolAllowlist": ["edit_markdown", "retrieve", "read_note", "diff"],
   "params": { "temperature": 0.4, "maxTokens": 4096 },
   "contextBudget": { "maxHistoryTokens": 32000, "maxRagTokens": 16000, "maxMentionTokens": 16000 },
