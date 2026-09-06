@@ -1,0 +1,36 @@
+[package]
+name = "texteditor-tauri"
+version = "0.1.0"
+edition = "2021"
+description = "Tauri editor client for the writing-assistant engine (ADR-0013/0017/0034). Dumb client: the API surface is generated from api/openapi.yaml (openapi-to-rust); the engine is bundled and spawned as a sidecar with dynamic-port discovery (ADR-0021 §1)."
+license = "MIT"
+
+[lib]
+name = "texteditor_tauri_lib"
+crate-type = ["lib", "cdylib", "staticlib"]
+
+[features]
+default = []
+# Gates the Tauri shell (F8) + native-dialog capability commands (E7), so the
+# generated client + sidecar stay testable with no WebView dependency.
+tauri = ["dep:tauri", "dep:rfd"]
+
+[dependencies]
+# Generated-client deps (api/openapi.yaml, openapi-to-rust v0.15.0 — REQUIRED_DEPS.toml).
+bytes = { version = "1", features = ["serde"] }
+futures-util = "0.3"
+reqwest = { version = "0.13", default-features = false, features = ["query", "rustls", "stream"] }
+reqwest-middleware = { version = "0.5", features = ["query"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+
+# Sidecar (E2, ADR-0021 §1): spawn the engine child, read its bound base URL from
+# stderr, confirm via /health, and stop it with SIGTERM → SIGKILL.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "process", "io-util", "signal"] }
+libc = "0.2"
+
+# Tauri shell (F8) + native-dialog capability commands (E7) — behind the `tauri`
+# feature. tauri = "2"; rfd = "0.15".
+tauri = { version = "2", optional = true }
+rfd = { version = "0.15", optional = true }

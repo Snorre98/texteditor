@@ -1,0 +1,30 @@
+# openapi-to-rust codegen config (F6, ADR-0017 §3, ADR-0003 §2).
+#
+# Generates the Rust client from the single contract every client consumes
+# (api/openapi.yaml). The spec models streaming in standard OpenAPI — component
+# schemas plus a `text/event-stream` media type, no ogen-only extensions — so
+# this tool consumes the exact spec ogen (Go) and Hey API (TS) do.
+#
+# Streaming fit (recorded): the generator detects the `POST /turn`
+# `text/event-stream` response and emits `start_turn` as a live byte stream
+# (Accept: text/event-stream), ignoring the `x-ogen-raw-response` marker
+# (ADR-0031 §4). The SSE event vocabulary is a set of *separate* payload
+# schemas keyed by the SSE `event:` name (TokenEvent/MeterEvent/…), not a
+# single discriminator-tagged union, so the tool's opt-in typed "event union"
+# streaming client does not apply here; the F7 client decodes the raw stream
+# against the per-type schemas, exactly as the TUI's Zod decoders do. No
+# `[[streaming.endpoints]]` is configured for that reason.
+#
+# Regenerate with:  cargo install --locked openapi-to-rust  (see tools/)
+#                   openapi-to-rust generate -c openapi-to-rust.toml
+
+[generator]
+spec_path = "../../api/openapi.yaml"
+output_dir = "src-tauri/src/generated"
+module_name = "gen"
+
+[features]
+enable_async_client = true
+
+[http_client.tracing]
+enabled = false
