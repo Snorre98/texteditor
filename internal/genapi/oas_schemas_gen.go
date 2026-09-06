@@ -6,7 +6,6 @@ import (
 	"net/http"
 
 	"github.com/go-faster/errors"
-	"github.com/go-faster/jx"
 )
 
 // Ref: #/components/schemas/Block
@@ -344,16 +343,11 @@ func (s *Document) SetUpdatedAt(val OptInt64) {
 	s.UpdatedAt = val
 }
 
+// Framing marker for the SSE stream: the `event:` line carries `type`; the `data:` line carries the
+// payload schema matching that type. The payload JSON itself has no `type` field.
 // Ref: #/components/schemas/Event
 type Event struct {
-	TurnId string       `json:"turnId"`
-	Type   EventType    `json:"type"`
-	Data   OptEventData `json:"data"`
-}
-
-// GetTurnId returns the value of TurnId.
-func (s *Event) GetTurnId() string {
-	return s.TurnId
+	Type EventType `json:"type"`
 }
 
 // GetType returns the value of Type.
@@ -361,35 +355,9 @@ func (s *Event) GetType() EventType {
 	return s.Type
 }
 
-// GetData returns the value of Data.
-func (s *Event) GetData() OptEventData {
-	return s.Data
-}
-
-// SetTurnId sets the value of TurnId.
-func (s *Event) SetTurnId(val string) {
-	s.TurnId = val
-}
-
 // SetType sets the value of Type.
 func (s *Event) SetType(val EventType) {
 	s.Type = val
-}
-
-// SetData sets the value of Data.
-func (s *Event) SetData(val OptEventData) {
-	s.Data = val
-}
-
-type EventData map[string]jx.Raw
-
-func (s *EventData) init() EventData {
-	m := *s
-	if m == nil {
-		m = map[string]jx.Raw{}
-		*s = m
-	}
-	return m
 }
 
 type EventType string
@@ -399,6 +367,7 @@ const (
 	EventTypeMeter        EventType = "meter"
 	EventTypeCandidate    EventType = "candidate"
 	EventTypeDiff         EventType = "diff"
+	EventTypeRag          EventType = "rag"
 	EventTypeDone         EventType = "done"
 	EventTypeError        EventType = "error"
 	EventTypeBackpressure EventType = "backpressure"
@@ -411,6 +380,7 @@ func (EventType) AllValues() []EventType {
 		EventTypeMeter,
 		EventTypeCandidate,
 		EventTypeDiff,
+		EventTypeRag,
 		EventTypeDone,
 		EventTypeError,
 		EventTypeBackpressure,
@@ -427,6 +397,8 @@ func (s EventType) MarshalText() ([]byte, error) {
 	case EventTypeCandidate:
 		return []byte(s), nil
 	case EventTypeDiff:
+		return []byte(s), nil
+	case EventTypeRag:
 		return []byte(s), nil
 	case EventTypeDone:
 		return []byte(s), nil
@@ -453,6 +425,9 @@ func (s *EventType) UnmarshalText(data []byte) error {
 		return nil
 	case EventTypeDiff:
 		*s = EventTypeDiff
+		return nil
+	case EventTypeRag:
+		*s = EventTypeRag
 		return nil
 	case EventTypeDone:
 		*s = EventTypeDone
@@ -1107,52 +1082,6 @@ func (o OptCapabilities) Get() (v Capabilities, ok bool) {
 
 // Or returns value if set, or given parameter if does not.
 func (o OptCapabilities) Or(d Capabilities) Capabilities {
-	if v, ok := o.Get(); ok {
-		return v
-	}
-	return d
-}
-
-// NewOptEventData returns new OptEventData with value set to v.
-func NewOptEventData(v EventData) OptEventData {
-	return OptEventData{
-		Value: v,
-		Set:   true,
-	}
-}
-
-// OptEventData is optional EventData.
-type OptEventData struct {
-	Value EventData
-	Set   bool
-}
-
-// IsSet returns true if OptEventData was set.
-func (o OptEventData) IsSet() bool { return o.Set }
-
-// Reset unsets value.
-func (o *OptEventData) Reset() {
-	var v EventData
-	o.Value = v
-	o.Set = false
-}
-
-// SetTo sets value to v.
-func (o *OptEventData) SetTo(v EventData) {
-	o.Set = true
-	o.Value = v
-}
-
-// Get returns value and boolean that denotes whether value was set.
-func (o OptEventData) Get() (v EventData, ok bool) {
-	if !o.Set {
-		return v, false
-	}
-	return o.Value, true
-}
-
-// Or returns value if set, or given parameter if does not.
-func (o OptEventData) Or(d EventData) EventData {
 	if v, ok := o.Get(); ok {
 		return v
 	}

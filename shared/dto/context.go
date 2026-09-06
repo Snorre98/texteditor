@@ -50,10 +50,11 @@ type Document struct {
 	UpdatedAt   int64  // unix epoch seconds
 }
 
-// Chunk is a retrieved passage (interface.md §3).
+// Chunk is a retrieved passage (interface.md §3). JSON tags are camelCase: the
+// chunk crosses the API wire via the `rag` SSE event (recorded amendment).
 type Chunk struct {
-	BlockID string
-	Text    string
-	Score   float32
-	Source  string // citation/provenance marker
+	BlockID string  `json:"blockId"`
+	Text    string  `json:"text"`
+	Score   float32 `json:"score"`
+	Source  string  `json:"source"` // citation/provenance marker
 }

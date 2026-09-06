@@ -85,18 +85,31 @@ must be POST).
 ### 6. SSE event contract (turnID-tagged)
 
 ```
-event: token      data: {"turnId":"…","text":"…"}
-event: meter      data: {"turnId":"…","promptTokens":{...},"completionTokens":{...}}
-event: candidate  data: {"turnId":"…","blockId":"…","text":"…"}
-event: diff       data: {"turnId":"…","blockId":"…","insertions":[…],"deletions":[…]}
-event: done       data: {"turnId":"…","usage":{...},"degraded":false,"usedModel":"…"}
-event: error      data: {"turnId":"…","code":"…","message":"…"}
-event: backpressure data: {"turnId":"…"}
+event: token      data: {"text":"…"}
+event: meter      data: {"system":…,"tools":…,"rag":…,"history":…,"user":…,"thinking":…,"thinkingApprox":…,"completion":…}
+event: candidate  data: {"ok":true,"blockId":"…","revision":{…}}
+event: diff       data: <word edits or the diff tool's structured result>
+event: rag        data: {"ok":true,"chunks":[{"blockId":"…","text":"…",…}]}
+event: done       data: {"degraded":false,"usedModel":"…"}
+event: error      data: {"code":"…","message":"…"}
+event: backpressure data: {}
 ```
 
-Every event carries `turnId` (correlation, ADR-0016 §11). The `done` event folds in
-the degradation label (`degraded`, `usedModel`) so the substitution is never silent
-(Q3, ADR-0022).
+**Framing:** each SSE message is `event: <type>` + `data: <payload>` (the type
+is the SSE event name; the payload is the JSON object). `turnID` is **not**
+repeated in payloads: the API server demultiplexes one turn's stream to exactly
+one client connection (ADR-0016 §3/§11), so correlation is per-connection. The
+component schemas in `api/openapi.yaml` model the *payloads* above, not an
+envelope. The `done` event folds in the degradation label (`degraded`,
+`usedModel`) so the substitution is never silent (Q3, ADR-0022).
+
+*Amendment (Track 1, TUI session — recorded):* this section originally showed
+an envelope (`{turnId, type, data}`) with `promptTokens`/`completionTokens`
+meter fields that the hand-framed server (ADR-0031) never emitted. It is
+rewritten to the committed wire above, and the vocabulary gains `rag` (loop →
+`retrieve`/`read_note` observation) so the ADR-0013 RAG-results panel has a
+stream data source. `interface.md §11` and `api/openapi.yaml` were amended
+in lockstep.
 
 ## Consequences
 

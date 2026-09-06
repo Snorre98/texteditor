@@ -249,7 +249,14 @@ paths:
               $ref: '#/components/schemas/Task'
       responses:
         '200':
-          description: SSE event stream (token/candidate/diff/done/error)
+          description: >
+            SSE event stream. Each message is `event: <type>` followed by
+            `data: <payload>` where <type> is one of the Event.type enum values
+            and <payload> is the matching component schema (TokenEvent,
+            MeterEvent, CandidateEvent, DiffEvent, RagEvent, DoneEvent,
+            ErrorEvent, BackpressureEvent). One turn per connection: the server
+            demultiplexes a turn's events to exactly one client stream, so
+            payloads do not repeat the turnId. (ADR-0017 §6, amended.)
           content:
             text/event-stream:
               x-ogen-raw-response: true
@@ -607,34 +614,123 @@ components:
         modeType:
           type: string
 
-    # SSE event vocabulary (ADR-0017 §6). Each event is turnId-tagged. The client
-    # codegens (Hey API + openapi-to-rust) consume these as typed SSE decoders.
+    # SSE event vocabulary (ADR-0017 §6, amended Track 1 TUI session). The
+    # hand-framed server writes `event: <type>` + `data: <payload>`; the client
+    # codegens (Hey API + Zod, openapi-to-rust) consume the payload schemas
+    # below as typed SSE decoders keyed by the SSE event name. turnId
+    # correlation is per-connection (one turn per stream) and is not repeated
+    # in payloads.
     Event:
       type: object
-      required: [turnId, type]
+      description: >
+        Framing marker for the SSE stream: the `event:` line carries `type`;
+        the `data:` line carries the payload schema matching that type. The
+        payload JSON itself has no `type` field.
+      required: [type]
       properties:
-        turnId:
-          type: string
         type:
           type: string
-          enum: [token, meter, candidate, diff, done, error, backpressure]
-        data:
-          type: object
-          additionalProperties: true
+          enum: [token, meter, candidate, diff, rag, done, error, backpressure]
 
     TokenEvent:
       type: object
+      required: [text]
       properties:
-        turnId:
-          type: string
         text:
           type: string
+
+    MeterEvent:
+      type: object
+      description: >
+        One attributed token breakdown per turn (interface.md §6). Components
+        sum to the scaled provider totals; `thinkingApprox` labels an
+        approximated thinking count (ADR-0024).
+      required: [system, tools, rag, history, user, thinking, completion]
+      properties:
+        system:
+          type: integer
+        tools:
+          type: integer
+        rag:
+          type: integer
+        history:
+          type: integer
+        user:
+          type: integer
+        thinking:
+          type: integer
+        thinkingApprox:
+          type: boolean
+        completion:
+          type: integer
+
+    CandidateEvent:
+      type: object
+      description: The edit_markdown structured result (ADR-0029 §5).
+      required: [ok]
+      properties:
+        ok:
+          type: boolean
+        blockId:
+          type: string
+        error:
+          type: string
+          enum: [guard-failed, invalid-structure, invalid-args]
+        revision:
+          $ref: '#/components/schemas/Revision'
+        issues:
+          type: array
+          items:
+            type: string
+
+    DiffEvent:
+      type: object
+      description: >
+        A word-level diff payload: either the diff tool's structured result
+        (`{ok, edits}`) or raw WordEdit-shaped fields from an observed edit.
+      properties:
+        ok:
+          type: boolean
+        blockId:
+          type: string
+        insertions:
+          type: array
+          items:
+            type: string
+        deletions:
+          type: array
+          items:
+            type: string
+        edits:
+          type: array
+          items:
+            $ref: '#/components/schemas/WordEdit'
+
+    RagEvent:
+      type: object
+      description: The retrieve/read_note structured result surfacing retrieval to the UI.
+      required: [ok]
+      properties:
+        ok:
+          type: boolean
+        chunks:
+          type: array
+          items:
+            type: object
+            required: [blockId, text]
+            properties:
+              blockId:
+                type: string
+              text:
+                type: string
+              score:
+                type: number
+              source:
+                type: string
 
     DoneEvent:
       type: object
       properties:
-        turnId:
-          type: string
         degraded:
           type: boolean
         usedModel:
@@ -643,9 +739,12 @@ components:
     ErrorEvent:
       type: object
       properties:
-        turnId:
-          type: string
         code:
           type: string
         message:
           type: string
+
+    BackpressureEvent:
+      type: object
+      description: The subscriber queue overflowed; oldest events were dropped.
+      properties: {}

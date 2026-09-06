@@ -202,10 +202,10 @@ and owns nothing upstream.)
 
 ```go
 type Chunk struct {
-    BlockID string
-    Text    string
-    Score   float32
-    Source  string // citation/provenance marker
+    BlockID string  `json:"blockId"`
+    Text    string  `json:"text"`
+    Score   float32 `json:"score"`
+    Source  string  `json:"source"` // citation/provenance marker
 }
 
 type Retriever interface {
@@ -213,6 +213,11 @@ type Retriever interface {
     Index(ctx context.Context, documentID string) error
 }
 ```
+
+*Amendment (Track 1, TUI session):* `Chunk` gains camelCase JSON tags — it
+crosses the API wire via the `rag` SSE event, which must stay camelCase like
+every other wire shape (recorded alongside the ADR-0017 §6 amendment).
+
 
 `Query` takes raw text; the Retriever owns embedding (resolves `nomic-embed` via
 Fleet, calls `Provider.Embed`), hybrid search, and rerank. `Index` is the write
@@ -529,7 +534,7 @@ is create-or-resume: re-anchoring to the same block reopens the same session.
 ```go
 type Event struct {
     TurnID string
-    Type   string // token|meter|candidate|diff|done|error|backpressure
+    Type   string // token|meter|candidate|diff|rag|done|error|backpressure
     Data   json.RawMessage
 }
 
@@ -538,6 +543,12 @@ type EventBus interface {
     Subscribe(filter func(Event) bool) <-chan Event // bounded; drop + backpressure event on overflow
 }
 ```
+
+*Amendment (Track 1, TUI session):* the vocabulary gains `rag` — the agent
+loop emits one `rag` event when it observes a `retrieve`/`read_note` result,
+carrying the structured tool output (the TUI's RAG-results panel consumes it,
+ADR-0013). Recorded alongside the ADR-0017 §6 amendment; not a silent change.
+
 
 ## 12. Serving lifecycle — the verb contract (transported by the daemon)
 

@@ -301,6 +301,69 @@ func TestAgenticToolDispatch(t *testing.T) {
 	}
 }
 
+// TestAgenticRetrieveEmitsRag drives a retrieve tool call and asserts the
+// structured result surfaces as a `rag` event (recorded amendment, ADR-0017 §6).
+func TestAgenticRetrieveEmitsRag(t *testing.T) {
+	bus := &stubBus{done: make(chan struct{})}
+	exec := &recordingExecutor{result: json.RawMessage(`{"ok":true,"chunks":[{"blockId":"b9","text":"cited"}]}`)}
+
+	round := 0
+	provider := stubProvider{stream: func(ctx context.Context, emit func(dto.RawEvent)) error {
+		round++
+		if round == 1 {
+			emit(dto.RawEvent{Type: "tool_call", Data: json.RawMessage(`{"id":"c1","name":"retrieve","arguments":"{\"query\":\"citations\"}"}`)})
+			emit(dto.RawEvent{Type: "finish", Data: json.RawMessage(`{"reason":"tool_calls"}`)})
+		} else {
+			emit(dto.RawEvent{Type: "token", Data: json.RawMessage(`{"text":"cited"}`)})
+			emit(dto.RawEvent{Type: "finish", Data: json.RawMessage(`{"reason":"stop"}`)})
+			emit(dto.RawEvent{Type: "done", Data: json.RawMessage(`{"inputTokens":14,"outputTokens":5}`)})
+		}
+		return nil
+	}}
+
+	deps := happyPathDeps(bus)
+	deps.Modes = stubMode{modes: map[string]dto.Mode{
+		"drafter": {Name: "drafter", DefaultModel: "mistral-24b", Agentic: true, MaxSteps: 4},
+	}}
+	deps.Executor = exec
+	deps.Provider = provider
+
+	l := New(deps)
+	_, err := l.Run(context.Background(), dto.Task{
+		SessionID: "s1", ModeName: "drafter", DocumentID: "d1", UserInput: "add citations",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case <-bus.done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("turn did not complete")
+	}
+
+	bus.mu.Lock()
+	defer bus.mu.Unlock()
+	sawRag := false
+	for _, ev := range bus.events {
+		if ev.Type == "rag" {
+			sawRag = true
+			var d struct {
+				Chunks []struct {
+					BlockID string `json:"blockId"`
+					Text    string `json:"text"`
+				} `json:"chunks"`
+			}
+			if err := json.Unmarshal(ev.Data, &d); err != nil || len(d.Chunks) != 1 || d.Chunks[0].Text != "cited" {
+				t.Fatalf("rag data = %s, want structured chunks", ev.Data)
+			}
+		}
+	}
+	if !sawRag {
+		t.Fatalf("no rag event: %+v", bus.events)
+	}
+}
+
 // TestBudgetExceeded surfaces session-budget-exceeded before any model call.
 func TestBudgetExceeded(t *testing.T) {
 	bus := &stubBus{done: make(chan struct{})}

@@ -82,6 +82,8 @@ func (s EventType) Validate() error {
 		return nil
 	case "diff":
 		return nil
+	case "rag":
+		return nil
 	case "done":
 		return nil
 	case "error":

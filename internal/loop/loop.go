@@ -304,6 +304,10 @@ func (l *loop) observeTool(turnID string, task dto.Task, tc dto.ToolCall, out js
 	case "diff":
 		// A diff tool result is itself the diff to surface.
 		l.emit(turnID, dto.Event{Type: "diff", Data: outOrEmpty(out)})
+	case "retrieve", "read_note":
+		// Retrieval results surface to the UI as a rag event (recorded
+		// amendment: the SSE vocabulary gains `rag` — ADR-0017 §6).
+		l.emit(turnID, dto.Event{Type: "rag", Data: outOrEmpty(out)})
 	}
 	return nil
 }
