@@ -116,6 +116,25 @@ paths:
                 items:
                   $ref: '#/components/schemas/ToolDef'
 
+  /directories:
+    get:
+      operationId: listDirectory
+      summary: List one directory's direct, non-recursive entries (ADR-0035)
+      parameters:
+        - name: path
+          in: query
+          required: true
+          description: absolute path of the directory to list
+          schema:
+            type: string
+      responses:
+        '200':
+          description: the directory's entries (shallow, name-sorted)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DirectoryListing'
+
   /documents:
     post:
       operationId: openDocument
@@ -468,6 +487,30 @@ components:
           type: integer
           format: int64
 
+    Entry:
+      type: object
+      description: One directory entry (ADR-0035). Hidden entries are returned; display filtering is client-side.
+      required: [name, path, isDir]
+      properties:
+        name:
+          type: string
+        path:
+          type: string
+        isDir:
+          type: boolean
+
+    DirectoryListing:
+      type: object
+      description: A shallow, non-recursive directory listing (ADR-0035 §2).
+      required: [path, entries]
+      properties:
+        path:
+          type: string
+        entries:
+          type: array
+          items:
+            $ref: '#/components/schemas/Entry'
+
     Block:
       type: object
       required: [id, kind, position, text]
@@ -558,6 +601,14 @@ components:
         model:
           type: string
 
+    Mention:
+      type: object
+      description: A turn-scoped file attachment (ADR-0036); absolute path resolved by the client.
+      required: [path]
+      properties:
+        path:
+          type: string
+
     Task:
       type: object
       required: [sessionId, modeName, documentId, userInput]
@@ -572,6 +623,10 @@ components:
           type: string
         selection:
           $ref: '#/components/schemas/Selection'
+        mentions:
+          type: array
+          items:
+            $ref: '#/components/schemas/Mention'
         options:
           $ref: '#/components/schemas/TurnOptions'
 
@@ -652,8 +707,9 @@ components:
       description: >
         One attributed token breakdown per turn (interface.md §6). Components
         sum to the scaled provider totals; `thinkingApprox` labels an
-        approximated thinking count (ADR-0024).
-      required: [system, tools, rag, history, user, thinking, completion]
+        approximated thinking count (ADR-0024); `mentions` carries the turn's
+        file-mention tokens (ADR-0036 §5).
+      required: [system, tools, rag, history, mentions, user, thinking, completion]
       properties:
         system:
           type: integer
@@ -662,6 +718,8 @@ components:
         rag:
           type: integer
         history:
+          type: integer
+        mentions:
           type: integer
         user:
           type: integer

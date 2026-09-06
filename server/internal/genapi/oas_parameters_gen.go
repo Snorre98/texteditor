@@ -676,6 +676,64 @@ func decodeGetSessionMessagesParams(args [1]string, argsEscaped bool, r *http.Re
 	return params, nil
 }
 
+// ListDirectoryParams is parameters of listDirectory operation.
+type ListDirectoryParams struct {
+	// Absolute path of the directory to list.
+	Path string
+}
+
+func unpackListDirectoryParams(packed middleware.Parameters) (params ListDirectoryParams) {
+	{
+		key := middleware.ParameterKey{
+			Name: "path",
+			In:   "query",
+		}
+		params.Path = packed[key].(string)
+	}
+	return params
+}
+
+func decodeListDirectoryParams(args [0]string, argsEscaped bool, r *http.Request) (params ListDirectoryParams, _ error) {
+	q := uri.NewQueryDecoder(r.URL.Query())
+	// Decode query: path.
+	if err := func() error {
+		cfg := uri.QueryParameterDecodingConfig{
+			Name:    "path",
+			Style:   uri.QueryStyleForm,
+			Explode: true,
+		}
+
+		if err := q.HasParam(cfg); err == nil {
+			if err := q.DecodeParam(cfg, func(d uri.Decoder) error {
+				val, err := d.DecodeValue()
+				if err != nil {
+					return err
+				}
+
+				c, err := conv.ToString(val)
+				if err != nil {
+					return err
+				}
+
+				params.Path = c
+				return nil
+			}); err != nil {
+				return err
+			}
+		} else {
+			return err
+		}
+		return nil
+	}(); err != nil {
+		return params, &ogenerrors.DecodeParamError{
+			Name: "path",
+			In:   "query",
+			Err:  err,
+		}
+	}
+	return params, nil
+}
+
 // ListSessionsParams is parameters of listSessions operation.
 type ListSessionsParams struct {
 	DocumentId string

@@ -51,6 +51,12 @@ type Handler interface {
 	//
 	// GET /sessions/{id}/messages
 	GetSessionMessages(ctx context.Context, params GetSessionMessagesParams) ([]Message, error)
+	// ListDirectory implements listDirectory operation.
+	//
+	// List one directory's direct, non-recursive entries (ADR-0035).
+	//
+	// GET /directories
+	ListDirectory(ctx context.Context, params ListDirectoryParams) (*DirectoryListing, error)
 	// ListModels implements listModels operation.
 	//
 	// Discover the servable fleet (ADR-0018).

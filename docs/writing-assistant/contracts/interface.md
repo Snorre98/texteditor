@@ -39,6 +39,7 @@ embeds a sibling module's package type.
 | `Guard` | Document store (`BlockEdit`) | 9 |
 | `Session` | Session store | 10 |
 | `Payload`, `Breakdown` | Context assembler | 5 |
+| `MentionContent`, `Mention` | Context assembler / Agent loop | 5, 7 |
 | `ProviderCounts`, `AttributedBreakdown` | Token metering | 6 |
 
 ## 0b. Shared DTO definitions — the unpinned catalog types

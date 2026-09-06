@@ -49,9 +49,13 @@ func (assembler) Assemble(_ context.Context, in dto.AssemblerInput) (dto.Payload
 	// Truncate RAG chunks to the mode's RAG budget.
 	rag := truncateRag(in.RAGChunks, in.Mode.ContextBudget.MaxRagTokens)
 
+	// Splice mentions after history, before user input (ADR-0036 §3). Truncate
+	// over-budget mentions from the tail, with a labeled overflow line.
+	mentions, mentionOverflow := truncateMentions(in.Mentions, in.Mode.ContextBudget.MaxMentionTokens)
+
 	// Build the assembled message list.
 	messages := []dto.Message{{Role: "system", Content: system}}
-	var historyTokens, ragTokens int
+	var historyTokens, ragTokens, mentionTokens int
 	for _, m := range history {
 		messages = append(messages, m)
 		historyTokens += estimate(m.Content)
@@ -59,6 +63,15 @@ func (assembler) Assemble(_ context.Context, in dto.AssemblerInput) (dto.Payload
 	for _, c := range rag {
 		messages = append(messages, dto.Message{Role: "user", Content: "Source: " + c.Text})
 		ragTokens += estimate(c.Text)
+	}
+	for _, mc := range mentions {
+		messages = append(messages, dto.Message{Role: "user", Content: mentionMarkup(mc)})
+		mentionTokens += estimate(mc.Text)
+	}
+	if mentionOverflow {
+		// Labeled overflow line: the truncated mention tail is dropped, never
+		// folded silently (failure-semantics §4).
+		messages = append(messages, dto.Message{Role: "user", Content: overflowLine()})
 	}
 	messages = append(messages, dto.Message{Role: "user", Content: in.UserInput})
 
@@ -74,6 +87,7 @@ func (assembler) Assemble(_ context.Context, in dto.AssemblerInput) (dto.Payload
 		Tools:        toolsTokens,
 		Rag:          ragTokens,
 		History:      historyTokens,
+		Mentions:     mentionTokens,
 		User:         estimate(in.UserInput),
 		Thinking:     0, // thinking is reconciled by the meter (ADR-0024)
 	}
@@ -138,6 +152,46 @@ func truncateRag(chunks []dto.Chunk, maxTokens int) []dto.Chunk {
 		total += t
 	}
 	return out
+}
+
+// mentionMarkup wraps a mention in a path marker line so the model can cite it
+// and clients can show provenance — the same "Source:" discipline as RAG source
+// markers (ADR-0036 §3). Recorded marker format:
+//
+//	Source: <absolute path>\n<text>
+//
+// The path is verbatim (absolute, client-resolved per ADR-0036 §1).
+func mentionMarkup(mc dto.MentionContent) string {
+	return "Source: " + mc.Path + "\n" + mc.Text
+}
+
+// overflowLine is the labeled overflow line emitted when mentioned-file content
+// exceeds the mode's MaxMentionTokens and is truncated from the tail
+// (failure-semantics §4: overflow is labeled, never folded silently).
+func overflowLine() string {
+	return "Source: <overflow>: some mentioned-file content was truncated to fit the mention token budget"
+}
+
+// truncateMentions keeps mentions that fit within maxTokens, truncating
+// over-budget mentions from the tail (last mention first, ADR-0036 §4). A
+// maxTokens of 0 truncates all mention content. It returns the kept mentions and
+// an overflow flag; the assembler renders the flag as a labeled overflow line so
+// truncation is never silent (failure-semantics §4).
+func truncateMentions(mentions []dto.MentionContent, maxTokens int) ([]dto.MentionContent, bool) {
+	if maxTokens <= 0 {
+		return nil, len(mentions) > 0
+	}
+	out := make([]dto.MentionContent, 0, len(mentions))
+	total := 0
+	for _, m := range mentions {
+		t := estimate(m.Text)
+		if total+t > maxTokens {
+			return out, true
+		}
+		out = append(out, m)
+		total += t
+	}
+	return out, false
 }
 
 // estimate is the documented-unit token approximation (bytes/4).

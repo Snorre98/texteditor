@@ -5,7 +5,7 @@
   "defaultModel": "mistral-24b",
   "toolAllowlist": ["retrieve", "read_note"],
   "params": { "temperature": 0.5, "maxTokens": 4096 },
-  "contextBudget": { "maxHistoryTokens": 48000, "maxRagTokens": 32000 },
+  "contextBudget": { "maxHistoryTokens": 48000, "maxRagTokens": 32000, "maxMentionTokens": 32000 },
   "maxSteps": 8,
   "agentic": true,
   "kind": "model",

@@ -295,6 +295,33 @@ func (s *CreateSessionRequest) SetModeType(val OptString) {
 	s.ModeType = val
 }
 
+// A shallow, non-recursive directory listing (ADR-0035 §2).
+// Ref: #/components/schemas/DirectoryListing
+type DirectoryListing struct {
+	Path    string  `json:"path"`
+	Entries []Entry `json:"entries"`
+}
+
+// GetPath returns the value of Path.
+func (s *DirectoryListing) GetPath() string {
+	return s.Path
+}
+
+// GetEntries returns the value of Entries.
+func (s *DirectoryListing) GetEntries() []Entry {
+	return s.Entries
+}
+
+// SetPath sets the value of Path.
+func (s *DirectoryListing) SetPath(val string) {
+	s.Path = val
+}
+
+// SetEntries sets the value of Entries.
+func (s *DirectoryListing) SetEntries(val []Entry) {
+	s.Entries = val
+}
+
 // Ref: #/components/schemas/Document
 type Document struct {
 	ID          string   `json:"id"`
@@ -341,6 +368,44 @@ func (s *Document) SetRootBlockId(val string) {
 // SetUpdatedAt sets the value of UpdatedAt.
 func (s *Document) SetUpdatedAt(val OptInt64) {
 	s.UpdatedAt = val
+}
+
+// One directory entry (ADR-0035). Hidden entries are returned; display filtering is client-side.
+// Ref: #/components/schemas/Entry
+type Entry struct {
+	Name  string `json:"name"`
+	Path  string `json:"path"`
+	IsDir bool   `json:"isDir"`
+}
+
+// GetName returns the value of Name.
+func (s *Entry) GetName() string {
+	return s.Name
+}
+
+// GetPath returns the value of Path.
+func (s *Entry) GetPath() string {
+	return s.Path
+}
+
+// GetIsDir returns the value of IsDir.
+func (s *Entry) GetIsDir() bool {
+	return s.IsDir
+}
+
+// SetName sets the value of Name.
+func (s *Entry) SetName(val string) {
+	s.Name = val
+}
+
+// SetPath sets the value of Path.
+func (s *Entry) SetPath(val string) {
+	s.Path = val
+}
+
+// SetIsDir sets the value of IsDir.
+func (s *Entry) SetIsDir(val bool) {
+	s.IsDir = val
 }
 
 // Framing marker for the SSE stream: the `event:` line carries `type`; the `data:` line carries the
@@ -625,6 +690,22 @@ func (s *LiveStateResponseState) UnmarshalText(data []byte) error {
 	default:
 		return errors.Errorf("invalid value: %q", data)
 	}
+}
+
+// A turn-scoped file attachment (ADR-0036); absolute path resolved by the client.
+// Ref: #/components/schemas/Mention
+type Mention struct {
+	Path string `json:"path"`
+}
+
+// GetPath returns the value of Path.
+func (s *Mention) GetPath() string {
+	return s.Path
+}
+
+// SetPath sets the value of Path.
+func (s *Mention) SetPath(val string) {
+	s.Path = val
 }
 
 // Ref: #/components/schemas/Message
@@ -1725,6 +1806,7 @@ type Task struct {
 	DocumentId string         `json:"documentId"`
 	UserInput  string         `json:"userInput"`
 	Selection  OptSelection   `json:"selection"`
+	Mentions   []Mention      `json:"mentions"`
 	Options    OptTurnOptions `json:"options"`
 }
 
@@ -1751,6 +1833,11 @@ func (s *Task) GetUserInput() string {
 // GetSelection returns the value of Selection.
 func (s *Task) GetSelection() OptSelection {
 	return s.Selection
+}
+
+// GetMentions returns the value of Mentions.
+func (s *Task) GetMentions() []Mention {
+	return s.Mentions
 }
 
 // GetOptions returns the value of Options.
@@ -1781,6 +1868,11 @@ func (s *Task) SetUserInput(val string) {
 // SetSelection sets the value of Selection.
 func (s *Task) SetSelection(val OptSelection) {
 	s.Selection = val
+}
+
+// SetMentions sets the value of Mentions.
+func (s *Task) SetMentions(val []Mention) {
+	s.Mentions = val
 }
 
 // SetOptions sets the value of Options.

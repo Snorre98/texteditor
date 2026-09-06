@@ -3,6 +3,7 @@ package meter
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"testing"
 
 	_ "modernc.org/sqlite"
@@ -38,6 +39,7 @@ func TestAttributeScalesToTotal(t *testing.T) {
 		Tools:        20,
 		Rag:          20,
 		History:      10,
+		Mentions:     10,
 		User:         10,
 		Thinking:     0,
 	}
@@ -48,14 +50,27 @@ func TestAttributeScalesToTotal(t *testing.T) {
 	}
 
 	// Scaled sum equals the provider's prompt total exactly (Q1).
-	sum := a.SystemPrompt + a.Tools + a.Rag + a.History + a.User
+	sum := a.SystemPrompt + a.Tools + a.Rag + a.History + a.Mentions + a.User
 	if sum != 100 {
 		t.Fatalf("scaled prompt sum = %d, want 100", sum)
+	}
+	if a.Mentions == 0 {
+		t.Fatalf("mentions should be attributed: %+v", a)
 	}
 
 	// One meter event emitted.
 	if len(bus.events) != 1 || bus.events[0].Type != "meter" {
 		t.Fatalf("bus events = %+v", bus.events)
+	}
+	// The meter event carries the required mentions field (ADR-0036 §5).
+	var evt struct {
+		Mentions int `json:"mentions"`
+	}
+	if err := json.Unmarshal(bus.events[0].Data, &evt); err != nil {
+		t.Fatal(err)
+	}
+	if evt.Mentions == 0 {
+		t.Fatalf("meter event missing mentions field: %s", bus.events[0].Data)
 	}
 
 	// meter_events rows persisted.
@@ -63,8 +78,16 @@ func TestAttributeScalesToTotal(t *testing.T) {
 	if err := db.QueryRow(`SELECT count(*) FROM meter_events WHERE turn_id = 't1'`).Scan(&n); err != nil {
 		t.Fatal(err)
 	}
-	if n != 6 { // system, tools, rag, history, user + completion (thinking=0 skipped)
-		t.Fatalf("meter_events = %d, want 6", n)
+	if n != 7 { // system, tools, rag, history, mentions, user + completion (thinking=0 skipped)
+		t.Fatalf("meter_events = %d, want 7", n)
+	}
+	// A mentions row is persisted.
+	var mentions int
+	if err := db.QueryRow(`SELECT count(*) FROM meter_events WHERE turn_id = 't1' AND component = 'mentions'`).Scan(&mentions); err != nil {
+		t.Fatal(err)
+	}
+	if mentions != 1 {
+		t.Fatalf("mentions component rows = %d, want 1", mentions)
 	}
 }
 

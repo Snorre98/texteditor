@@ -87,6 +87,15 @@ func (UnimplementedHandler) GetSessionMessages(ctx context.Context, params GetSe
 	return r, ht.ErrNotImplemented
 }
 
+// ListDirectory implements listDirectory operation.
+//
+// List one directory's direct, non-recursive entries (ADR-0035).
+//
+// GET /directories
+func (UnimplementedHandler) ListDirectory(ctx context.Context, params ListDirectoryParams) (r *DirectoryListing, _ error) {
+	return r, ht.ErrNotImplemented
+}
+
 // ListModels implements listModels operation.
 //
 // Discover the servable fleet (ADR-0018).

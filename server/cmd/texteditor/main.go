@@ -38,6 +38,7 @@ import (
 	"texteditor/internal/textformatter"
 	"texteditor/internal/tool"
 	"texteditor/internal/tooldecider"
+	"texteditor/internal/workspace"
 	"texteditor/shared/dto"
 )
 
@@ -189,6 +190,7 @@ func run() error {
 
 	// --- Assembler + loop ---
 	assemblerGW := assembler.New()
+	ws := workspace.New()
 	loopGW := loop.New(loop.Deps{
 		Modes:     modeReg,
 		Tools:     registry,
@@ -202,6 +204,7 @@ func run() error {
 		Meter:     meterStore,
 		Bus:       bus,
 		Decider:   deciderGW,
+		Workspace: ws,
 	})
 
 	// --- Bind: dynamic port by default (ADR-0021 §1); ENGINE_BIND=0.0.0.0 opts
@@ -217,13 +220,14 @@ func run() error {
 
 	// --- API server ---
 	srv, err := apiserver.New(apiserver.Deps{
-		Fleet:    fleetGW,
-		Modes:    modeReg,
-		Tools:    registry,
-		Doc:      docStore,
-		Sessions: sessStore,
-		Loop:     loopGW,
-		BaseURL:  baseURL,
+		Fleet:     fleetGW,
+		Modes:     modeReg,
+		Tools:     registry,
+		Doc:       docStore,
+		Sessions:  sessStore,
+		Loop:      loopGW,
+		Workspace: ws,
+		BaseURL:   baseURL,
 	}, bus)
 	if err != nil {
 		return err

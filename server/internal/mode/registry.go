@@ -199,6 +199,7 @@ func parseAndValidate(schema *jsonschema.Schema, f config.ModeFile) (Mode, error
 		ContextBudget *struct {
 			MaxHistoryTokens int `json:"maxHistoryTokens"`
 			MaxRagTokens     int `json:"maxRagTokens"`
+			MaxMentionTokens int `json:"maxMentionTokens"`
 		} `json:"contextBudget"`
 		MaxSteps    *int    `json:"maxSteps"`
 		Agentic     bool    `json:"agentic"`
@@ -235,6 +236,7 @@ func parseAndValidate(schema *jsonschema.Schema, f config.ModeFile) (Mode, error
 	if raw.ContextBudget != nil {
 		m.ContextBudget.MaxHistoryTokens = raw.ContextBudget.MaxHistoryTokens
 		m.ContextBudget.MaxRagTokens = raw.ContextBudget.MaxRagTokens
+		m.ContextBudget.MaxMentionTokens = raw.ContextBudget.MaxMentionTokens
 	}
 	if raw.MaxSteps != nil {
 		m.MaxSteps = *raw.MaxSteps

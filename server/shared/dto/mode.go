@@ -1,10 +1,11 @@
 package dto
 
-// ContextBudget bounds the history and RAG tokens a mode may assemble
-// (interface.md §8).
+// ContextBudget bounds the history, RAG, and mention tokens a mode may assemble
+// (interface.md §8; MaxMentionTokens added by ADR-0036 §4).
 type ContextBudget struct {
 	MaxHistoryTokens int
 	MaxRagTokens     int
+	MaxMentionTokens int
 }
 
 // Mode is a declarative persona: prompt + default model + tool set + budget

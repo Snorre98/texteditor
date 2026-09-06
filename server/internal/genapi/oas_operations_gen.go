@@ -16,6 +16,7 @@ const (
 	GetHistoryOperation         OperationName = "GetHistory"
 	GetModelStatusOperation     OperationName = "GetModelStatus"
 	GetSessionMessagesOperation OperationName = "GetSessionMessages"
+	ListDirectoryOperation      OperationName = "ListDirectory"
 	ListModelsOperation         OperationName = "ListModels"
 	ListModesOperation          OperationName = "ListModes"
 	ListSessionsOperation       OperationName = "ListSessions"

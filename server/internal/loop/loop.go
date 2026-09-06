@@ -29,6 +29,7 @@ import (
 	"texteditor/internal/retriever"
 	"texteditor/internal/session"
 	"texteditor/internal/tool"
+	"texteditor/internal/workspace"
 	"texteditor/shared/dto"
 )
 
@@ -68,6 +69,7 @@ type Deps struct {
 	Meter     meter.Interface
 	Bus       Emitter
 	Decider   Decider // optional: wired only when a mode sets toolCalling "router"
+	Workspace workspace.Interface
 }
 
 // The router-mode protocol constants (ADR-0028 §2/§7). The writer's synthetic
@@ -77,10 +79,22 @@ const (
 	routerModelName = "needle-router"
 )
 
+// Mention caps (ADR-0036 §2) — constants in the loop package, not mode data.
+const (
+	maxMentions    = 8
+	mentionReadCap = 256 * 1024 // 256 KiB per mentioned file
+)
+
 // errRouterUnwired is the defensive guard for a composition-root wiring bug:
 // a mode requests the router but no Decider was wired. The startup gates
 // (routergate.Check) make this unreachable.
 var errRouterUnwired = errors.New("router-unavailable: mode requests router tool-calling but no ToolDecider is wired")
+
+// Mention failure sentinels (ADR-0036 §2) — mapped to the mention SSE codes by
+// codeFor. too-many-mentions is synthesized when the count cap is exceeded.
+var (
+	errTooManyMentions = errors.New("too-many-mentions: more than the per-turn mention cap")
+)
 
 // loop is the concrete Agent loop.
 type loop struct {
@@ -113,8 +127,73 @@ func (l *loop) validate(task dto.Task) (mode.Mode, dto.Resolution, error) {
 	return m, res, nil
 }
 
+// resolveMentions reads every mentioned file through Workspace.Read before the
+// turn state machine starts (ADR-0036 §2). Failures are fail-fast and typed:
+//   - > maxMentions mentions        → too-many-mentions
+//   - not-found / not-regular       → mention-not-found
+//   - over mentionReadCap bytes     → mention-too-large
+//   - read-failed                   → mention-unreadable
+//
+// Success resolves to []dto.MentionContent (raw content, token weight budgeted
+// later by the assembler).
+func (l *loop) resolveMentions(ctx context.Context, mentions []dto.Mention) ([]dto.MentionContent, error) {
+	if len(mentions) == 0 {
+		return nil, nil
+	}
+	if len(mentions) > maxMentions {
+		return nil, errTooManyMentions
+	}
+	out := make([]dto.MentionContent, 0, len(mentions))
+	for _, m := range mentions {
+		data, err := l.d.Workspace.Read(ctx, m.Path, mentionReadCap)
+		if err != nil {
+			switch {
+			case errors.Is(err, workspace.ErrNotFound), errors.Is(err, workspace.ErrNotRegular):
+				return nil, errMentionNotFound(m.Path)
+			case errors.Is(err, workspace.ErrTooLarge):
+				return nil, errMentionTooLarge(m.Path)
+			default:
+				return nil, errMentionUnreadable(m.Path)
+			}
+		}
+		out = append(out, dto.MentionContent{Path: m.Path, Text: string(data)})
+	}
+	return out, nil
+}
+
+// mentionError is a typed mention-resolution error naming the offending path; it
+// carries the SSE code so errorData can render it directly.
+type mentionError struct {
+	code string
+	path string
+}
+
+func (e *mentionError) Error() string {
+	return e.code + ": " + e.path
+}
+
+func errMentionNotFound(path string) error {
+	return &mentionError{code: "mention-not-found", path: path}
+}
+func errMentionTooLarge(path string) error {
+	return &mentionError{code: "mention-too-large", path: path}
+}
+func errMentionUnreadable(path string) error {
+	return &mentionError{code: "mention-unreadable", path: path}
+}
+
 func (l *loop) runTurn(ctx context.Context, turnID string, task dto.Task) {
 	m, res, err := l.validate(task)
+	if err != nil {
+		l.emit(turnID, dto.Event{Type: "error", Data: errorData(err)})
+		return
+	}
+
+	// Resolve mentions first, fail-fast (ADR-0036 §2): read every mentioned file
+	// through Workspace.Read before the turn state machine starts. A missing /
+	// oversized / unreadable mention (or over the count cap) is a typed,
+	// pre-streaming error — never silently dropped.
+	mentions, err := l.resolveMentions(ctx, task.Mentions)
 	if err != nil {
 		l.emit(turnID, dto.Event{Type: "error", Data: errorData(err)})
 		return
@@ -172,6 +251,7 @@ func (l *loop) runTurn(ctx context.Context, turnID string, task dto.Task) {
 		Tools:     tools,
 		RAGChunks: chunks,
 		History:   history,
+		Mentions:  mentions,
 		UserInput: task.UserInput,
 	})
 	if err != nil {
@@ -585,7 +665,12 @@ func errorDataWithCode(code string, err error) json.RawMessage {
 }
 
 func codeFor(err error) string {
+	var me *mentionError
 	switch {
+	case errors.As(err, &me):
+		return me.code
+	case errors.Is(err, errTooManyMentions):
+		return "too-many-mentions"
 	case errors.Is(err, fleet.ErrModelNotFound):
 		return "model-not-found"
 	case errors.Is(err, fleet.ErrNoModelAvailable):

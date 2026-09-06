@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"texteditor/internal/workspace"
 	"texteditor/shared/dto"
 )
 
@@ -85,6 +86,20 @@ func (stubSessions) Append(string, dto.Message) error   { return nil }
 func (stubSessions) History(string) ([]dto.Message, error) {
 	return []dto.Message{{Role: "user", Content: "hi"}}, nil
 }
+
+// stubWorkspace implements the apiserver's workspace.Interface.
+type stubWorkspace struct {
+	entries []workspace.Entry
+	err     error
+}
+
+func (s *stubWorkspace) List(context.Context, string) ([]workspace.Entry, error) {
+	if s.err != nil {
+		return nil, s.err
+	}
+	return s.entries, nil
+}
+func (s *stubWorkspace) Read(context.Context, string, int) ([]byte, error) { return nil, nil }
 
 // stubLoop is superseded by stubLoopEmitter; kept removed below.
 
@@ -250,6 +265,57 @@ func TestSessions(t *testing.T) {
 	}
 }
 
+func TestListDirectory(t *testing.T) {
+	bus := &fakeBus{}
+	ws := &stubWorkspace{entries: []workspace.Entry{
+		{Name: "a.md", Path: "/vault/a.md", IsDir: false},
+		{Name: "notes", Path: "/vault/notes", IsDir: true},
+	}}
+	srv, err := New(Deps{
+		Fleet:     stubFleet{},
+		Modes:     stubModes{},
+		Tools:     stubTools{},
+		Doc:       stubDoc{},
+		Sessions:  stubSessions{},
+		Loop:      &stubLoopEmitter{bus: bus},
+		Workspace: ws,
+	}, bus)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/directories?path=/vault", nil)
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("directories = %d body %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "a.md") || !strings.Contains(rec.Body.String(), "notes") || !strings.Contains(rec.Body.String(), "isDir") {
+		t.Fatalf("directories body = %s", rec.Body.String())
+	}
+}
+
+func TestListDirectoryNotFound(t *testing.T) {
+	bus := &fakeBus{}
+	srv, err := New(Deps{
+		Fleet:     stubFleet{},
+		Modes:     stubModes{},
+		Tools:     stubTools{},
+		Doc:       stubDoc{},
+		Sessions:  stubSessions{},
+		Loop:      &stubLoopEmitter{bus: bus},
+		Workspace: &stubWorkspace{err: workspace.ErrNotFound},
+	}, bus)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/directories?path=/nope", nil)
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("directories = %d, want 500 (oproject not-found as error)", rec.Code)
+	}
+}
+
 func TestTurnSSE(t *testing.T) {
 	srv, _ := newTestServer(t)
 	ts := httptest.NewServer(http.HandlerFunc(srv.ServeHTTP))
@@ -276,5 +342,57 @@ func TestTurnSSE(t *testing.T) {
 	out := string(b)
 	if !strings.Contains(out, "event: token") || !strings.Contains(out, "event: done") {
 		t.Fatalf("SSE stream = %q", out)
+	}
+}
+
+// captureLoop captures the dto.Task it is handed, then emits a done event, so
+// StartTurn's mention decoding can be asserted end-to-end.
+type captureLoop struct {
+	bus      *fakeBus
+	mu       sync.Mutex
+	mentions []string
+}
+
+func (c *captureLoop) Run(_ context.Context, task dto.Task) (string, error) {
+	c.mu.Lock()
+	for _, m := range task.Mentions {
+		c.mentions = append(c.mentions, m.Path)
+	}
+	c.mu.Unlock()
+	id := "t1"
+	go func() {
+		c.bus.Emit(dto.Event{TurnID: id, Type: "done", Data: json.RawMessage(`{"degraded":false}`)})
+	}()
+	return id, nil
+}
+
+func TestStartTurnDecodesMentions(t *testing.T) {
+	bus := &fakeBus{}
+	loop := &captureLoop{bus: bus}
+	srv, err := New(Deps{
+		Fleet:    stubFleet{},
+		Modes:    stubModes{},
+		Tools:    stubTools{},
+		Doc:      stubDoc{},
+		Sessions: stubSessions{},
+		Loop:     loop,
+	}, bus)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	body := `{"sessionId":"s1","modeName":"proofreader","documentId":"d1","userInput":"fix","mentions":[{"path":"/notes/a.md"},{"path":"/notes/b.md"}]}`
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/turn", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("turn = %d body %s", rec.Code, rec.Body.String())
+	}
+
+	loop.mu.Lock()
+	defer loop.mu.Unlock()
+	if len(loop.mentions) != 2 || loop.mentions[0] != "/notes/a.md" || loop.mentions[1] != "/notes/b.md" {
+		t.Fatalf("decoded mentions = %v, want [/notes/a.md /notes/b.md]", loop.mentions)
 	}
 }

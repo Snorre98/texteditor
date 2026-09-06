@@ -1,5 +1,12 @@
 package dto
 
+// MentionContent is a turn-scoped, resolved mention attachment (interface.md §5,
+// ADR-0036 §3).
+type MentionContent struct {
+	Path string
+	Text string // raw content, truncated by Mode.ContextBudget.MaxMentionTokens
+}
+
 // AssemblerInput is the input to ContextAssembler.Assemble (interface.md §5).
 type AssemblerInput struct {
 	Mode      Mode
@@ -8,13 +15,14 @@ type AssemblerInput struct {
 	Tools     []ToolDef      // the mode's allowlisted tools, in splices order
 	RAGChunks []Chunk
 	History   []Message
+	Mentions  []MentionContent // spliced after history, before user input (ADR-0036)
 	UserInput string
 }
 
 // Breakdown is the deterministic per-component token approximation, in a
-// documented unit (interface.md §5).
+// documented unit (interface.md §5). Mentions added by ADR-0036 §3.
 type Breakdown struct {
-	SystemPrompt, Tools, Rag, History, User, Thinking int
+	SystemPrompt, Tools, Rag, History, Mentions, User, Thinking int
 }
 
 // Payload is the assembled request (interface.md §5).
@@ -31,8 +39,8 @@ type ProviderCounts struct {
 }
 
 // AttributedBreakdown is the breakdown scaled to exact provider totals
-// (interface.md §6).
+// (interface.md §6). Mentions added by ADR-0036 §5.
 type AttributedBreakdown struct {
-	SystemPrompt, Tools, Rag, History, User, Thinking int  // scaled to exact totals
-	ThinkingApprox                                    bool // true when thinking was tokenized (ADR-0024)
+	SystemPrompt, Tools, Rag, History, Mentions, User, Thinking int  // scaled to exact totals
+	ThinkingApprox                                              bool // true when thinking was tokenized (ADR-0024)
 }

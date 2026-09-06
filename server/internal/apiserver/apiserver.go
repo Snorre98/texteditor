@@ -18,6 +18,7 @@ import (
 	"texteditor/internal/mode"
 	"texteditor/internal/session"
 	"texteditor/internal/tool"
+	"texteditor/internal/workspace"
 	"texteditor/shared/dto"
 )
 
@@ -25,13 +26,14 @@ import (
 // wires these to the real gateways/stores). BaseURL is the engine's own bound
 // base URL, advertised via /health for dynamic-port discovery (ADR-0021 §1).
 type Deps struct {
-	Fleet    fleet.Interface
-	Modes    mode.Interface
-	Tools    tool.Registry
-	Doc      document.Interface
-	Sessions session.Interface
-	Loop     loop.Interface
-	BaseURL  string
+	Fleet     fleet.Interface
+	Modes     mode.Interface
+	Tools     tool.Registry
+	Doc       document.Interface
+	Sessions  session.Interface
+	Loop      loop.Interface
+	Workspace workspace.Interface
+	BaseURL   string
 }
 
 // Server wraps the generated ogen server with a handler adapter. ServeHTTP is
@@ -144,6 +146,21 @@ func (h *handler) ListTools(ctx context.Context) ([]genapi.ToolDef, error) {
 		out = append(out, toolDefToGen(d))
 	}
 	return out, nil
+}
+
+// ListDirectory backs GET /directories (ADR-0035 §2): a shallow, engine-served
+// directory listing through the Workspace leaf. List failures project as
+// not-found / not-a-directory (interface.md §9b).
+func (h *handler) ListDirectory(ctx context.Context, p genapi.ListDirectoryParams) (*genapi.DirectoryListing, error) {
+	entries, err := h.d.Workspace.List(ctx, p.Path)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]genapi.Entry, 0, len(entries))
+	for _, e := range entries {
+		out = append(out, genapi.Entry{Name: e.Name, Path: e.Path, IsDir: e.IsDir})
+	}
+	return &genapi.DirectoryListing{Path: p.Path, Entries: out}, nil
 }
 
 func (h *handler) OpenDocument(ctx context.Context, req *genapi.OpenDocumentRequest) (*genapi.Document, error) {
@@ -294,6 +311,9 @@ func (h *handler) StartTurn(ctx context.Context, req *genapi.Task, w http.Respon
 		ModeName:   req.ModeName,
 		DocumentID: req.DocumentId,
 		UserInput:  req.UserInput,
+	}
+	for _, m := range req.Mentions {
+		task.Mentions = append(task.Mentions, dto.Mention{Path: m.Path})
 	}
 	if sel, ok := req.Selection.Get(); ok {
 		if bid, ok := sel.BlockId.Get(); ok {

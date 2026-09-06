@@ -37,7 +37,8 @@
       "additionalProperties": false,
       "properties": {
         "maxHistoryTokens": { "type": "integer", "minimum": 0 },
-        "maxRagTokens": { "type": "integer", "minimum": 0 }
+        "maxRagTokens": { "type": "integer", "minimum": 0 },
+        "maxMentionTokens": { "type": "integer", "minimum": 0 }
       }
     },
     "maxSteps": {

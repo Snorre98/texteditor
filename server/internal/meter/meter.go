@@ -64,7 +64,7 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 // Attribute scales the breakdown onto the provider counts, persists one
 // meter_events row per populated component, and emits one meter event.
 func (m *meter) Attribute(ctx context.Context, turnID, sessionID, model string, b dto.Breakdown, counts dto.ProviderCounts) (dto.AttributedBreakdown, error) {
-	// Scale the five prompt components onto the provider's prompt_eval_count.
+	// Scale the six prompt components onto the provider's prompt_eval_count.
 	scaled := scalePrompt(b, counts.InputTokens)
 
 	// Thinking: exact when the provider reports it; otherwise the assembler's
@@ -88,7 +88,8 @@ func (m *meter) Attribute(ctx context.Context, turnID, sessionID, model string, 
 		Tools:          scaled[1],
 		Rag:            scaled[2],
 		History:        scaled[3],
-		User:           scaled[4],
+		Mentions:       scaled[4],
+		User:           scaled[5],
 		Thinking:       thinking,
 		ThinkingApprox: approx,
 	}
@@ -103,16 +104,16 @@ func (m *meter) Attribute(ctx context.Context, turnID, sessionID, model string, 
 	return out, nil
 }
 
-// scalePrompt scales the five components proportionally onto total, with the
+// scalePrompt scales the six components proportionally onto total, with the
 // largest component absorbing rounding so the scaled sum equals total exactly
 // (Q1, ADR-0022).
-func scalePrompt(b dto.Breakdown, total int) [5]int {
-	comps := [5]int{b.SystemPrompt, b.Tools, b.Rag, b.History, b.User}
+func scalePrompt(b dto.Breakdown, total int) [6]int {
+	comps := [6]int{b.SystemPrompt, b.Tools, b.Rag, b.History, b.Mentions, b.User}
 	sum := 0
 	for _, c := range comps {
 		sum += c
 	}
-	var out [5]int
+	var out [6]int
 	if sum == 0 {
 		return out
 	}
@@ -141,6 +142,7 @@ func (m *meter) persist(ctx context.Context, turnID, sessionID, model string, a 
 		{"tools", a.Tools, 0, 0},
 		{"rag", a.Rag, 0, 0},
 		{"history", a.History, 0, 0},
+		{"mentions", a.Mentions, 0, 0},
 		{"user", a.User, 0, 0},
 		{"thinking", 0, a.Thinking, boolToInt(a.ThinkingApprox)},
 		// "completion" records the turn's non-thinking output tokens (the answer);
@@ -194,6 +196,7 @@ func meterEvent(turnID string, a dto.AttributedBreakdown, completion int) dto.Ev
 		"tools":          a.Tools,
 		"rag":            a.Rag,
 		"history":        a.History,
+		"mentions":       a.Mentions,
 		"user":           a.User,
 		"thinking":       a.Thinking,
 		"thinkingApprox": a.ThinkingApprox,

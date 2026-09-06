@@ -11,6 +11,10 @@ ADRs left open.
 Nothing here contradicts an ADR; where an implementation choice is made it is
 called out as a **recorded amendment**, not a silent change.
 
+Handoff docs (fresh-session resumes): [`handoff-plan-e.md`](handoff-plan-e.md)
+(the Plan E client half — E2/E6/E7, gated on the Rust toolchain) and
+[`handoff-8.md`](handoff-8.md) (the Track-1.5 insertion — ADR-0035/0036).
+
 ## Sequencing summary
 
 Track 2 splits into an **engine-side phase (E1 — do first, no Rust)** and a

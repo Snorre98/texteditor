@@ -5,7 +5,7 @@
   "defaultModel": "gemma4-12b",
   "toolAllowlist": ["edit_markdown", "retrieve", "read_note", "diff"],
   "params": { "temperature": 0.3, "maxTokens": 2048 },
-  "contextBudget": { "maxHistoryTokens": 32000, "maxRagTokens": 16000 },
+  "contextBudget": { "maxHistoryTokens": 32000, "maxRagTokens": 16000, "maxMentionTokens": 16000 },
   "maxSteps": 4,
   "agentic": false,
   "kind": "model",

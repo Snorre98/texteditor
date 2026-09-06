@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"texteditor/internal/provider"
+	"texteditor/internal/workspace"
 	"texteditor/shared/dto"
 )
 
@@ -114,6 +115,25 @@ func (stubSessions) Create(string, *string, string) (dto.Session, error) {
 func (stubSessions) Resume(string) (dto.Session, error)      { return dto.Session{}, nil }
 func (stubSessions) Append(string, dto.Message) error        { return nil }
 func (s stubSessions) History(string) ([]dto.Message, error) { return s.hist, nil }
+
+// stubWorkspace implements the loop's workspace.Interface over an in-memory
+// map keyed by path → (content, error). Used to drive mention resolution.
+type stubWorkspace struct {
+	files map[string]string
+	err   map[string]error
+}
+
+func (s *stubWorkspace) List(context.Context, string) ([]workspace.Entry, error) { return nil, nil }
+func (s *stubWorkspace) Read(_ context.Context, path string, maxBytes int) ([]byte, error) {
+	if e, ok := s.err[path]; ok {
+		return nil, e
+	}
+	b := []byte(s.files[path])
+	if maxBytes > 0 && len(b) > maxBytes {
+		return nil, workspace.ErrTooLarge
+	}
+	return b, nil
+}
 
 type stubMeter struct {
 	mu     sync.Mutex
@@ -767,6 +787,148 @@ func TestRouterUnwiredEmitsError(t *testing.T) {
 	events := busEvents(t, bus)
 	if len(events) == 0 || events[0].Type != "error" {
 		t.Fatalf("want an error event, got %+v", events)
+	}
+}
+
+// --------------------- mention resolution (ADR-0036 §2) ---------------------
+
+// recordingAssembler captures the MentionContent handed to it, asserting the
+// loop resolves mentions through Workspace and passes them to the assembler.
+type recordingAssembler struct {
+	mu       sync.Mutex
+	mentions []dto.MentionContent
+}
+
+func (r *recordingAssembler) Assemble(_ context.Context, in dto.AssemblerInput) (dto.Payload, dto.Breakdown, error) {
+	r.mu.Lock()
+	r.mentions = append([]dto.MentionContent(nil), in.Mentions...)
+	r.mu.Unlock()
+	return dto.Payload{Request: dto.Request{ModelName: "gemma4-12b"}}, dto.Breakdown{SystemPrompt: 10, User: 4}, nil
+}
+
+func mentionDeps(bus *stubBus) Deps {
+	d := happyPathDeps(bus)
+	d.Workspace = &stubWorkspace{
+		files: map[string]string{"/notes/a.md": "mentioned content"},
+		err:   map[string]error{},
+	}
+	return d
+}
+
+// TestMentionsResolvedAndSpliced: valid mentions resolve through Workspace and
+// reach the assembler as MentionContent.
+func TestMentionsResolvedAndSpliced(t *testing.T) {
+	bus := &stubBus{done: make(chan struct{})}
+	assembler := &recordingAssembler{}
+	deps := mentionDeps(bus)
+	deps.Assembler = assembler
+
+	l := New(deps)
+	_, err := l.Run(context.Background(), dto.Task{
+		SessionID: "s1", ModeName: "proofreader", DocumentID: "d1", UserInput: "fix",
+		Mentions: []dto.Mention{{Path: "/notes/a.md"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitDone(t, bus)
+
+	assembler.mu.Lock()
+	defer assembler.mu.Unlock()
+	if len(assembler.mentions) != 1 || assembler.mentions[0].Path != "/notes/a.md" || assembler.mentions[0].Text != "mentioned content" {
+		t.Fatalf("assembler mentions = %+v, want resolved /notes/a.md", assembler.mentions)
+	}
+	if !hasEvent(busEvents(t, bus), "done") {
+		t.Fatalf("want done: %+v", busEvents(t, bus))
+	}
+}
+
+// TestMentionNotFoundFailsFast: an unresolvable mention errors pre-streaming
+// with mention-not-found and no stream starts.
+func TestMentionNotFoundFailsFast(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+		code string
+	}{
+		{"not-found", workspace.ErrNotFound, "mention-not-found"},
+		{"not-regular", workspace.ErrNotRegular, "mention-not-found"},
+		{"too-large", workspace.ErrTooLarge, "mention-too-large"},
+		{"read-failed", workspace.ErrReadFailed, "mention-unreadable"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			bus := &stubBus{done: make(chan struct{})}
+			deps := happyPathDeps(bus)
+			deps.Workspace = &stubWorkspace{
+				files: map[string]string{},
+				err:   map[string]error{"/x.md": tc.err},
+			}
+			provCalled := false
+			sp := deps.Provider.(stubProvider)
+			sp.stream = func(ctx context.Context, emit func(dto.RawEvent)) error {
+				provCalled = true
+				emit(dto.RawEvent{Type: "done", Data: json.RawMessage(`{"inputTokens":14,"outputTokens":5}`)})
+				return nil
+			}
+			deps.Provider = sp
+
+			l := New(deps)
+			_, err := l.Run(context.Background(), dto.Task{
+				SessionID: "s1", ModeName: "proofreader", DocumentID: "d1", UserInput: "fix",
+				Mentions: []dto.Mention{{Path: "/x.md"}},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			waitDone(t, bus)
+
+			if provCalled {
+				t.Fatal("provider streamed despite mention resolution failure (no fail-fast)")
+			}
+			events := busEvents(t, bus)
+			if len(events) == 0 || events[0].Type != "error" {
+				t.Fatalf("want error event first: %+v", events)
+			}
+			var d struct {
+				Code string `json:"code"`
+			}
+			if err := json.Unmarshal(events[0].Data, &d); err != nil || d.Code != tc.code {
+				t.Fatalf("error code = %q, want %q (%s)", d.Code, tc.code, events[0].Data)
+			}
+		})
+	}
+}
+
+// TestTooManyMentionsFailsFast: over the count cap errors pre-streaming.
+func TestTooManyMentionsFailsFast(t *testing.T) {
+	bus := &stubBus{done: make(chan struct{})}
+	deps := happyPathDeps(bus)
+	deps.Workspace = &stubWorkspace{files: map[string]string{}, err: map[string]error{}}
+
+	mentions := make([]dto.Mention, maxMentions+1)
+	for i := range mentions {
+		mentions[i] = dto.Mention{Path: "/x.md"}
+	}
+
+	l := New(deps)
+	_, err := l.Run(context.Background(), dto.Task{
+		SessionID: "s1", ModeName: "proofreader", DocumentID: "d1", UserInput: "fix",
+		Mentions: mentions,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitDone(t, bus)
+
+	events := busEvents(t, bus)
+	if len(events) == 0 || events[0].Type != "error" {
+		t.Fatalf("want error event: %+v", events)
+	}
+	var d struct {
+		Code string `json:"code"`
+	}
+	if err := json.Unmarshal(events[0].Data, &d); err != nil || d.Code != "too-many-mentions" {
+		t.Fatalf("code = %q, want too-many-mentions (%s)", d.Code, events[0].Data)
 	}
 }
 
