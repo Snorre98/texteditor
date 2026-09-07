@@ -11,7 +11,7 @@ It is **not** an inference engine (that's delegated) and **not** a full IDE.
 
 - **Engine/backend** — **Go**, a single static binary running as a local daemon.
 - **TUI** — [OpenTUI](https://opentui.com), the terminal-UI library from the OpenCode team (Zig core, TypeScript bindings; write TS directly or via React/Solid).
-- **Markdown editor** — **Tauri 2** (Rust core + system WebView) with a Vue 3 + CodeMirror 6 frontend, in the spirit of [Texodus](https://github.com/w512/texodus). No Node at runtime; Node/Bun is build-time only.
+- **Markdown editor** — **Tauri 2** (Rust core + system WebView) with a Vue 3 + CodeMirror 6 frontend, in the spirit of [Texodus](https://github.com/w512/texodus). Component system: Tailwind v4 + shadcn-vue (Reka UI), ADR-0042. No Node at runtime; Node/Bun is build-time only.
 - **Model serving** — external, over REST, reached through the machine's control daemon (`macos-dev-config`); runners are `llama.cpp | mlx-lm | mlx-vlm | delegate` on the Metal GPU (ADR-0030).
 - **Database** — SQLite via `modernc.org/sqlite` (pure Go, no CGO), the single-file app DB.
 - **Contract** — a single OpenAPI/JSON Schema spec (see below), the source of truth shared by every client.
@@ -93,7 +93,7 @@ The **Retriever** sits behind a Go interface, so the storage backend (SQLite-vec
 ## Layer 3 — Clients
 
 - **OpenTUI TUI** — panels: markdown editor, chat, live token meter, model/mode switcher, RAG results, diff preview. OpenTUI ships native `Markdown`, `Diff`, and `TextTable` renderables.
-- **Tauri markdown editor** — CodeMirror 6 editor (syntax highlighting, large-doc performance), live GFM preview, Mermaid, workspace sidebar, plus assistant affordances: a **popover chat bubble** on selected text (CodeMirror's selection + tooltip API) and **side-by-side candidate views** (`@codemirror/merge`).
+- **Tauri markdown editor** — CodeMirror 6 editor (syntax highlighting, large-doc performance), live GFM preview, Mermaid, workspace sidebar, plus assistant affordances: a **floating, draggable chat window** over the workspace (ADR-0041 — drag/resize/minimize/snap-dock, session list with resume, markdown bubbles, collapsible meter/RAG, model+mode selectors) and **side-by-side candidate views** (`@codemirror/merge`).
 
 Both talk to the *same* API. The Tauri app can keep native file browsing/OS integration, but all edits and versioning go through the engine so history is consistent across clients.
 

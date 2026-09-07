@@ -8,7 +8,7 @@ plus the `macos-dev-config` sibling repo). Markers:
 - ✅ **Complete** — landed, tested, consistent with the ADRs.
 - 🚧 **TODO** — not done (deferred by an ADR, or an open gap).
 
-Last verified: 2026-09-06.
+Last verified: 2026-09-07.
 
 ## Snapshot
 
@@ -29,7 +29,7 @@ Last verified: 2026-09-06.
 |---|---|---|
 | Go engine — single static binary, no CGO (ADR-0003) | ✅ | `server/cmd/texteditor`; 20 `internal/*` packages |
 | OpenTUI TUI (TS/Solid) | ✅ | `client/tui/` |
-| Tauri 2 + Vue 3 + CodeMirror 6 editor | ✅ | `client/tauri/` (landed in Track 2; no longer "later") |
+| Tauri 2 + Vue 3 + CodeMirror 6 editor | ✅ | `client/tauri/` (landed in Track 2; no longer "later"); Tailwind v4 + shadcn-vue (ADR-0042) power the floating chat window |
 | Model serving — external, over REST | ✅ | reached via the `macos-dev-config` control daemon; runners `llama.cpp \| mlx-lm \| mlx-vlm \| delegate` (ADR-0030 — **no Ollama/LM Studio**) |
 | SQLite via `modernc.org/sqlite` | ✅ | four per-service files: `app.db`, `index.db`, `meter.db`, `sessions.db` |
 | Single OpenAPI/JSON Schema contract | ✅ | `api/openapi.yaml`; codegen → ogen (Go) + Hey API (TS) + `openapi-to-rust` (Rust) |
@@ -92,7 +92,7 @@ format, never registered).
 |---|---|---|
 | OpenTUI TUI | ✅ | 6 panels (editor, chat, meter, switcher, RAG, diff); dumb, generated; fleet poll + control banner (ADR-0040) |
 | Tauri editor — engine side | ✅ | sidecar handshake, Vue store, generated client, autosave, `@codemirror/merge` candidates |
-| Tauri editor — UI surface | 🚧 | mode selector, free-form chat, meter/RAG rendering, and the fleet model selector (ADR-0040) landed; the selection trigger remains broken → [`handoff-tauri-ui.md`](plans/handoff-tauri-ui.md) |
+| Tauri editor — UI surface | ✅ | floating, draggable chat window over the workspace (ADR-0041): drag/resize/minimize/snap-dock/persist, session list + resume, sanitized-markdown bubbles, streaming, collapsible meter/RAG, mode + fleet model selectors (ADR-0040/0042); selection trigger via the toolbar button routes into the window's session list |
 
 ## Deployment targets
 
@@ -100,7 +100,7 @@ format, never registered).
 |---|---|
 | Standalone daemon (launchd, fixed port) | ✅ `tools/build.sh` + `tools/install-daemon.sh` + `deploy/*.plist` |
 | Tauri sidecar (spawn + SIGTERM/SIGKILL) | ✅ `client/tauri/src-tauri/src/sidecar.rs`, headlessly tested |
-| Tauri editor UI | 🚧 shell-only — see the Tauri UI row above and `handoff-tauri-ui.md` |
+| Tauri editor UI | ✅ | floating chat window (ADR-0041) over a full-viewport workspace; Tailwind v4 + shadcn-vue component system (ADR-0042) |
 | Web (self-host caveat) | ✅ capability adapter web branch; `ENGINE_BIND` opt-in |
 | mDNS LAN discovery | 🚧 deferred (ADR-0021 §1 — `baseUrl` on `/health` is the landed answer) |
 
@@ -134,7 +134,7 @@ point, contract-first, interface-first coupling.
 
 ## TODO list (actionable, ordered)
 
-1. **Finish the Tauri UI surface** — fix the broken selection trigger (Option B: toolbar button). The store-supported affordances (mode selector, doc-level free-form chat, token meter, RAG results, error surfacing, and the fleet model selector with serving observability) are now rendered; only the selection trigger remains. See [`handoff-tauri-ui.md`](plans/handoff-tauri-ui.md). **This blocks "leverage AI capabilities" in the Tauri editor today.**
+1. **Deferred chat affordances (ADR-0041 §5)** — "Stop generating" needs a cancel route in the contract + engine + three-way codegen; session titles need an engine field on `CreateSessionRequest`. Both recorded as future work; the chat window derives labels until titles land.
 2. **Commit the D1 seam** — texteditor (`cmd/toolhash`, `routergate/contract_mirror_test.go`, `contracts/needle-facade.md`, plan docs) and `macos-dev-config` (`cmd/serve-needle`, `tools/serve-needle.sh`, `tools/needle-finetune.sh`, `docs/contracts/needle-facade.md`, `models.json`, `daemon_test.go`).
 3. **D1 ML fine-tune** (deferred by design, trigger-gated) — fine-tune Needle 2 over the `cmd/toolhash` vocabulary → produce `needle2.cact` → `needle-finetune.sh` archives it + records `source.fingerprint` → flip one mode to `toolCalling:"router"` → `router-tools-stale` gate clears. Finalize the `.cact` stdout-format assumption (`needle-facade.md §2`).
 4. **Add CI** — no `.github/workflows` exists, yet the plans frame every acceptance criterion as a "CI gate". Add CI for `go test`, `bun test` + typecheck (tui/tauri), `cargo test`; optionally a Gherkin runner for the 9 `.feature` specs (currently prose-only).

@@ -47,6 +47,8 @@ row: ADR-0001/0016 map to it and to §2/§5.2/§8.
 | 0038 | §5.2, §8 | versioning | interface, data-model | Q4 |
 | 0039 | §5.2, §8 | versioning | interface, data-model | Q4 |
 | 0040 | §3.2, §4, §7, §8 | fleet-observability, serving-control | interface, daemon-http, failure-semantics | Q2, Q5 |
+| 0041 | §3, §7 | chat-window, sessions | — | — |
+| 0042 | §3 | chat-window | — | — |
 
 ## Behavior contract ↔ quality scenario coverage
 
@@ -72,6 +74,7 @@ row: ADR-0001/0016 map to it and to §2/§5.2/§8.
 | edit-integrity.feature | 0029 |
 | workspace.feature | 0035, 0036 |
 | fleet-observability.feature | 0040 |
+| chat-window.feature | 0041, 0042 |
 
 ## Supersession notes
 
@@ -97,6 +100,12 @@ row: ADR-0001/0016 map to it and to §2/§5.2/§8.
   stream-seam carve-out; REST-first scoped to process boundaries).
 - ADR-0018 §1/§3 → superseded by ADR-0030 (runner enum narrowed to
   `llama.cpp`/`mlx-lm`/`mlx-vlm`/`delegate`; `ollama`/`lmstudio` demoted).
+- ADR-0026 §4 → *amended* by ADR-0041 (the rendering model is one floating
+  window with a session list instead of N concurrent bubbles; the session data
+  model, persistence, and concurrency semantics are unchanged).
+- ADR-0013 §2 → *amended* by ADR-0041/0042 (the Tauri chat is a floating window
+  on a shadcn-vue/Tailwind component system, not a static block; the dumb-client
+  rule and the frontend-swap guarantee stand).
 - ADR-0008 §2 → superseded by ADR-0030 (source kinds narrowed to `hf`/`gguf`/
   `needle`; `ollama`/`lmstudio` provisioning dropped; Metal made a hard
   constraint).

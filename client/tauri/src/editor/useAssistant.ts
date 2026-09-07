@@ -2,12 +2,17 @@
 // composable is the thin seam between the CodeMirror/`<template>` and the store:
 // it holds only UI-observable state (mode, draft, the active session) and routes
 // every effect through the store's already-correct actions (`createSession`,
-// `submitTurn`). It owns no domain logic and no API calls — presentation only.
+// `selectSession`, `submitTurn`). It owns no domain logic and no API calls —
+// presentation only.
 //
-// Two entry points:
-//   - askAbout()   — selection-anchored session (ADR-0026 §1), reuses today's
-//                    `createSession(blockId)` → `submitTurn` semantics.
-//   - sendDocChat()— doc-level free-form chat; no anchor (ADR-0026 §1).
+// Entry points (ADR-0041 §3):
+//   - askAbout()   — selection-anchored session (ADR-0026 §1); create-or-resume
+//                    by anchor is engine-side, so re-asking resumes history.
+//   - sendDocChat()— the floating window's free chat; lazily creates ONE
+//                    doc-level session and reuses it across messages.
+//   - openSession()— resume a past session with its full history.
+//   - newChat()    — drop the active session; the next send starts a fresh one.
+//   - retryLast()  — resend the last user message in the active session.
 //
 // It is pure Vue reactivity (`ref`/`computed`), so it is unit-testable under
 // `bun test` with no DOM (tests/assistant.test.ts).
@@ -19,6 +24,13 @@ import { blockIndexAt, blockRanges } from "./blocks";
 export interface SelectionRange {
   from: number;
   to: number;
+}
+
+export interface EditorApi {
+  /** The editor's current document text (read at call time). */
+  getDocText: () => string;
+  /** The editor's current selection range, or null when none. */
+  getSelection: () => SelectionRange | null;
 }
 
 export interface AssistantOptions {
@@ -103,30 +115,78 @@ export function createAssistant(store: AppStore, opts: AssistantOptions) {
     const idx = blockIndexAt(blockRanges(docText), sel.from);
     const blockId = idx >= 0 ? store.state.blocks[idx]?.id : undefined;
     const selected = docText.slice(sel.from, sel.to);
-    await runTurn(blockId, undefined,
-      selected ? `Improve this selection:\n\n${selected}` : "Improve this selection");
+    const sessionId = await createSessionFor(blockId, undefined);
+    if (!sessionId) return;
+    await submitIn(
+      sessionId,
+      selected
+        ? `Improve this selection:\n\n${selected}`
+        : "Improve this selection",
+    );
+  }
+
+  /** Lazily create (once) the floating window's doc-level session. */
+  async function ensureSession(): Promise<string | null> {
+    if (activeSessionId.value) return activeSessionId.value;
+    return createSessionFor(undefined, undefined);
   }
 
   async function sendDocChat() {
     const input = draft.value.trim();
     if (!input) return;
     draft.value = "";
-    await runTurn(undefined, selectedMode.value, input);
+    const sessionId = await ensureSession();
+    if (!sessionId) return;
+    await submitIn(sessionId, input);
   }
 
-  async function runTurn(
+  /** Resume a past session with its full message history (ADR-0041 §3). */
+  async function openSession(id: string) {
+    activeSessionId.value = id;
+    try {
+      await store.selectSession(id);
+    } catch (e) {
+      error.value = e instanceof Error ? e.message : String(e);
+    }
+  }
+
+  /** Drop the active session; the next send starts a fresh doc-level one. */
+  function newChat() {
+    activeSessionId.value = null;
+    draft.value = "";
+  }
+
+  /** Resend the last user message in the active session (ADR-0041 §4). */
+  async function retryLast() {
+    const sid = activeSessionId.value;
+    if (!sid) return;
+    const lastUser = [...messages.value].reverse().find((m) => m.role === "user");
+    if (!lastUser) return;
+    await submitIn(sid, lastUser.content);
+  }
+
+  /** createSession then make it active — one place the list stays correct. */
+  async function createSessionFor(
     anchorBlockId: string | undefined,
     modeType: string | undefined,
-    userInput: string,
-  ) {
-    if (!store.state.document) return;
-    const modeName = selectedMode.value;
+  ): Promise<string | null> {
+    if (!store.state.document) return null;
     try {
       const sessionId = await store.createSession(anchorBlockId, modeType);
       activeSessionId.value = sessionId;
+      return sessionId;
+    } catch (e) {
+      error.value = e instanceof Error ? e.message : String(e);
+      return null;
+    }
+  }
+
+  async function submitIn(sessionId: string, userInput: string) {
+    if (!store.state.document) return;
+    try {
       await store.submitTurn({
         sessionId,
-        modeName,
+        modeName: selectedMode.value,
         documentId: store.state.document.id,
         userInput,
       });
@@ -140,10 +200,14 @@ export function createAssistant(store: AppStore, opts: AssistantOptions) {
     draft,
     error,
     activeSessionId,
+    activeSession,
     activeTurn,
     busy,
     messages,
     askAbout,
     sendDocChat,
+    openSession,
+    newChat,
+    retryLast,
   };
 }
