@@ -6,7 +6,7 @@
 // editor owns the full viewport; the chat floats above it (ADR-0041); a docked
 // chat reflows the editor through the workspace margin. All edits + versioning
 // go through the engine (ADR-0013 §3).
-import { onMounted, ref, shallowRef } from "vue";
+import { onBeforeUnmount, onMounted, ref, shallowRef } from "vue";
 import { discoverEngineUrl } from "./engine";
 import { api, setEndpoint } from "./api/client";
 import { createAppStore } from "./state/store";
@@ -40,9 +40,16 @@ onMounted(async () => {
       getSelection: () => editorApi.current?.getSelection() ?? null,
     });
     await s.refreshFleet();
+    // The store owns the fleet poll (ADR-0040 §4): started after the first
+    // read, stopped on teardown.
+    s.startFleetPoll();
   } catch (e) {
     error.value = e instanceof Error ? e.message : String(e);
   }
+});
+
+onBeforeUnmount(() => {
+  store.value?.stopFleetPoll();
 });
 
 function toggleChat() {

@@ -16,15 +16,26 @@ import {
 import { RefreshCw } from "lucide-vue-next";
 import type { AppStore } from "../state/store";
 
-const props = defineProps<{ store: AppStore }>();
+const props = defineProps<{
+  store: AppStore;
+  /** The selected mode — its defaultModel is "serving" when up (ADR-0040 §5). */
+  modeName: string;
+}>();
 
 const models = computed(() => props.store.state.fleet.models);
 const busy = computed(() => props.store.state.fleet.busy);
 const control = computed(() => props.store.state.fleet.control);
 
-const currentUp = computed(
-  () => models.value.find((m) => m.liveState === "up")?.name ?? "",
-);
+// Which model currently serves the selected mode — its defaultModel when that
+// is up, else the first up model (ADR-0040 §5, verbatim semantics).
+const currentUp = computed(() => {
+  const mode = props.store.state.modes.find((m) => m.name === props.modeName);
+  const def = mode?.defaultModel;
+  const isUp = (name: string) =>
+    models.value.find((m) => m.name === name)?.liveState === "up";
+  if (def && isUp(def)) return def;
+  return models.value.find((m) => m.liveState === "up")?.name ?? "";
+});
 
 function onSelect(value: unknown) {
   if (typeof value !== "string") return;

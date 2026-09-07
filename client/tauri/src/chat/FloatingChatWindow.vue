@@ -5,7 +5,7 @@
 // effects route through the store. Header drag, 8-way resize, snap-to-dock
 // preview, session list, meter/RAG panels, composer — everything here is
 // presentation over the already-correct engine surface.
-import { computed, onMounted, onBeforeUnmount, ref, watch } from "vue";
+import { computed, ref, watch } from "vue";
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import {
@@ -21,6 +21,7 @@ import type { createAssistant } from "../editor/useAssistant";
 import type { ChatWindow } from "./useChatWindow";
 import type { DockZone, ResizeDir } from "./windowState";
 import ChatComposer from "./ChatComposer.vue";
+import FleetPanel from "./FleetPanel.vue";
 import MessageList from "./MessageList.vue";
 import MeterPanel from "./MeterPanel.vue";
 import ModelSelector from "./ModelSelector.vue";
@@ -137,9 +138,6 @@ watch(
   () => props.assistant.activeSessionId.value,
   (id) => props.window.setSession(id),
 );
-
-onMounted(() => props.store.startFleetPoll());
-onBeforeUnmount(() => props.store.stopFleetPoll());
 </script>
 
 <template>
@@ -170,7 +168,7 @@ onBeforeUnmount(() => props.store.stopFleetPoll());
             </SelectItem>
           </SelectContent>
         </Select>
-        <ModelSelector :store="store" />
+        <ModelSelector :store="store" :mode-name="assistant.selectedMode.value" />
       </div>
 
       <Button
@@ -225,6 +223,7 @@ onBeforeUnmount(() => props.store.stopFleetPoll());
         />
         <MeterPanel :cumulative="assistant.activeTurn.value?.cumulative" />
         <RagPanel :rag="assistant.activeTurn.value?.rag" />
+        <FleetPanel :store="store" :mode-name="assistant.selectedMode.value" />
         <TurnStatusBar
           :turn="assistant.activeTurn.value"
           :can-retry="assistant.messages.value.some((m) => m.role === 'user')"

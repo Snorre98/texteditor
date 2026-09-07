@@ -57,7 +57,11 @@ Forces:
    selector, **model selector with `liveState` + switch progress** (store's
    `switchModel`, ADR-0040), error/backpressure banners, per-message copy, and
    "retry last message" (resubmits the last user input over the existing
-   `/turn` route — no new API).
+   `/turn` route — no new API). The ADR-0040 fleet observability panel — every
+   model's `liveState` plus the per-model start/stop remediation verbs, manual
+   refresh, and the control-plane banner — moves into the window wholesale as a
+   collapsible panel (commit 81b7c96's `editor__fleet` surface is preserved,
+   relocated with the chat it lived in).
 5. **Deferred (future work)**: "Stop generating" — requires a cancel route in
    `openapi.yaml` + engine + the three-way codegen lockstep; session titles —
    an engine field on `CreateSessionRequest` + list rendering.
