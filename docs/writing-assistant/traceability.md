@@ -46,6 +46,7 @@ row: ADR-0001/0016 map to it and to §2/§5.2/§8.
 | 0037 | §7 | client-swap | — | — |
 | 0038 | §5.2, §8 | versioning | interface, data-model | Q4 |
 | 0039 | §5.2, §8 | versioning | interface, data-model | Q4 |
+| 0040 | §3.2, §4, §7, §8 | fleet-observability, serving-control | interface, daemon-http, failure-semantics | Q2, Q5 |
 
 ## Behavior contract ↔ quality scenario coverage
 
@@ -70,6 +71,7 @@ row: ADR-0001/0016 map to it and to §2/§5.2/§8.
 | tool-routing.feature | 0028 |
 | edit-integrity.feature | 0029 |
 | workspace.feature | 0035, 0036 |
+| fleet-observability.feature | 0040 |
 
 ## Supersession notes
 

@@ -21,6 +21,7 @@ import {
   getBlocks,
   getCandidates,
   getDiff,
+  getFleet,
   getHealth,
   getHistory,
   getModelStatus,
@@ -41,6 +42,7 @@ import {
   zGetBlocksResponse,
   zGetCandidatesResponse,
   zGetDiffResponse,
+  zGetFleetResponse,
   zGetHealthResponse,
   zGetHistoryResponse,
   zGetModelStatusResponse,
@@ -78,6 +80,8 @@ export const api = {
     getHealth({ client, responseValidator: validator(zGetHealthResponse) }),
   listModels: () =>
     listModels({ client, responseValidator: validator(zListModelsResponse) }),
+  getFleet: () =>
+    getFleet({ client, responseValidator: validator(zGetFleetResponse) }),
   startModel: (name: string) =>
     startModel({
       client,

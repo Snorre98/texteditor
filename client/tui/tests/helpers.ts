@@ -2,8 +2,8 @@ import type { Api } from "../src/api/client";
 import type {
   Block,
   Document,
+  FleetModel,
   Mode,
-  Model,
   Revision,
   Session,
   ToolDef,
@@ -28,6 +28,7 @@ export function fail(error: string): { data?: undefined; error: unknown } {
 export interface StubApiOptions {
   startResult?: (name: string) => CallResult<unknown> | Promise<CallResult<unknown>>;
   stopResult?: (name: string) => CallResult<unknown> | Promise<CallResult<unknown>>;
+  getFleetResult?: () => CallResult<{ control: "up" | "unreachable"; models: FleetModel[] }>;
   getCandidatesResult?: () => CallResult<{ blockId?: string; text?: string }[]>;
 }
 
@@ -35,12 +36,18 @@ export function stubApi(opts: StubApiOptions = {}) {
   const calls: string[] = [];
   const api = {
     health: async () => ok({ status: "ok" as const }),
-    listModels: async () => {
-      calls.push("listModels");
-      return ok([
-        { name: "gemma4-12b", baseUrl: "http://127.0.0.1:8087/v1", liveState: "down" },
-        { name: "gemma4-26b", baseUrl: "http://127.0.0.1:8089/v1", liveState: "up" },
-      ] satisfies Model[]);
+    getFleet: async () => {
+      calls.push("getFleet");
+      return (
+        opts.getFleetResult?.() ??
+        ok({
+          control: "up" as const,
+          models: [
+            { name: "gemma4-12b", baseUrl: "http://127.0.0.1:8087/v1", liveState: "down" },
+            { name: "gemma4-26b", baseUrl: "http://127.0.0.1:8089/v1", liveState: "up" },
+          ] satisfies FleetModel[],
+        })
+      );
     },
     startModel: async (name: string) => {
       calls.push(`start:${name}`);

@@ -112,6 +112,11 @@ const (
     LiveUnknown     LiveState = "unknown"
 )
 
+type ModelState struct {           // one row of the daemon's `status/all` projection (ADR-0040)
+    Name  string
+    State LiveState
+}
+
 type ResolveOpts struct {
     ModeTag  string          // the mode's name == the fallback tag
     Overrides *SamplingParams // per-call overrides (optional)
@@ -129,6 +134,7 @@ type FleetGateway interface {
     ListModels() ([]Model, error)
     Resolve(name string, opts ResolveOpts) (Resolution, error) // merge + gates + fallback
     Status(name string) (LiveState, error)
+    ListStatus() ([]ModelState, error) // daemon GET /status/all — one batch roundtrip (ADR-0040)
     Start(name string) error                                    // blocking: up or typed error
     Stop(name string) error
     Provision(ctx context.Context, name string) (provisionID string, err error) // async
@@ -148,6 +154,14 @@ Semantics:
   `no-model-available`).
 - `Start` blocks only the caller's goroutine; it returns when the server is `up`
   (or a typed error: timeout / port-in-use / binary-missing / model-not-found).
+- `ListStatus` is the batch `status/all` read (ADR-0040): every model's state in
+  one roundtrip, manifest order, `unknown → down` folded exactly like `Status`.
+- The **observability reads** `ListModels`/`ListStatus` serve the **last-good
+  projection** when the daemon is unreachable: `ListModels` returns the cached
+  list and `ListStatus` the cached names with `unknown` states, both
+  *alongside* the wrapped `daemon-unreachable` error so callers can label the
+  staleness (ADR-0040 §3). `Resolve`/`Status`/`Start`/`Stop` keep hard-fail
+  semantics — no resolution against stale state.
 - `Fingerprint` returns the daemon `list` projection's optional `fingerprint`
   field (populated only for `source.kind == "needle"` entries, per
   `daemon-http.md §2`). It exists solely for ADR-0028 §4's `router-tools-stale`

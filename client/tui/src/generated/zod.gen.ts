@@ -47,6 +47,42 @@ export const zLiveStateResponse = z.object({
     ])
 });
 
+export const zFleetState = z.object({
+    control: z.enum([
+        'up',
+        'unreachable'
+    ]),
+    models: z.array(z.object({
+        name: z.string(),
+        baseUrl: z.string(),
+        capabilities: zCapabilities.optional(),
+        modeTags: z.array(z.string()).optional(),
+        liveState: z.enum([
+            'up',
+            'down',
+            'starting',
+            'stopping',
+            'provisioning',
+            'unknown'
+        ])
+    }))
+});
+
+export const zFleetModel = z.object({
+    name: z.string(),
+    baseUrl: z.string(),
+    capabilities: zCapabilities.optional(),
+    modeTags: z.array(z.string()).optional(),
+    liveState: z.enum([
+        'up',
+        'down',
+        'starting',
+        'stopping',
+        'provisioning',
+        'unknown'
+    ])
+});
+
 export const zProvisionResponse = z.object({
     provisionID: z.string()
 });
@@ -295,6 +331,8 @@ export const zBackpressureEvent = z.object({});
 export const zGetHealthResponse = zHealth;
 
 export const zListModelsResponse = z.array(zModel);
+
+export const zGetFleetResponse = zFleetState;
 
 export const zStartModelResponse = zLiveStateResponse;
 

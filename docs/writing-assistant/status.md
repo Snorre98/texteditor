@@ -17,6 +17,7 @@ Last verified: 2026-09-06.
 | Track 1 — Engine (A) · Serving control (B) · TUI (C) | ✅ |
 | Router seam (D2–D5) + enablement seam (D1 minus the ML job) | ✅ (D1 **uncommitted**) |
 | Track 2 — Deployment (E) · Tauri editor (F) | ✅ |
+| Fleet observability surface (ADR-0040 — `/fleet`, batch status, selectors) | ✅ |
 | D1 ML fine-tune (Needle 2 `.cact` + flip a mode to `router`) | 🚧 deferred by trigger |
 | CI automation | 🚧 none |
 | `InferenceControl` surface (risk #9) | 🚧 deferred |
@@ -38,7 +39,7 @@ Last verified: 2026-09-06.
 | Layer | Status | Notes |
 |---|---|---|
 | Layer 3 — Clients (dumb, swappable) | ✅ | TUI + Tauri editor + web, one contract (ADR-0014) |
-| API contract | ✅ | 19 routes incl. Track-1.5 + ADR-0038 amendments; the deferred `/sessions/{id}/meter` is intentionally absent |
+| API contract | ✅ | 20 routes incl. Track-1.5 + ADR-0038/0040 amendments; the deferred `/sessions/{id}/meter` is intentionally absent |
 | Layer 2 — Engine | ✅ | all modules below |
 | Layer 0 — Model serving | ✅ | via control daemon (ADR-0025/0027/0033), not a raw Ollama port |
 
@@ -64,6 +65,7 @@ Last verified: 2026-09-06.
 | Token metering | `internal/meter` | ✅ |
 | Document store + versioning | `internal/document` | ✅ (git coarse + block candidates) |
 | `ToolDecider` (optional router) | `internal/tooldecider` | ✅ seam; enablement 🚧 |
+| Fleet gateway — observability | `internal/fleet` | ✅ `ListStatus` over daemon `status/all` + last-good cache (ADR-0040); daemon-side verb in macos-dev-config (ADR-0007) |
 
 Shipped **modes** (4): `drafter`, `editor`, `proofreader`, `grammar`
 (`literature-reviewer` from architecture.md §64 is a future mode, not shipped —
@@ -88,9 +90,9 @@ format, never registered).
 
 | Client | Status | Notes |
 |---|---|---|
-| OpenTUI TUI | ✅ | 6 panels (editor, chat, meter, switcher, RAG, diff); dumb, generated |
+| OpenTUI TUI | ✅ | 6 panels (editor, chat, meter, switcher, RAG, diff); dumb, generated; fleet poll + control banner (ADR-0040) |
 | Tauri editor — engine side | ✅ | sidecar handshake, Vue store, generated client, autosave, `@codemirror/merge` candidates |
-| Tauri editor — UI surface | 🚧 | selection trigger broken + no mode selector / free-form chat / meter / RAG rendering → [`handoff-tauri-ui.md`](plans/handoff-tauri-ui.md) |
+| Tauri editor — UI surface | 🚧 | mode selector, free-form chat, meter/RAG rendering, and the fleet model selector (ADR-0040) landed; the selection trigger remains broken → [`handoff-tauri-ui.md`](plans/handoff-tauri-ui.md) |
 
 ## Deployment targets
 
@@ -132,7 +134,7 @@ point, contract-first, interface-first coupling.
 
 ## TODO list (actionable, ordered)
 
-1. **Finish the Tauri UI surface** — fix the broken selection trigger (Option B: toolbar button) and render the store-supported affordances the shell never showed: mode selector, doc-level free-form chat, token meter, RAG results, error surfacing. See [`handoff-tauri-ui.md`](plans/handoff-tauri-ui.md). **This blocks "leverage AI capabilities" in the Tauri editor today.**
+1. **Finish the Tauri UI surface** — fix the broken selection trigger (Option B: toolbar button). The store-supported affordances (mode selector, doc-level free-form chat, token meter, RAG results, error surfacing, and the fleet model selector with serving observability) are now rendered; only the selection trigger remains. See [`handoff-tauri-ui.md`](plans/handoff-tauri-ui.md). **This blocks "leverage AI capabilities" in the Tauri editor today.**
 2. **Commit the D1 seam** — texteditor (`cmd/toolhash`, `routergate/contract_mirror_test.go`, `contracts/needle-facade.md`, plan docs) and `macos-dev-config` (`cmd/serve-needle`, `tools/serve-needle.sh`, `tools/needle-finetune.sh`, `docs/contracts/needle-facade.md`, `models.json`, `daemon_test.go`).
 3. **D1 ML fine-tune** (deferred by design, trigger-gated) — fine-tune Needle 2 over the `cmd/toolhash` vocabulary → produce `needle2.cact` → `needle-finetune.sh` archives it + records `source.fingerprint` → flip one mode to `toolCalling:"router"` → `router-tools-stale` gate clears. Finalize the `.cact` stdout-format assumption (`needle-facade.md §2`).
 4. **Add CI** — no `.github/workflows` exists, yet the plans frame every acceptance criterion as a "CI gate". Add CI for `go test`, `bun test` + typecheck (tui/tauri), `cargo test`; optionally a Gherkin runner for the 9 `.feature` specs (currently prose-only).

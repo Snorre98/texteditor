@@ -2,7 +2,7 @@
 // markdown editor, chat, live token meter, model/mode switcher, RAG results,
 // diff preview. The component tree renders store signals; all effects run
 // through the store, never the client directly (dumb client, ADR-0013 §3).
-import { createMemo, createSignal, onMount } from "solid-js";
+import { createMemo, createSignal, onCleanup, onMount } from "solid-js";
 import { useKeyboard, useRenderer } from "@opentui/solid";
 import type { AppStore } from "../state/store";
 import { ChatInput, ChatPanel } from "./chat";
@@ -26,11 +26,13 @@ export function App(props: AppProps) {
   const renderer = useRenderer();
   const [modeName, setModeName] = createSignal("");
 
-  // Boot: discover the fleet, open the document (if one was given), and
-  // create-or-resume a session so the chat is turn-ready.
+  // Boot: discover the fleet, start the fleet poll (ADR-0040 §4), open the
+  // document (if one was given), and create-or-resume a session so the chat
+  // is turn-ready.
   onMount(() => {
     void (async () => {
       await store.refreshFleet();
+      store.startFleetPoll();
       if (modeName() === "") {
         const first = store.state().modes[0];
         if (first) setModeName(first.name);
@@ -49,6 +51,10 @@ export function App(props: AppProps) {
         }
       }
     })();
+  });
+
+  onCleanup(() => {
+    store.stopFleetPoll();
   });
 
   useKeyboard((key) => {

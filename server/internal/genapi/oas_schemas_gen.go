@@ -628,6 +628,201 @@ func (s *EventType) UnmarshalText(data []byte) error {
 	}
 }
 
+// Ref: #/components/schemas/FleetModel
+type FleetModel struct {
+	Name         string              `json:"name"`
+	BaseUrl      string              `json:"baseUrl"`
+	Capabilities OptCapabilities     `json:"capabilities"`
+	ModeTags     []string            `json:"modeTags"`
+	LiveState    FleetModelLiveState `json:"liveState"`
+}
+
+// GetName returns the value of Name.
+func (s *FleetModel) GetName() string {
+	return s.Name
+}
+
+// GetBaseUrl returns the value of BaseUrl.
+func (s *FleetModel) GetBaseUrl() string {
+	return s.BaseUrl
+}
+
+// GetCapabilities returns the value of Capabilities.
+func (s *FleetModel) GetCapabilities() OptCapabilities {
+	return s.Capabilities
+}
+
+// GetModeTags returns the value of ModeTags.
+func (s *FleetModel) GetModeTags() []string {
+	return s.ModeTags
+}
+
+// GetLiveState returns the value of LiveState.
+func (s *FleetModel) GetLiveState() FleetModelLiveState {
+	return s.LiveState
+}
+
+// SetName sets the value of Name.
+func (s *FleetModel) SetName(val string) {
+	s.Name = val
+}
+
+// SetBaseUrl sets the value of BaseUrl.
+func (s *FleetModel) SetBaseUrl(val string) {
+	s.BaseUrl = val
+}
+
+// SetCapabilities sets the value of Capabilities.
+func (s *FleetModel) SetCapabilities(val OptCapabilities) {
+	s.Capabilities = val
+}
+
+// SetModeTags sets the value of ModeTags.
+func (s *FleetModel) SetModeTags(val []string) {
+	s.ModeTags = val
+}
+
+// SetLiveState sets the value of LiveState.
+func (s *FleetModel) SetLiveState(val FleetModelLiveState) {
+	s.LiveState = val
+}
+
+type FleetModelLiveState string
+
+const (
+	FleetModelLiveStateUp           FleetModelLiveState = "up"
+	FleetModelLiveStateDown         FleetModelLiveState = "down"
+	FleetModelLiveStateStarting     FleetModelLiveState = "starting"
+	FleetModelLiveStateStopping     FleetModelLiveState = "stopping"
+	FleetModelLiveStateProvisioning FleetModelLiveState = "provisioning"
+	FleetModelLiveStateUnknown      FleetModelLiveState = "unknown"
+)
+
+// AllValues returns all FleetModelLiveState values.
+func (FleetModelLiveState) AllValues() []FleetModelLiveState {
+	return []FleetModelLiveState{
+		FleetModelLiveStateUp,
+		FleetModelLiveStateDown,
+		FleetModelLiveStateStarting,
+		FleetModelLiveStateStopping,
+		FleetModelLiveStateProvisioning,
+		FleetModelLiveStateUnknown,
+	}
+}
+
+// MarshalText implements encoding.TextMarshaler.
+func (s FleetModelLiveState) MarshalText() ([]byte, error) {
+	switch s {
+	case FleetModelLiveStateUp:
+		return []byte(s), nil
+	case FleetModelLiveStateDown:
+		return []byte(s), nil
+	case FleetModelLiveStateStarting:
+		return []byte(s), nil
+	case FleetModelLiveStateStopping:
+		return []byte(s), nil
+	case FleetModelLiveStateProvisioning:
+		return []byte(s), nil
+	case FleetModelLiveStateUnknown:
+		return []byte(s), nil
+	default:
+		return nil, errors.Errorf("invalid value: %q", s)
+	}
+}
+
+// UnmarshalText implements encoding.TextUnmarshaler.
+func (s *FleetModelLiveState) UnmarshalText(data []byte) error {
+	switch FleetModelLiveState(data) {
+	case FleetModelLiveStateUp:
+		*s = FleetModelLiveStateUp
+		return nil
+	case FleetModelLiveStateDown:
+		*s = FleetModelLiveStateDown
+		return nil
+	case FleetModelLiveStateStarting:
+		*s = FleetModelLiveStateStarting
+		return nil
+	case FleetModelLiveStateStopping:
+		*s = FleetModelLiveStateStopping
+		return nil
+	case FleetModelLiveStateProvisioning:
+		*s = FleetModelLiveStateProvisioning
+		return nil
+	case FleetModelLiveStateUnknown:
+		*s = FleetModelLiveStateUnknown
+		return nil
+	default:
+		return errors.Errorf("invalid value: %q", data)
+	}
+}
+
+// Ref: #/components/schemas/FleetState
+type FleetState struct {
+	Control FleetStateControl `json:"control"`
+	Models  []FleetModel      `json:"models"`
+}
+
+// GetControl returns the value of Control.
+func (s *FleetState) GetControl() FleetStateControl {
+	return s.Control
+}
+
+// GetModels returns the value of Models.
+func (s *FleetState) GetModels() []FleetModel {
+	return s.Models
+}
+
+// SetControl sets the value of Control.
+func (s *FleetState) SetControl(val FleetStateControl) {
+	s.Control = val
+}
+
+// SetModels sets the value of Models.
+func (s *FleetState) SetModels(val []FleetModel) {
+	s.Models = val
+}
+
+type FleetStateControl string
+
+const (
+	FleetStateControlUp          FleetStateControl = "up"
+	FleetStateControlUnreachable FleetStateControl = "unreachable"
+)
+
+// AllValues returns all FleetStateControl values.
+func (FleetStateControl) AllValues() []FleetStateControl {
+	return []FleetStateControl{
+		FleetStateControlUp,
+		FleetStateControlUnreachable,
+	}
+}
+
+// MarshalText implements encoding.TextMarshaler.
+func (s FleetStateControl) MarshalText() ([]byte, error) {
+	switch s {
+	case FleetStateControlUp:
+		return []byte(s), nil
+	case FleetStateControlUnreachable:
+		return []byte(s), nil
+	default:
+		return nil, errors.Errorf("invalid value: %q", s)
+	}
+}
+
+// UnmarshalText implements encoding.TextUnmarshaler.
+func (s *FleetStateControl) UnmarshalText(data []byte) error {
+	switch FleetStateControl(data) {
+	case FleetStateControlUp:
+		*s = FleetStateControlUp
+		return nil
+	case FleetStateControlUnreachable:
+		*s = FleetStateControlUnreachable
+		return nil
+	default:
+		return errors.Errorf("invalid value: %q", data)
+	}
+}
+
 // Ref: #/components/schemas/Guard
 type Guard struct {
 	BlockId string `json:"blockId"`

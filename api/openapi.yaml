@@ -28,6 +28,7 @@ paths:
     get:
       operationId: listModels
       summary: Discover the servable fleet (ADR-0018)
+      description: Deprecated for clients — use /fleet (ADR-0040). Retained for compatibility.
       responses:
         '200':
           description: model list + live state
@@ -37,6 +38,23 @@ paths:
                 type: array
                 items:
                   $ref: '#/components/schemas/Model'
+
+  /fleet:
+    get:
+      operationId: getFleet
+      summary: Serving observability — models + live state + control-plane reachability (ADR-0040)
+      description: >
+        The observability surface the model selectors consume. Answers 200 even
+        when the control daemon is unreachable: `control` drops to
+        "unreachable" and `models` carries the last-known projection with every
+        liveState forced to "unknown" (ADR-0040 §3).
+      responses:
+        '200':
+          description: fleet state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FleetState'
 
   /models/{name}/start:
     post:
@@ -448,6 +466,36 @@ components:
         name:
           type: string
         state:
+          type: string
+          enum: [up, down, starting, stopping, provisioning, unknown]
+
+    FleetState:
+      type: object
+      required: [control, models]
+      properties:
+        control:
+          type: string
+          enum: [up, unreachable]
+        models:
+          type: array
+          items:
+            $ref: '#/components/schemas/FleetModel'
+
+    FleetModel:
+      type: object
+      required: [name, baseUrl, liveState]
+      properties:
+        name:
+          type: string
+        baseUrl:
+          type: string
+        capabilities:
+          $ref: '#/components/schemas/Capabilities'
+        modeTags:
+          type: array
+          items:
+            type: string
+        liveState:
           type: string
           enum: [up, down, starting, stopping, provisioning, unknown]
 

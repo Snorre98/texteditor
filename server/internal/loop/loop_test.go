@@ -83,6 +83,7 @@ type stubFleet struct {
 func (s stubFleet) ListModels() ([]dto.Model, error)                        { return nil, nil }
 func (s stubFleet) Resolve(string, dto.ResolveOpts) (dto.Resolution, error) { return s.res, s.err }
 func (s stubFleet) Status(string) (dto.LiveState, error)                    { return dto.LiveUp, nil }
+func (s stubFleet) ListStatus() ([]dto.ModelState, error)                   { return nil, nil }
 func (s stubFleet) Start(string) error                                      { return nil }
 func (s stubFleet) Stop(string) error                                       { return nil }
 func (s stubFleet) Provision(context.Context, string) (string, error)       { return "", nil }

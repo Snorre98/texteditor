@@ -85,6 +85,15 @@ func (f *fakeDaemon) handle(w http.ResponseWriter, r *http.Request) {
 		f.mu.Unlock()
 		writeJSON(200, map[string]interface{}{"models": entries})
 
+	case r.Method == http.MethodGet && r.URL.Path == "/status/all":
+		f.mu.Lock()
+		states := make([]dto.ModelState, 0, len(f.states))
+		for name, st := range f.states {
+			states = append(states, dto.ModelState{Name: name, State: st})
+		}
+		f.mu.Unlock()
+		writeJSON(200, map[string]interface{}{"states": states})
+
 	case r.Method == http.MethodGet && len(r.URL.Path) > 8 && r.URL.Path[:8] == "/status/":
 		name := r.URL.Path[8:]
 		f.mu.Lock()
@@ -274,6 +283,94 @@ func TestListModels(t *testing.T) {
 	}
 	if byName["gemma4-12b"].ModelID != "gemma4-12b" {
 		t.Fatalf("gemma4-12b modelId = %q, want Name fallback", byName["gemma4-12b"].ModelID)
+	}
+}
+
+func TestListStatusBatch(t *testing.T) {
+	tf := newFakeDaemon(t)
+	tf.mu.Lock()
+	tf.states["gemma4-12b"] = dto.LiveDown
+	tf.states["gemma4-26b"] = dto.LiveStarting
+	tf.mu.Unlock()
+	s := tf.server()
+	f := NewDaemonWithClient(s.URL, s.Client())
+
+	states, err := f.ListStatus()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(states) != 3 {
+		t.Fatalf("states = %d, want 3", len(states))
+	}
+	byName := map[string]dto.LiveState{}
+	for _, st := range states {
+		byName[st.Name] = st.State
+	}
+	if byName["gemma4-12b"] != dto.LiveDown || byName["gemma4-26b"] != dto.LiveStarting || byName["llama3.1-8b"] != dto.LiveUp {
+		t.Fatalf("states = %v, want the daemon's per-model states", byName)
+	}
+}
+
+func TestListModelsLastGoodOnDaemonDown(t *testing.T) {
+	// Prime the cache with one successful read, then kill the server: the
+	// observability read must serve the labeled last-good projection, never
+	// silently succeed nor drop the typed error (ADR-0040 §3).
+	tf := newFakeDaemon(t)
+	live := tf.server()
+	f := NewDaemonWithClient(live.URL, live.Client())
+	if _, err := f.ListModels(); err != nil {
+		t.Fatal(err)
+	}
+	live.Close()
+
+	models, err := f.ListModels()
+	if !errors.Is(err, ErrDaemonUnreachable) {
+		t.Fatalf("want ErrDaemonUnreachable alongside the stale projection, got %v", err)
+	}
+	if len(models) != 3 {
+		t.Fatalf("last-good models = %d, want 3", len(models))
+	}
+
+	states, err := f.ListStatus()
+	if !errors.Is(err, ErrDaemonUnreachable) {
+		t.Fatalf("ListStatus: want ErrDaemonUnreachable, got %v", err)
+	}
+	if len(states) != 3 {
+		t.Fatalf("last-good states = %d, want 3", len(states))
+	}
+	for _, st := range states {
+		if st.State != dto.LiveUnknown {
+			t.Fatalf("state(%s) = %s, want unknown on a daemon outage", st.Name, st.State)
+		}
+	}
+
+	// A never-primed gateway (empty cache) still fails hard, like before.
+	dead := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	deadURL := dead.URL
+	dead.Close()
+	fresh := NewDaemonWithClient(deadURL, &http.Client{})
+	if _, err := fresh.ListModels(); !errors.Is(err, ErrDaemonUnreachable) {
+		t.Fatalf("fresh gateway: want ErrDaemonUnreachable, got %v", err)
+	}
+	if _, err := fresh.ListStatus(); !errors.Is(err, ErrDaemonUnreachable) {
+		t.Fatalf("fresh gateway ListStatus: want ErrDaemonUnreachable, got %v", err)
+	}
+}
+
+func TestResolveUnaffectedByStaleCache(t *testing.T) {
+	// Resolve keeps the hard-fail `list` path: after priming the last-good
+	// cache, a daemon outage must still surface daemon-unreachable, never a
+	// resolution against the stale projection (ADR-0040 §3 scope).
+	tf := newFakeDaemon(t)
+	s := tf.server()
+	f := NewDaemonWithClient(s.URL, s.Client())
+	if _, err := f.ListModels(); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+
+	if _, err := f.Resolve("gemma4-12b", dto.ResolveOpts{ModeTag: "proofreader"}); !errors.Is(err, ErrDaemonUnreachable) {
+		t.Fatalf("want ErrDaemonUnreachable from Resolve on outage, got %v", err)
 	}
 }
 

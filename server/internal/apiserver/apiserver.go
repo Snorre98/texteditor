@@ -8,6 +8,7 @@ package apiserver
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 
@@ -87,20 +88,80 @@ func (h *handler) GetHealth(ctx context.Context) (*genapi.Health, error) {
 }
 
 func (h *handler) ListModels(ctx context.Context) ([]genapi.Model, error) {
-	models, err := h.d.Fleet.ListModels()
-	if err != nil {
+	models, byState, unreachable, err := h.fleetSnapshot()
+	if err != nil || unreachable {
+		// /models keeps its hard-fail semantics (ADR-0040 §3); /fleet is the
+		// labeled observability surface that renders a daemon outage.
+		if err == nil {
+			err = fleet.ErrDaemonUnreachable
+		}
 		return nil, err
 	}
 	out := make([]genapi.Model, 0, len(models))
 	for _, m := range models {
 		om := modelToGen(m)
-		// Best-effort live state; a down model still lists.
-		if st, err := h.d.Fleet.Status(m.Name); err == nil {
+		if st, ok := byState[m.Name]; ok {
 			om.LiveState = genapi.NewOptModelLiveState(genapi.ModelLiveState(st))
 		}
 		out = append(out, om)
 	}
 	return out, nil
+}
+
+// GetFleet backs GET /fleet (ADR-0040): one observability read joining the
+// model projection with the batch `status/all` states. A daemon outage is
+// data, not an error — `control: unreachable` with the last-known projection
+// and every state forced to `unknown` (ADR-0040 §3, failure-semantics §6).
+func (h *handler) GetFleet(ctx context.Context) (*genapi.FleetState, error) {
+	models, byState, unreachable, err := h.fleetSnapshot()
+	if err != nil {
+		return nil, err
+	}
+	control := genapi.FleetStateControlUp
+	if unreachable {
+		control = genapi.FleetStateControlUnreachable
+	}
+	out := make([]genapi.FleetModel, 0, len(models))
+	for _, m := range models {
+		st, ok := byState[m.Name]
+		if !ok {
+			st = dto.LiveUnknown
+		}
+		out = append(out, fleetModelToGen(m, st))
+	}
+	return &genapi.FleetState{Control: control, Models: out}, nil
+}
+
+// fleetSnapshot reads the fleet projection + batch states in two daemon calls
+// (ADR-0040 §2). It returns `unreachable` when the control plane is down —
+// carrying the last-good projection from the gateway's cache — and propagates
+// any other error.
+func (h *handler) fleetSnapshot() (models []dto.Model, byState map[string]dto.LiveState, unreachable bool, err error) {
+	models, modelsErr := h.d.Fleet.ListModels()
+	states, statesErr := h.d.Fleet.ListStatus()
+
+	unreachable = errors.Is(modelsErr, fleet.ErrDaemonUnreachable) ||
+		errors.Is(statesErr, fleet.ErrDaemonUnreachable)
+	if !unreachable {
+		if modelsErr != nil {
+			return nil, nil, false, modelsErr
+		}
+		if statesErr != nil {
+			return nil, nil, false, statesErr
+		}
+	}
+
+	byState = map[string]dto.LiveState{}
+	if unreachable {
+		for _, m := range models {
+			byState[m.Name] = dto.LiveUnknown
+		}
+	} else {
+		for _, st := range states {
+			byState[st.Name] = st.State
+		}
+	}
+	return models, byState, unreachable, nil
 }
 
 func (h *handler) GetModelStatus(ctx context.Context, p genapi.GetModelStatusParams) (*genapi.LiveStateResponse, error) {
@@ -426,6 +487,21 @@ func modelToGen(m dto.Model) genapi.Model {
 		Name:     m.Name,
 		BaseUrl:  m.BaseURL,
 		ModeTags: m.ModeTags,
+	}
+	om.Capabilities = genapi.NewOptCapabilities(genapi.Capabilities{
+		ContextLength:        m.Capabilities.ContextLength,
+		ThinkingMode:         m.Capabilities.ThinkingMode,
+		SupportsSystemPrompt: m.Capabilities.SupportsSystemPrompt,
+	})
+	return om
+}
+
+func fleetModelToGen(m dto.Model, st dto.LiveState) genapi.FleetModel {
+	om := genapi.FleetModel{
+		Name:      m.Name,
+		BaseUrl:   m.BaseURL,
+		ModeTags:  m.ModeTags,
+		LiveState: genapi.FleetModelLiveState(st),
 	}
 	om.Capabilities = genapi.NewOptCapabilities(genapi.Capabilities{
 		ContextLength:        m.Capabilities.ContextLength,

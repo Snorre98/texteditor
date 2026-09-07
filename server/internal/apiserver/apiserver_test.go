@@ -11,15 +11,25 @@ import (
 	"testing"
 	"time"
 
+	"texteditor/internal/fleet"
 	"texteditor/internal/workspace"
 	"texteditor/shared/dto"
 )
 
 // ------------------------- minimal stubs -------------------------
 
-type stubFleet struct{ models []dto.Model }
+type stubFleet struct {
+	models      []dto.Model
+	states      map[string]dto.LiveState // nil → every model up
+	unreachable bool
+}
 
-func (s stubFleet) ListModels() ([]dto.Model, error) { return s.models, nil }
+func (s stubFleet) ListModels() ([]dto.Model, error) {
+	if s.unreachable {
+		return s.models, fleet.ErrDaemonUnreachable
+	}
+	return s.models, nil
+}
 func (s stubFleet) Resolve(string, dto.ResolveOpts) (dto.Resolution, error) {
 	return dto.Resolution{}, nil
 }
@@ -30,6 +40,25 @@ func (s stubFleet) Status(name string) (dto.LiveState, error) {
 		}
 	}
 	return dto.LiveUnknown, nil
+}
+func (s stubFleet) ListStatus() ([]dto.ModelState, error) {
+	states := make([]dto.ModelState, 0, len(s.models))
+	for _, m := range s.models {
+		st := dto.LiveUp
+		if s.states != nil {
+			if v, ok := s.states[m.Name]; ok {
+				st = v
+			}
+		}
+		if s.unreachable {
+			st = dto.LiveUnknown
+		}
+		states = append(states, dto.ModelState{Name: m.Name, State: st})
+	}
+	if s.unreachable {
+		return states, fleet.ErrDaemonUnreachable
+	}
+	return states, nil
 }
 func (s stubFleet) Start(string) error                                { return nil }
 func (s stubFleet) Stop(string) error                                 { return nil }
@@ -215,6 +244,98 @@ func TestListModels(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "gemma4-12b") {
 		t.Fatalf("models body = %s", rec.Body.String())
+	}
+}
+
+func TestGetFleet(t *testing.T) {
+	bus := &fakeBus{}
+	srv, err := New(Deps{
+		Fleet: stubFleet{
+			models: []dto.Model{
+				{Name: "gemma4-12b", BaseURL: "http://x/v1", Capabilities: dto.Capabilities{ContextLength: 131072}, ModeTags: []string{"editor"}},
+				{Name: "gemma4-26b", BaseURL: "http://y/v1"},
+			},
+			states: map[string]dto.LiveState{"gemma4-12b": dto.LiveUp, "gemma4-26b": dto.LiveDown},
+		},
+		Modes:    stubModes{},
+		Tools:    stubTools{},
+		Doc:      stubDoc{},
+		Sessions: stubSessions{},
+		Loop:     &stubLoopEmitter{bus: bus},
+	}, bus)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/fleet", nil)
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("fleet = %d body %s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Control string `json:"control"`
+		Models  []struct {
+			Name      string `json:"name"`
+			LiveState string `json:"liveState"`
+			BaseURL   string `json:"baseUrl"`
+		} `json:"models"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Control != "up" {
+		t.Fatalf("control = %q, want up", body.Control)
+	}
+	if len(body.Models) != 2 {
+		t.Fatalf("models = %d, want 2", len(body.Models))
+	}
+	if body.Models[0].LiveState != "up" || body.Models[0].BaseURL != "http://x/v1" {
+		t.Fatalf("models[0] = %+v, want gemma4-12b up", body.Models[0])
+	}
+	if body.Models[1].LiveState != "down" {
+		t.Fatalf("models[1] = %+v, want gemma4-26b down", body.Models[1])
+	}
+}
+
+func TestGetFleetDaemonUnreachable(t *testing.T) {
+	// A control-plane outage is data, not an error (ADR-0040 §3): 200 with
+	// control: unreachable and the last-known projection labeled unknown.
+	bus := &fakeBus{}
+	srv, err := New(Deps{
+		Fleet: stubFleet{
+			models:      []dto.Model{{Name: "gemma4-12b", BaseURL: "http://x/v1"}},
+			unreachable: true,
+		},
+		Modes:    stubModes{},
+		Tools:    stubTools{},
+		Doc:      stubDoc{},
+		Sessions: stubSessions{},
+		Loop:     &stubLoopEmitter{bus: bus},
+	}, bus)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/fleet", nil)
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("fleet = %d body %s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Control string `json:"control"`
+		Models  []struct {
+			Name      string `json:"name"`
+			LiveState string `json:"liveState"`
+		} `json:"models"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Control != "unreachable" {
+		t.Fatalf("control = %q, want unreachable", body.Control)
+	}
+	if len(body.Models) != 1 || body.Models[0].LiveState != "unknown" {
+		t.Fatalf("models = %+v, want the last-good projection with unknown states", body.Models)
 	}
 }
 

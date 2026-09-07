@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref } from "vue";
+import { onBeforeUnmount, onMounted, ref } from "vue";
 import { discoverEngineUrl } from "./engine";
 import { api, setEndpoint } from "./api/client";
 import { createAppStore } from "./state/store";
@@ -9,6 +9,8 @@ import Editor from "./editor/Editor.vue";
 // engine (E2, ADR-0021 §1), points the generated client at the resolved base URL
 // (ADR-0037), builds the reactive store (F7, ADR-0023), and hands it to the
 // CodeMirror editor. All edits + versioning go through the engine (ADR-0013 §3).
+// The store owns the fleet poll (ADR-0040 §4): started after the first read,
+// stopped on teardown.
 
 const store = ref<ReturnType<typeof createAppStore> | null>(null);
 const error = ref<string | null>(null);
@@ -19,9 +21,14 @@ onMounted(async () => {
     setEndpoint(baseUrl);
     store.value = createAppStore({ api, baseUrl });
     await store.value.refreshFleet();
+    store.value.startFleetPoll();
   } catch (e) {
     error.value = e instanceof Error ? e.message : String(e);
   }
+});
+
+onBeforeUnmount(() => {
+  store.value?.stopFleetPoll();
 });
 </script>
 

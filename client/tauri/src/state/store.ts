@@ -4,13 +4,14 @@
 // lifecycle and UI-observable state. Every effect the editor can cause is one
 // action here; components render the reactive state, never call the API directly.
 //
-// Slices: connection, models (+liveState), modes, tools, document (+block tree
-// +history), sessions, and the live turn stream — tokens, meter, candidate/diff/
-// rag queues, done/error, backpressure. Session scoping (ADR-0026 §1/§4): multiple
-// selection-anchored bubbles plus one doc-level chat stream simultaneously, so
-// `{messages, turn}` is keyed PER SESSION (`sessionStates: Record<sessionId, …>`),
-// generalizing the TUI's single `turn`/`messages` slice to a map. One turn per
-// session, sessions in parallel.
+// Slices: connection, fleet (control + models + liveState, ADR-0040), modes,
+// tools, document (+block tree +history), sessions, and the live turn stream —
+// tokens, meter, candidate/diff/rag queues, done/error, backpressure. Session
+// scoping (ADR-0026 §1/§4): multiple selection-anchored bubbles plus one
+// doc-level chat stream simultaneously, so `{messages, turn}` is keyed PER
+// SESSION (`sessionStates: Record<sessionId, …>`), generalizing the TUI's
+// single `turn`/`messages` slice to a map. One turn per session, sessions in
+// parallel.
 import { reactive } from "vue";
 import type {
   Block,
@@ -20,10 +21,10 @@ import type {
   Document,
   DoneEvent,
   ErrorEvent,
+  FleetModel,
   Message,
   MeterEvent,
   Mode,
-  Model,
   RagEvent,
   Revision,
   Session,
@@ -120,7 +121,8 @@ export interface SessionState {
 
 export interface EngineState {
   connection: ConnectionState;
-  models: Model[];
+  /** Serving observability (ADR-0040): the /fleet read + UI-visible action state. */
+  fleet: FleetView;
   modes: Mode[];
   tools: ToolDef[];
   document: Document | null;
@@ -133,10 +135,25 @@ export interface EngineState {
   switching: { from: string; to: string } | null;
 }
 
+/** The client-side fleet slice (ADR-0040 §3/§4): the wire FleetState plus
+ * action feedback the selector renders — never synthesized state. */
+export interface FleetView {
+  control: "up" | "unreachable";
+  models: FleetModel[];
+  /** Last refresh/lifecycle error (e.g. a failed start), UI-visible. */
+  error: string | null;
+  /** Model name with an in-flight start/stop verb, if any. */
+  busy: string | null;
+}
+
+export const FLEET_POLL_INTERVAL_MS = 10_000;
+
 export interface StoreDeps {
   api: Api;
   baseUrl: string;
   stream?: typeof streamTurn;
+  /** Poll interval override (tests); default FLEET_POLL_INTERVAL_MS. */
+  fleetPollMs?: number;
 }
 
 export interface SubmitTurnInput {
@@ -150,7 +167,6 @@ export interface SubmitTurnInput {
 export interface AppStore {
   state: EngineState;
   refreshFleet: () => Promise<void>;
-  refreshModels: () => Promise<void>;
   openDocument: (path: string) => Promise<void>;
   loadSessions: () => Promise<void>;
   /** create-or-resume; anchorBlockId set = selection/bubble anchor (ADR-0026 §1). */
@@ -166,6 +182,11 @@ export interface AppStore {
   saveTree: (tree: BlockWrite[], opts?: { writeThrough?: boolean }) => Promise<void>;
   /** serving-control.feature "TUI switches models": start new → up → stop old. */
   switchModel: (from: string, to: string) => Promise<void>;
+  /** Fleet observability (ADR-0040): one-verb lifecycle actions + poll control. */
+  startModel: (name: string) => Promise<void>;
+  stopModel: (name: string) => Promise<void>;
+  startFleetPoll: () => void;
+  stopFleetPoll: () => void;
   refreshBlocks: () => Promise<void>;
 }
 
@@ -193,7 +214,7 @@ function freshSessionState(): SessionState {
 function initialState(baseUrl: string): EngineState {
   return {
     connection: { baseUrl, error: null },
-    models: [],
+    fleet: { control: "up", models: [], error: null, busy: null },
     modes: [],
     tools: [],
     document: null,
@@ -233,19 +254,53 @@ export function createAppStore(deps: StoreDeps): AppStore {
     return res.data as T;
   }
 
-  async function refreshModels() {
-    state.models = await call<Model[]>(() => deps.api.listModels());
+  async function refreshFleet() {
+    try {
+      const [fleet, modes, tools] = await Promise.all([
+        call<{ control: "up" | "unreachable"; models: FleetModel[] }>(() =>
+          deps.api.getFleet(),
+        ),
+        call<Mode[]>(() => deps.api.listModes()),
+        call<ToolDef[]>(() => deps.api.listTools()),
+      ]);
+      state.fleet.control = fleet.control;
+      state.fleet.models = fleet.models;
+      state.fleet.error = null;
+      state.modes = modes;
+      state.tools = tools;
+    } catch (e) {
+      // A refresh failure (engine unreachable) is UI-visible; the last-known
+      // projection stays rendered (ADR-0040 §3 — labeled, never silent).
+      state.fleet.error = e instanceof Error ? e.message : String(e);
+    }
   }
 
-  async function refreshFleet() {
-    const [models, modes, tools] = await Promise.all([
-      call<Model[]>(() => deps.api.listModels()),
-      call<Mode[]>(() => deps.api.listModes()),
-      call<ToolDef[]>(() => deps.api.listTools()),
-    ]);
-    state.models = models;
-    state.modes = modes;
-    state.tools = tools;
+  // The fleet poll (ADR-0040 §4): every FLEET_POLL_INTERVAL_MS while the
+  // document is visible; paused when hidden. One in-flight guard.
+  let pollTimer: ReturnType<typeof setInterval> | null = null;
+  let refreshInFlight = false;
+
+  async function pollTick() {
+    if (typeof document !== "undefined" && document.hidden) return;
+    if (refreshInFlight) return;
+    refreshInFlight = true;
+    try {
+      await refreshFleet();
+    } finally {
+      refreshInFlight = false;
+    }
+  }
+
+  function startFleetPoll() {
+    if (pollTimer !== null) return;
+    pollTimer = setInterval(() => void pollTick(), deps.fleetPollMs ?? FLEET_POLL_INTERVAL_MS);
+  }
+
+  function stopFleetPoll() {
+    if (pollTimer !== null) {
+      clearInterval(pollTimer);
+      pollTimer = null;
+    }
   }
 
   async function openDocument(path: string) {
@@ -455,6 +510,36 @@ export function createAppStore(deps: StoreDeps): AppStore {
     await refreshBlocks();
   }
 
+  // startModel / stopModel (ADR-0040 §5): the selector's one-verb remediation
+  // actions. Each sets the fleet busy flag, calls the verb, then refreshes the
+  // fleet immediately (fleet-observability.feature "Lifecycle actions refresh
+  // the selector immediately"). Failures land in fleet.error, never silent.
+  async function startModel(name: string) {
+    state.fleet.busy = name;
+    let actionErr: unknown = null;
+    try {
+      await call(() => deps.api.startModel(name));
+    } catch (err) {
+      actionErr = err;
+    }
+    state.fleet.busy = null;
+    await refreshFleet();
+    if (actionErr) state.fleet.error = startErrorDisplay(name, actionErr);
+  }
+
+  async function stopModel(name: string) {
+    state.fleet.busy = name;
+    let actionErr: unknown = null;
+    try {
+      await call(() => deps.api.stopModel(name));
+    } catch (err) {
+      actionErr = err;
+    }
+    state.fleet.busy = null;
+    await refreshFleet();
+    if (actionErr) state.fleet.error = `failed to stop ${name}: ${String(actionErr)}`;
+  }
+
   // switchModel (serving-control.feature "TUI switches models"): start the new
   // model (blocking on the daemon until up — a 200 means "up"), stop the old
   // one only after the new one is up. A failed start surfaces an error and
@@ -474,13 +559,12 @@ export function createAppStore(deps: StoreDeps): AppStore {
         `failed to start ${to}: ${String(err)} — ${from} left running`;
       return;
     }
-    await refreshModels();
+    await refreshFleet();
   }
 
   return {
     state,
     refreshFleet,
-    refreshModels,
     openDocument,
     loadSessions,
     createSession,
@@ -490,6 +574,23 @@ export function createAppStore(deps: StoreDeps): AppStore {
     getCandidateText,
     saveTree,
     switchModel,
+    startModel,
+    stopModel,
+    startFleetPoll,
+    stopFleetPoll,
     refreshBlocks,
   };
+}
+
+// startErrorDisplay appends the provision hint for provisioning-shaped codes
+// (fleet-observability.feature "Start refused with model-not-found").
+const PROVISION_HINT =
+  "model not provisioned — see macos-dev-config/models.json";
+
+function startErrorDisplay(name: string, err: unknown): string {
+  const message = String(err);
+  if (message.includes("model-not-found")) {
+    return `${message} — ${PROVISION_HINT}`;
+  }
+  return `failed to start ${name}: ${message}`;
 }

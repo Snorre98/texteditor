@@ -1330,6 +1330,390 @@ func (s *Entry) UnmarshalJSON(data []byte) error {
 }
 
 // Encode implements json.Marshaler.
+func (s *FleetModel) Encode(e *jx.Encoder) {
+	e.ObjStart()
+	s.encodeFields(e)
+	e.ObjEnd()
+}
+
+// encodeFields encodes fields.
+func (s *FleetModel) encodeFields(e *jx.Encoder) {
+	{
+		e.FieldStart("name")
+		e.Str(s.Name)
+	}
+	{
+		e.FieldStart("baseUrl")
+		e.Str(s.BaseUrl)
+	}
+	{
+		if s.Capabilities.Set {
+			e.FieldStart("capabilities")
+			s.Capabilities.Encode(e)
+		}
+	}
+	{
+		if s.ModeTags != nil {
+			e.FieldStart("modeTags")
+			e.ArrStart()
+			for _, elem := range s.ModeTags {
+				e.Str(elem)
+			}
+			e.ArrEnd()
+		}
+	}
+	{
+		e.FieldStart("liveState")
+		s.LiveState.Encode(e)
+	}
+}
+
+var jsonFieldsNameOfFleetModel = [5]string{
+	0: "name",
+	1: "baseUrl",
+	2: "capabilities",
+	3: "modeTags",
+	4: "liveState",
+}
+
+// Decode decodes FleetModel from json.
+func (s *FleetModel) Decode(d *jx.Decoder) error {
+	if s == nil {
+		return errors.New("invalid: unable to decode FleetModel to nil")
+	}
+	var requiredBitSet [1]uint8
+
+	if err := d.ObjBytes(func(d *jx.Decoder, k []byte) error {
+		switch string(k) {
+		case "name":
+			requiredBitSet[0] |= 1 << 0
+			if err := func() error {
+				v, err := d.Str()
+				s.Name = string(v)
+				if err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"name\"")
+			}
+		case "baseUrl":
+			requiredBitSet[0] |= 1 << 1
+			if err := func() error {
+				v, err := d.Str()
+				s.BaseUrl = string(v)
+				if err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"baseUrl\"")
+			}
+		case "capabilities":
+			if err := func() error {
+				s.Capabilities.Reset()
+				if err := s.Capabilities.Decode(d); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"capabilities\"")
+			}
+		case "modeTags":
+			if err := func() error {
+				s.ModeTags = make([]string, 0)
+				if err := d.Arr(func(d *jx.Decoder) error {
+					var elem string
+					v, err := d.Str()
+					elem = string(v)
+					if err != nil {
+						return err
+					}
+					s.ModeTags = append(s.ModeTags, elem)
+					return nil
+				}); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"modeTags\"")
+			}
+		case "liveState":
+			requiredBitSet[0] |= 1 << 4
+			if err := func() error {
+				if err := s.LiveState.Decode(d); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"liveState\"")
+			}
+		default:
+			return d.Skip()
+		}
+		return nil
+	}); err != nil {
+		return errors.Wrap(err, "decode FleetModel")
+	}
+	// Validate required fields.
+	var failures []validate.FieldError
+	for i, mask := range [1]uint8{
+		0b00010011,
+	} {
+		if result := (requiredBitSet[i] & mask) ^ mask; result != 0 {
+			// Mask only required fields and check equality to mask using XOR.
+			//
+			// If XOR result is not zero, result is not equal to expected, so some fields are missed.
+			// Bits of fields which would be set are actually bits of missed fields.
+			missed := bits.OnesCount8(result)
+			for bitN := 0; bitN < missed; bitN++ {
+				bitIdx := bits.TrailingZeros8(result)
+				fieldIdx := i*8 + bitIdx
+				var name string
+				if fieldIdx < len(jsonFieldsNameOfFleetModel) {
+					name = jsonFieldsNameOfFleetModel[fieldIdx]
+				} else {
+					name = strconv.Itoa(fieldIdx)
+				}
+				failures = append(failures, validate.FieldError{
+					Name:  name,
+					Error: validate.ErrFieldRequired,
+				})
+				// Reset bit.
+				result &^= 1 << bitIdx
+			}
+		}
+	}
+	if len(failures) > 0 {
+		return &validate.Error{Fields: failures}
+	}
+
+	return nil
+}
+
+// MarshalJSON implements stdjson.Marshaler.
+func (s *FleetModel) MarshalJSON() ([]byte, error) {
+	e := jx.Encoder{}
+	s.Encode(&e)
+	return e.Bytes(), nil
+}
+
+// UnmarshalJSON implements stdjson.Unmarshaler.
+func (s *FleetModel) UnmarshalJSON(data []byte) error {
+	d := jx.DecodeBytes(data)
+	return s.Decode(d)
+}
+
+// Encode encodes FleetModelLiveState as json.
+func (s FleetModelLiveState) Encode(e *jx.Encoder) {
+	e.Str(string(s))
+}
+
+// Decode decodes FleetModelLiveState from json.
+func (s *FleetModelLiveState) Decode(d *jx.Decoder) error {
+	if s == nil {
+		return errors.New("invalid: unable to decode FleetModelLiveState to nil")
+	}
+	v, err := d.StrBytes()
+	if err != nil {
+		return err
+	}
+	// Try to use constant string.
+	switch FleetModelLiveState(v) {
+	case FleetModelLiveStateUp:
+		*s = FleetModelLiveStateUp
+	case FleetModelLiveStateDown:
+		*s = FleetModelLiveStateDown
+	case FleetModelLiveStateStarting:
+		*s = FleetModelLiveStateStarting
+	case FleetModelLiveStateStopping:
+		*s = FleetModelLiveStateStopping
+	case FleetModelLiveStateProvisioning:
+		*s = FleetModelLiveStateProvisioning
+	case FleetModelLiveStateUnknown:
+		*s = FleetModelLiveStateUnknown
+	default:
+		*s = FleetModelLiveState(v)
+	}
+
+	return nil
+}
+
+// MarshalJSON implements stdjson.Marshaler.
+func (s FleetModelLiveState) MarshalJSON() ([]byte, error) {
+	e := jx.Encoder{}
+	s.Encode(&e)
+	return e.Bytes(), nil
+}
+
+// UnmarshalJSON implements stdjson.Unmarshaler.
+func (s *FleetModelLiveState) UnmarshalJSON(data []byte) error {
+	d := jx.DecodeBytes(data)
+	return s.Decode(d)
+}
+
+// Encode implements json.Marshaler.
+func (s *FleetState) Encode(e *jx.Encoder) {
+	e.ObjStart()
+	s.encodeFields(e)
+	e.ObjEnd()
+}
+
+// encodeFields encodes fields.
+func (s *FleetState) encodeFields(e *jx.Encoder) {
+	{
+		e.FieldStart("control")
+		s.Control.Encode(e)
+	}
+	{
+		e.FieldStart("models")
+		e.ArrStart()
+		for _, elem := range s.Models {
+			elem.Encode(e)
+		}
+		e.ArrEnd()
+	}
+}
+
+var jsonFieldsNameOfFleetState = [2]string{
+	0: "control",
+	1: "models",
+}
+
+// Decode decodes FleetState from json.
+func (s *FleetState) Decode(d *jx.Decoder) error {
+	if s == nil {
+		return errors.New("invalid: unable to decode FleetState to nil")
+	}
+	var requiredBitSet [1]uint8
+
+	if err := d.ObjBytes(func(d *jx.Decoder, k []byte) error {
+		switch string(k) {
+		case "control":
+			requiredBitSet[0] |= 1 << 0
+			if err := func() error {
+				if err := s.Control.Decode(d); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"control\"")
+			}
+		case "models":
+			requiredBitSet[0] |= 1 << 1
+			if err := func() error {
+				s.Models = make([]FleetModel, 0)
+				if err := d.Arr(func(d *jx.Decoder) error {
+					var elem FleetModel
+					if err := elem.Decode(d); err != nil {
+						return err
+					}
+					s.Models = append(s.Models, elem)
+					return nil
+				}); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"models\"")
+			}
+		default:
+			return d.Skip()
+		}
+		return nil
+	}); err != nil {
+		return errors.Wrap(err, "decode FleetState")
+	}
+	// Validate required fields.
+	var failures []validate.FieldError
+	for i, mask := range [1]uint8{
+		0b00000011,
+	} {
+		if result := (requiredBitSet[i] & mask) ^ mask; result != 0 {
+			// Mask only required fields and check equality to mask using XOR.
+			//
+			// If XOR result is not zero, result is not equal to expected, so some fields are missed.
+			// Bits of fields which would be set are actually bits of missed fields.
+			missed := bits.OnesCount8(result)
+			for bitN := 0; bitN < missed; bitN++ {
+				bitIdx := bits.TrailingZeros8(result)
+				fieldIdx := i*8 + bitIdx
+				var name string
+				if fieldIdx < len(jsonFieldsNameOfFleetState) {
+					name = jsonFieldsNameOfFleetState[fieldIdx]
+				} else {
+					name = strconv.Itoa(fieldIdx)
+				}
+				failures = append(failures, validate.FieldError{
+					Name:  name,
+					Error: validate.ErrFieldRequired,
+				})
+				// Reset bit.
+				result &^= 1 << bitIdx
+			}
+		}
+	}
+	if len(failures) > 0 {
+		return &validate.Error{Fields: failures}
+	}
+
+	return nil
+}
+
+// MarshalJSON implements stdjson.Marshaler.
+func (s *FleetState) MarshalJSON() ([]byte, error) {
+	e := jx.Encoder{}
+	s.Encode(&e)
+	return e.Bytes(), nil
+}
+
+// UnmarshalJSON implements stdjson.Unmarshaler.
+func (s *FleetState) UnmarshalJSON(data []byte) error {
+	d := jx.DecodeBytes(data)
+	return s.Decode(d)
+}
+
+// Encode encodes FleetStateControl as json.
+func (s FleetStateControl) Encode(e *jx.Encoder) {
+	e.Str(string(s))
+}
+
+// Decode decodes FleetStateControl from json.
+func (s *FleetStateControl) Decode(d *jx.Decoder) error {
+	if s == nil {
+		return errors.New("invalid: unable to decode FleetStateControl to nil")
+	}
+	v, err := d.StrBytes()
+	if err != nil {
+		return err
+	}
+	// Try to use constant string.
+	switch FleetStateControl(v) {
+	case FleetStateControlUp:
+		*s = FleetStateControlUp
+	case FleetStateControlUnreachable:
+		*s = FleetStateControlUnreachable
+	default:
+		*s = FleetStateControl(v)
+	}
+
+	return nil
+}
+
+// MarshalJSON implements stdjson.Marshaler.
+func (s FleetStateControl) MarshalJSON() ([]byte, error) {
+	e := jx.Encoder{}
+	s.Encode(&e)
+	return e.Bytes(), nil
+}
+
+// UnmarshalJSON implements stdjson.Unmarshaler.
+func (s *FleetStateControl) UnmarshalJSON(data []byte) error {
+	d := jx.DecodeBytes(data)
+	return s.Decode(d)
+}
+
+// Encode implements json.Marshaler.
 func (s *Guard) Encode(e *jx.Encoder) {
 	e.ObjStart()
 	s.encodeFields(e)

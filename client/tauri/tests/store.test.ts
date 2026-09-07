@@ -21,15 +21,120 @@ const turnOf = (store: ReturnType<typeof createAppStore>, id: string) =>
 // --------------------------- tests ---------------------------
 
 describe("createAppStore", () => {
-  test("refreshFleet populates models, modes, and tools", async () => {
-    const { api } = stubApi();
+  test("refreshFleet populates the fleet slice, modes, and tools", async () => {
+    const { api, calls } = stubApi();
     const store = createAppStore({ api, baseUrl: "http://x" });
     await store.refreshFleet();
 
     const s = store.state;
-    expect(s.models.map((m) => m.name)).toEqual(["gemma4-12b", "gemma4-26b"]);
+    expect(calls).toContain("getFleet");
+    expect(s.fleet.control).toBe("up");
+    expect(s.fleet.models.map((m) => m.name)).toEqual(["gemma4-12b", "gemma4-26b"]);
+    expect(s.fleet.models[0]?.liveState).toBe("down");
     expect(s.modes.map((m) => m.name)).toEqual(["proofreader"]);
     expect(s.tools.map((t) => t.name)).toEqual(["edit_markdown"]);
+  });
+
+  test("a control-plane outage labels the fleet without dropping the projection (ADR-0040 §3)", async () => {
+    const { api } = stubApi({
+      getFleetResult: () =>
+        ok({
+          control: "unreachable",
+          models: [
+            { name: "gemma4-12b", baseUrl: "http://x/v1", liveState: "unknown" },
+          ],
+        }),
+    });
+    const store = createAppStore({ api, baseUrl: "http://x" });
+    await store.refreshFleet();
+
+    expect(store.state.fleet.control).toBe("unreachable");
+    expect(store.state.fleet.models[0]?.liveState).toBe("unknown");
+    expect(store.state.fleet.error).toBeNull();
+  });
+
+  test("a failed fleet refresh surfaces an error and keeps the last-known projection", async () => {
+    const { api } = stubApi();
+    const store = createAppStore({ api, baseUrl: "http://x" });
+    await store.refreshFleet();
+    expect(store.state.fleet.models).toHaveLength(2);
+
+    const failing = stubApi({ getFleetResult: () => fail("connection refused") });
+    const store2 = createAppStore({ api: failing.api, baseUrl: "http://x" });
+    await store2.refreshFleet();
+    expect(store2.state.fleet.error).toContain("connection refused");
+
+    // Same store, now failing: the previous projection stays rendered.
+    expect(store.state.fleet.models).toHaveLength(2);
+  });
+
+  describe("startModel / stopModel (ADR-0040 §5)", () => {
+    test("start issues the verb, refreshes immediately, and clears busy", async () => {
+      const { api, calls } = stubApi();
+      const store = createAppStore({ api, baseUrl: "http://x" });
+      await store.refreshFleet();
+
+      const p = store.startModel("gemma4-26b");
+      expect(store.state.fleet.busy).toBe("gemma4-26b");
+      await p;
+
+      expect(calls).toContain("start:gemma4-26b");
+      const startIdx = calls.indexOf("start:gemma4-26b");
+      const refreshIdx = calls.lastIndexOf("getFleet");
+      expect(refreshIdx).toBeGreaterThan(startIdx);
+      expect(store.state.fleet.busy).toBeNull();
+      expect(store.state.fleet.error).toBeNull();
+    });
+
+    test("a start refused with model-not-found surfaces the provision hint", async () => {
+      const { api } = stubApi({
+        startResult: () => fail("model-not-found: source not provisioned"),
+      });
+      const store = createAppStore({ api, baseUrl: "http://x" });
+      await store.startModel("gemma4-26b");
+
+      expect(store.state.fleet.error).toContain("model-not-found");
+      expect(store.state.fleet.error).toContain("macos-dev-config/models.json");
+      expect(store.state.fleet.busy).toBeNull();
+    });
+
+    test("stop issues the verb and refreshes", async () => {
+      const { api, calls } = stubApi();
+      const store = createAppStore({ api, baseUrl: "http://x" });
+      await store.stopModel("gemma4-12b");
+
+      expect(calls).toContain("stop:gemma4-12b");
+      expect(calls).toContain("getFleet");
+      expect(store.state.fleet.busy).toBeNull();
+    });
+  });
+
+  describe("fleet poll (ADR-0040 §4)", () => {
+    const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+    test("polls on the interval and stops cleanly", async () => {
+      const { api, calls } = stubApi();
+      const store = createAppStore({ api, baseUrl: "http://x", fleetPollMs: 10 });
+      store.startFleetPoll();
+      await sleep(45);
+      store.stopFleetPoll();
+      const count = calls.filter((c) => c === "getFleet").length;
+      expect(count).toBeGreaterThanOrEqual(2);
+      await sleep(30);
+      expect(calls.filter((c) => c === "getFleet").length).toBe(count);
+    });
+
+    test("pauses while the document is hidden", async () => {
+      const { api, calls } = stubApi();
+      const store = createAppStore({ api, baseUrl: "http://x", fleetPollMs: 10 });
+      const prevDoc = (globalThis as { document?: unknown }).document;
+      (globalThis as { document?: unknown }).document = { hidden: true } as Document;
+      store.startFleetPoll();
+      await sleep(35);
+      store.stopFleetPoll();
+      expect(calls).not.toContain("getFleet");
+      (globalThis as { document?: unknown }).document = prevDoc;
+    });
   });
 
   test("openDocument loads the document, block tree, and history and resets sessions", async () => {

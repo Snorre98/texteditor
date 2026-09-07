@@ -18,15 +18,79 @@ const METER: MeterEvent = {
 // --------------------------- tests ---------------------------
 
 describe("createAppStore", () => {
-  test("refreshFleet populates models, modes, and tools", async () => {
+  test("refreshFleet populates the fleet slice, modes, and tools", async () => {
     const { api } = stubApi();
     const store = createAppStore({ api, baseUrl: "http://x" });
     await store.refreshFleet();
 
     const s = store.state();
-    expect(s.models.map((m) => m.name)).toEqual(["gemma4-12b", "gemma4-26b"]);
+    expect(s.fleet.control).toBe("up");
+    expect(s.fleet.models.map((m) => m.name)).toEqual(["gemma4-12b", "gemma4-26b"]);
+    expect(s.fleet.models[0]?.liveState).toBe("down");
     expect(s.modes.map((m) => m.name)).toEqual(["proofreader"]);
     expect(s.tools.map((t) => t.name)).toEqual(["edit_markdown"]);
+  });
+
+  test("a control-plane outage labels the fleet without dropping the projection (ADR-0040 §3)", async () => {
+    const { api } = stubApi({
+      getFleetResult: () =>
+        ok({
+          control: "unreachable",
+          models: [
+            { name: "gemma4-12b", baseUrl: "http://x/v1", liveState: "unknown" },
+          ],
+        }),
+    });
+    const store = createAppStore({ api, baseUrl: "http://x" });
+    await store.refreshFleet();
+
+    expect(store.state().fleet.control).toBe("unreachable");
+    expect(store.state().fleet.models[0]?.liveState).toBe("unknown");
+    expect(store.state().fleet.error).toBeNull();
+  });
+
+  test("a failed fleet refresh surfaces an error", async () => {
+    const { api } = stubApi({ getFleetResult: () => fail("connection refused") });
+    const store = createAppStore({ api, baseUrl: "http://x" });
+    await store.refreshFleet();
+
+    expect(store.state().fleet.error).toContain("connection refused");
+  });
+
+  test("startModel issues the verb, refreshes, and surfaces the provision hint on model-not-found", async () => {
+    const { api, calls } = stubApi({
+      startResult: () => fail("model-not-found: source not provisioned"),
+    });
+    const store = createAppStore({ api, baseUrl: "http://x" });
+    await store.startModel("gemma4-26b");
+
+    expect(calls).toContain("start:gemma4-26b");
+    expect(store.state().fleet.error).toContain("model-not-found");
+    expect(store.state().fleet.error).toContain("macos-dev-config/models.json");
+    expect(store.state().fleet.busy).toBeNull();
+  });
+
+  test("stopModel issues the verb and refreshes", async () => {
+    const { api, calls } = stubApi();
+    const store = createAppStore({ api, baseUrl: "http://x" });
+    await store.stopModel("gemma4-12b");
+
+    expect(calls).toContain("stop:gemma4-12b");
+    expect(calls).toContain("getFleet");
+    expect(store.state().fleet.busy).toBeNull();
+  });
+
+  test("the fleet poll ticks on the interval and stops cleanly (ADR-0040 §4)", async () => {
+    const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+    const { api, calls } = stubApi();
+    const store = createAppStore({ api, baseUrl: "http://x", fleetPollMs: 10 });
+    store.startFleetPoll();
+    await sleep(45);
+    store.stopFleetPoll();
+    const count = calls.filter((c) => c === "getFleet").length;
+    expect(count).toBeGreaterThanOrEqual(2);
+    await sleep(30);
+    expect(calls.filter((c) => c === "getFleet").length).toBe(count);
   });
 
   test("openDocument loads the document, block tree, and history", async () => {

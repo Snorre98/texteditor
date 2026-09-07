@@ -66,6 +66,12 @@ export PATH="$CARGO_HOME/bin:$PATH"
 bun run tauri:dev
 ```
 
+> **Engine changes require a sidecar rebuild.** The Go engine is bundled as the
+> sidecar; editing engine code and restarting the app is **not** enough — the
+> running engine keeps the old binary until step 1 is re-run (and the installed
+> `.app` re-bundled with `bun run tauri:build`). This is a classic stale-binary
+> trap: the app UI looks fresh but the engine behind it is not.
+
 **What you can do:**
 
 - Open a file or folder with the native dialog.

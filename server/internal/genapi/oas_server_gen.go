@@ -33,6 +33,14 @@ type Handler interface {
 	//
 	// GET /documents/{id}/diff
 	GetDiff(ctx context.Context, params GetDiffParams) ([]WordEdit, error)
+	// GetFleet implements getFleet operation.
+	//
+	// The observability surface the model selectors consume. Answers 200 even when the control daemon is
+	// unreachable: `control` drops to "unreachable" and `models` carries the last-known projection with
+	// every liveState forced to "unknown" (ADR-0040 §3).
+	//
+	// GET /fleet
+	GetFleet(ctx context.Context) (*FleetState, error)
 	// GetHealth implements getHealth operation.
 	//
 	// Liveness check.
@@ -59,7 +67,7 @@ type Handler interface {
 	ListDirectory(ctx context.Context, params ListDirectoryParams) (*DirectoryListing, error)
 	// ListModels implements listModels operation.
 	//
-	// Discover the servable fleet (ADR-0018).
+	// Deprecated for clients — use /fleet (ADR-0040). Retained for compatibility.
 	//
 	// GET /models
 	ListModels(ctx context.Context) ([]Model, error)

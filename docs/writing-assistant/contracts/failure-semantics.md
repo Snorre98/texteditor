@@ -87,6 +87,7 @@ Retries are **bounded (≤3)**; every failure is recorded in `meter_events`/logs
 | mention read I/O failure | `error` SSE event, code `mention-unreadable`, before any streaming (ADR-0036) |
 | mentions over the count cap | `error` SSE event, code `too-many-mentions`, before any streaming (ADR-0036) |
 | mention content over the token budget | labeled overflow line in the breakdown; the turn proceeds without the truncated tail (ADR-0036) |
+| daemon unreachable on the observability read | `GET /fleet` answers **200** with `control: "unreachable"` and the last-known projection, every `liveState` forced to `unknown` (ADR-0040 §3) — a labeled stale read, never a 500 and never mistaken for `provider-unreachable` |
 
 ## 6. Invariants
 

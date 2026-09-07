@@ -52,6 +52,14 @@ const (
 	LiveUnknown      LiveState = "unknown"
 )
 
+// ModelState is one model's live serving state from the daemon's batch
+// `status/all` verb (daemon-http.md §2, ADR-0040). The observability surface
+// joins ListModels with ListStatus by name.
+type ModelState struct {
+	Name  string
+	State LiveState
+}
+
 // ResolveOpts are the inputs to Fleet.Resolve (interface.md §1).
 type ResolveOpts struct {
 	ModeTag   string          // the mode's name == the fallback tag

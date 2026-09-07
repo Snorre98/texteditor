@@ -18,7 +18,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"texteditor/shared/dto"
@@ -29,6 +31,7 @@ type FleetGateway interface {
 	ListModels() ([]dto.Model, error)
 	Resolve(name string, opts dto.ResolveOpts) (dto.Resolution, error)
 	Status(name string) (dto.LiveState, error)
+	ListStatus() ([]dto.ModelState, error)
 	Start(name string) error
 	Stop(name string) error
 	Provision(ctx context.Context, name string) (string, error)
@@ -92,6 +95,12 @@ func (e daemonEntry) toModel() dto.Model {
 type daemon struct {
 	baseURL string // daemon's scheme://host:port
 	client  *http.Client
+
+	// lastGood is the last successful `list` projection — the observability
+	// fallback when the control plane goes unreachable mid-session (ADR-0040
+	// §3). In-memory only, never persisted; replaced on every successful list.
+	mu       sync.Mutex
+	lastGood []daemonEntry
 }
 
 // NewDaemon returns the Fleet gateway backed by the control daemon's HTTP
@@ -121,17 +130,40 @@ func (d *daemon) list() ([]daemonEntry, error) {
 	return rsp.Models, nil
 }
 
-// ListModels returns the discovered servable models (interface.md §1).
-func (d *daemon) ListModels() ([]dto.Model, error) {
+// listWithFallback returns the fresh projection, or the last-good one (plus
+// the underlying error) when the daemon is unreachable — the observability
+// read path (ADR-0040 §3). A non-empty error still accompanies the cached
+// projection so callers can distinguish "control plane down" from success;
+// resolution paths (Resolve/entryByName) keep the hard-fail `list`.
+func (d *daemon) listWithFallback() ([]daemonEntry, error) {
 	entries, err := d.list()
-	if err != nil {
+	if err == nil {
+		d.mu.Lock()
+		d.lastGood = entries
+		d.mu.Unlock()
+		return entries, nil
+	}
+	d.mu.Lock()
+	cached := slices.Clone(d.lastGood)
+	d.mu.Unlock()
+	if len(cached) == 0 {
 		return nil, err
 	}
+	return cached, err
+}
+
+// ListModels returns the discovered servable models (interface.md §1). On a
+// daemon outage it serves the last-good projection alongside the typed
+// ErrDaemonUnreachable so the observability surface can render a labeled
+// stale list instead of failing (ADR-0040 §3); startup gates still fail on
+// the returned error.
+func (d *daemon) ListModels() ([]dto.Model, error) {
+	entries, err := d.listWithFallback()
 	out := make([]dto.Model, 0, len(entries))
 	for _, e := range entries {
 		out = append(out, e.toModel())
 	}
-	return out, nil
+	return out, err
 }
 
 // entryByName looks up one daemon entry by model name.
@@ -158,6 +190,39 @@ func (d *daemon) statusOf(name string) (dto.LiveState, error) {
 		return dto.LiveUnknown, err
 	}
 	return rsp.State, nil
+}
+
+// ListStatus returns every model's live state in one daemon roundtrip via the
+// `status/all` batch verb (daemon-http.md §2, ADR-0040). On a daemon outage it
+// serves the last-good names with `unknown` states alongside the typed error —
+// the observability join keeps the projection visible and labeled, never
+// silently stale (ADR-0040 §3).
+func (d *daemon) ListStatus() ([]dto.ModelState, error) {
+	var rsp struct {
+		States []struct {
+			Name  string        `json:"name"`
+			State dto.LiveState `json:"state"`
+		} `json:"states"`
+	}
+	err := d.do(context.Background(), http.MethodGet, "/status/all", nil, &rsp)
+	if err != nil {
+		d.mu.Lock()
+		cached := slices.Clone(d.lastGood)
+		d.mu.Unlock()
+		if len(cached) == 0 {
+			return nil, err
+		}
+		out := make([]dto.ModelState, 0, len(cached))
+		for _, e := range cached {
+			out = append(out, dto.ModelState{Name: e.Name, State: dto.LiveUnknown})
+		}
+		return out, err
+	}
+	out := make([]dto.ModelState, 0, len(rsp.States))
+	for _, s := range rsp.States {
+		out = append(out, dto.ModelState{Name: s.Name, State: s.State})
+	}
+	return out, nil
 }
 
 // Resolve merges params, enforces capability gates, and folds in the fallback

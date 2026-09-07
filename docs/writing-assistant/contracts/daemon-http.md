@@ -92,7 +92,8 @@ request.
 
 ### `status` — `GET /status/{name}`
 
-Health of one server (or `all`):
+Health of one server, or the batch projection `GET /status/all` (added for the
+fleet observability surface, texteditor ADR-0040):
 
 ```json
 { "name": "mistral-24b", "state": "up" }
@@ -103,6 +104,20 @@ Health of one server (or `all`):
 
 ```json
 { "name": "gemma4-26b", "state": "provisioning", "bytes": 1048576, "total": 20971520 }
+```
+
+### `status/all` — `GET /status/all`
+
+Every model's state in one roundtrip, in manifest order. Each entry folds
+`unknown → down` exactly like the single verb, so batch and single projections
+never disagree. Provisioning progress is deliberately absent here — it stays a
+per-model detail of `GET /status/{name}`.
+
+```json
+{ "states": [
+  { "name": "mistral-24b", "state": "up" },
+  { "name": "phi-4", "state": "down" }
+] }
 ```
 
 ### `start` — `POST /start/{name}`

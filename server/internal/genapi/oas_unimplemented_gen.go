@@ -57,6 +57,17 @@ func (UnimplementedHandler) GetDiff(ctx context.Context, params GetDiffParams) (
 	return r, ht.ErrNotImplemented
 }
 
+// GetFleet implements getFleet operation.
+//
+// The observability surface the model selectors consume. Answers 200 even when the control daemon is
+// unreachable: `control` drops to "unreachable" and `models` carries the last-known projection with
+// every liveState forced to "unknown" (ADR-0040 §3).
+//
+// GET /fleet
+func (UnimplementedHandler) GetFleet(ctx context.Context) (r *FleetState, _ error) {
+	return r, ht.ErrNotImplemented
+}
+
 // GetHealth implements getHealth operation.
 //
 // Liveness check.
@@ -98,7 +109,7 @@ func (UnimplementedHandler) ListDirectory(ctx context.Context, params ListDirect
 
 // ListModels implements listModels operation.
 //
-// Discover the servable fleet (ADR-0018).
+// Deprecated for clients — use /fleet (ADR-0040). Retained for compatibility.
 //
 // GET /models
 func (UnimplementedHandler) ListModels(ctx context.Context) (r []Model, _ error) {

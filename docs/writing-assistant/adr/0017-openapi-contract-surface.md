@@ -86,6 +86,13 @@ at implementation, in lockstep with codegen regeneration.
 change lands in `api/openapi.yaml` at implementation in lockstep with the three
 codegens.
 
+*Amendment (Fleet observability — recorded):* ADR-0040 adds `GET /fleet`
+(→ `Fleet.ListModels` + `Fleet.ListStatus` joined) — the serving-observability
+route the model selectors consume, with the `FleetState`/`FleetModel` schemas
+(`control ∈ up|unreachable`, per-model required `liveState`). `GET /models` is
+retained for compatibility and marked deprecated; a daemon outage is a 200 with
+`control: "unreachable"` and the last-known projection, never a 500.
+
 ### 5. Lifecycle verbs project as resource-oriented routes
 
 `POST /models/{name}/start|stop|provision` + `GET /models/{name}/status`. The CLI

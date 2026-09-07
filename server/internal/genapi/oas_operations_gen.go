@@ -12,6 +12,7 @@ const (
 	GetBlocksOperation          OperationName = "GetBlocks"
 	GetCandidatesOperation      OperationName = "GetCandidates"
 	GetDiffOperation            OperationName = "GetDiff"
+	GetFleetOperation           OperationName = "GetFleet"
 	GetHealthOperation          OperationName = "GetHealth"
 	GetHistoryOperation         OperationName = "GetHistory"
 	GetModelStatusOperation     OperationName = "GetModelStatus"

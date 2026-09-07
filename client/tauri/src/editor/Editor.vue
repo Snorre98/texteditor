@@ -105,6 +105,18 @@ const candidateBaseText = computed(() => {
   return props.store.state.blocks.find((b) => b.id === id)?.text ?? "";
 });
 
+// Fleet observability (ADR-0040 §5): which model currently serves the selected
+// mode — its defaultModel when that is up, else the first up model.
+const currentModel = computed(() => {
+  const fleet = props.store.state.fleet;
+  const mode = props.store.state.modes.find((m) => m.name === selectedMode.value);
+  const def = mode?.defaultModel;
+  const isUp = (name: string) =>
+    fleet.models.find((m) => m.name === name)?.liveState === "up";
+  if (def && isUp(def)) return def;
+  return fleet.models.find((m) => m.liveState === "up")?.name ?? "";
+});
+
 const hasMeterData = computed(() => {
   const c = activeTurn.value?.cumulative;
   return c ? Object.values(c).some((v) => v > 0) : false;
@@ -236,6 +248,65 @@ onBeforeUnmount(async () => {
         </form>
       </div>
 
+      <section class="editor__fleet" aria-label="Model availability">
+        <div class="editor__fleet-head">
+          <h3>Models</h3>
+          <button
+            type="button"
+            class="editor__fleet-refresh"
+            :disabled="store.state.fleet.busy !== null"
+            @click="store.refreshFleet()"
+          >
+            Check servers
+          </button>
+        </div>
+        <p
+          v-if="store.state.fleet.control === 'unreachable'"
+          class="editor__fleet-banner"
+        >
+          serving control unavailable — showing last known models
+        </p>
+        <ul class="editor__fleet-list">
+          <li
+            v-for="m in store.state.fleet.models"
+            :key="m.name"
+            class="editor__fleet-row"
+            :class="`state-${m.liveState}`"
+          >
+            <span class="editor__fleet-dot" :class="`dot-${m.liveState}`" />
+            <span class="editor__fleet-name">{{ m.name }}</span>
+            <span v-if="currentModel === m.name" class="editor__fleet-current">
+              serving
+            </span>
+            <span class="editor__fleet-url">{{ m.baseUrl }}</span>
+            <span class="editor__fleet-actions">
+              <span v-if="m.liveState === 'starting' || m.liveState === 'provisioning'">
+                {{ m.liveState }}…
+              </span>
+              <button
+                v-else-if="m.liveState === 'up' && currentModel !== m.name"
+                type="button"
+                :disabled="store.state.fleet.busy !== null"
+                @click="store.stopModel(m.name)"
+              >
+                {{ store.state.fleet.busy === m.name ? "stopping…" : "Stop" }}
+              </button>
+              <button
+                v-else-if="m.liveState === 'down' || m.liveState === 'unknown'"
+                type="button"
+                :disabled="store.state.fleet.busy !== null"
+                @click="store.startModel(m.name)"
+              >
+                {{ store.state.fleet.busy === m.name ? "starting…" : "Start" }}
+              </button>
+            </span>
+          </li>
+        </ul>
+        <p v-if="store.state.fleet.error" class="editor__error">
+          {{ store.state.fleet.error }}
+        </p>
+      </section>
+
       <ol class="editor__messages">
         <li v-for="(m, i) in messages" :key="i" :class="`role-${m.role}`">
           <strong>{{ m.role }}:</strong> {{ m.content }}
@@ -348,6 +419,92 @@ onBeforeUnmount(async () => {
 .editor__mode {
   font-size: 0.85rem;
   color: #4b5563;
+}
+.editor__fleet {
+  border: 1px solid #e5e7eb;
+  border-radius: 0.375rem;
+  padding: 0.5rem 0.75rem;
+  font-size: 0.85rem;
+}
+.editor__fleet-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.editor__fleet-head h3 {
+  margin: 0;
+  font-size: 0.9rem;
+}
+.editor__fleet-refresh {
+  font-size: 0.8rem;
+  padding: 0.15rem 0.5rem;
+}
+.editor__fleet-banner {
+  margin: 0.35rem 0 0;
+  color: #92400e;
+  background: #fef3c7;
+  border: 1px solid #fcd34d;
+  border-radius: 0.25rem;
+  padding: 0.25rem 0.5rem;
+}
+.editor__fleet-list {
+  list-style: none;
+  margin: 0.4rem 0 0;
+  padding: 0;
+}
+.editor__fleet-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.15rem 0;
+}
+.editor__fleet-dot {
+  width: 0.6rem;
+  height: 0.6rem;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.dot-up {
+  background: #047857;
+}
+.dot-down {
+  background: #b91c1c;
+}
+.dot-starting,
+.dot-provisioning {
+  background: #b45309;
+  animation: editor-pulse 1s ease-in-out infinite;
+}
+.dot-unknown {
+  background: #9ca3af;
+}
+@keyframes editor-pulse {
+  50% {
+    opacity: 0.35;
+  }
+}
+.editor__fleet-name {
+  font-family: monospace;
+}
+.editor__fleet-current {
+  color: #047857;
+  font-weight: 600;
+}
+.editor__fleet-url {
+  color: #9ca3af;
+  font-family: monospace;
+  font-size: 0.75rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.editor__fleet-actions {
+  margin-left: auto;
+  font-size: 0.8rem;
+}
+.editor__fleet-actions button {
+  font-size: 0.75rem;
+  padding: 0.1rem 0.45rem;
 }
 .editor__composer {
   display: flex;

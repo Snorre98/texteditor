@@ -33,6 +33,19 @@ export type LiveStateResponse = {
     state: 'up' | 'down' | 'starting' | 'stopping' | 'provisioning' | 'unknown';
 };
 
+export type FleetState = {
+    control: 'up' | 'unreachable';
+    models: Array<FleetModel>;
+};
+
+export type FleetModel = {
+    name: string;
+    baseUrl: string;
+    capabilities?: Capabilities;
+    modeTags?: Array<string>;
+    liveState: 'up' | 'down' | 'starting' | 'stopping' | 'provisioning' | 'unknown';
+};
+
 export type ProvisionResponse = {
     provisionID: string;
 };
@@ -314,6 +327,22 @@ export type ListModelsResponses = {
 };
 
 export type ListModelsResponse = ListModelsResponses[keyof ListModelsResponses];
+
+export type GetFleetData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/fleet';
+};
+
+export type GetFleetResponses = {
+    /**
+     * fleet state
+     */
+    200: FleetState;
+};
+
+export type GetFleetResponse = GetFleetResponses[keyof GetFleetResponses];
 
 export type StartModelData = {
     body?: never;
