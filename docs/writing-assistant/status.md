@@ -99,7 +99,7 @@ format, never registered).
 | Target | Status |
 |---|---|
 | Standalone daemon (launchd, fixed port) | ✅ `tools/build.sh` + `tools/install-daemon.sh` + `deploy/*.plist` |
-| Tauri sidecar (spawn + SIGTERM/SIGKILL) | ✅ `client/tauri/src-tauri/src/sidecar.rs`, headlessly tested |
+| Tauri sidecar (spawn + SIGTERM/SIGKILL) | ✅ `client/tauri/src-tauri/src/sidecar.rs`, headlessly tested; bundled by `tools/build-tauri.sh` (ADR-0041) |
 | Tauri editor UI | ✅ | floating chat window (ADR-0041) over a full-viewport workspace; Tailwind v4 + shadcn-vue component system (ADR-0042) |
 | Web (self-host caveat) | ✅ capability adapter web branch; `ENGINE_BIND` opt-in |
 | mDNS LAN discovery | 🚧 deferred (ADR-0021 §1 — `baseUrl` on `/health` is the landed answer) |
@@ -137,7 +137,7 @@ point, contract-first, interface-first coupling.
 1. **Deferred chat affordances (ADR-0041 §5)** — "Stop generating" needs a cancel route in the contract + engine + three-way codegen; session titles need an engine field on `CreateSessionRequest`. Both recorded as future work; the chat window derives labels until titles land.
 2. **Commit the D1 seam** — texteditor (`cmd/toolhash`, `routergate/contract_mirror_test.go`, `contracts/needle-facade.md`, plan docs) and `macos-dev-config` (`cmd/serve-needle`, `tools/serve-needle.sh`, `tools/needle-finetune.sh`, `docs/contracts/needle-facade.md`, `models.json`, `daemon_test.go`).
 3. **D1 ML fine-tune** (deferred by design, trigger-gated) — fine-tune Needle 2 over the `cmd/toolhash` vocabulary → produce `needle2.cact` → `needle-finetune.sh` archives it + records `source.fingerprint` → flip one mode to `toolCalling:"router"` → `router-tools-stale` gate clears. Finalize the `.cact` stdout-format assumption (`needle-facade.md §2`).
-4. **Add CI** — no `.github/workflows` exists, yet the plans frame every acceptance criterion as a "CI gate". Add CI for `go test`, `bun test` + typecheck (tui/tauri), `cargo test`; optionally a Gherkin runner for the 9 `.feature` specs (currently prose-only).
+4. **Add CI** — no `.github/workflows` exists, yet the plans frame every acceptance criterion as a "CI gate". Add CI for `go test`, `bun test` + typecheck (tui/tauri), `cargo test`; optionally a Gherkin runner for the 9 `.feature` specs (currently prose-only). The build seam is ready: `tools/build-tauri.sh` (ADR-0041) is CI-shaped — no machine-specific paths, frozen lockfile, skippable gates.
 5. **Fix provision tooling** — `macos-dev-config/internal/fleetdaemon/provision.go` shells the deprecated `huggingface-cli`; switch to `hf download` (huggingface-hub ≥ 1.27).
 6. **`InferenceControl` surface** (architecture.md risk #9) — future sibling interface behind the Provider seam, not a planned phase.
 7. **Optional doc-sync** — `macos-dev-config/inference-readme.md` documents the needle2 archive but not the new `serve-needle` facade.

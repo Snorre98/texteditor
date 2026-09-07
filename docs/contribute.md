@@ -13,7 +13,9 @@ client/tui/        the OpenTUI + Solid client (dumb, generated from the spec)
 client/tauri/      the Tauri 2 + Vue 3 editor (dumb; generated Rust client +
                    engine spawned as a bundled sidecar, ADR-0021 §1)
 docs/writing-assistant/   architecture, ADRs, contracts, behavior specs
-tools/             build + install-daemon scripts
+tools/             build.sh (standalone daemon) · build-tauri.sh (desktop
+                   bundle: gates + sidecar + tauri build, ADR-0041) ·
+                   install-daemon.sh (launchd)
 deploy/            launchd agent template (standalone daemon)
 ```
 
@@ -88,10 +90,13 @@ runner, and no CI yet (see `docs/writing-assistant/status.md`).
   `--features tauri`). Plain `cargo test` (sidecar handshake, no feature) stays
   fast; `cargo check --features tauri` verifies the shell.
 - **Sidecar binary naming**: `src-tauri/binaries/texteditor-<target-triple>`
-  (e.g. `texteditor-aarch64-apple-darwin`); build it from `server/` (see the
-  README). **Rust lives on the external SSD** — if `cargo` isn't on PATH
-  (`tauri:dev`, `tauri:build`, and `cargo test` all shell out to it), export it
-  first:
+  (e.g. `texteditor-aarch64-apple-darwin`); built from `server/` source by
+  `tools/build-tauri.sh` (host triple from `rustc -vV`, always fresh —
+  ADR-0041). The one desktop-build entry point is `./tools/build-tauri.sh`
+  from the repo root; `--sidecar-only` is the dev refresh, `--skip-gates`
+  skips the test gates. **Rust lives on the external SSD** — if `cargo`
+  isn't on PATH (`tauri:dev`, `tauri:build`, and `cargo test` all shell out
+  to it), export it first:
 
   ```sh
   export RUSTUP_HOME=/Volumes/Ex-SSD/caches/rust CARGO_HOME=/Volumes/Ex-SSD/caches/cargo

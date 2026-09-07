@@ -50,13 +50,12 @@ bun run src/index.tsx /path/to/note.md
 ## Use the Tauri editor
 
 ```sh
-# 1. build the engine as the bundled sidecar (from the repo root)
-cd server && CGO_ENABLED=0 go build \
-  -o ../client/tauri/src-tauri/binaries/texteditor-aarch64-apple-darwin \
-  ./cmd/texteditor
+# 1. rebuild the engine sidecar (from the repo root) — ALWAYS after engine
+#    changes (see the stale-binary warning below)
+./tools/build-tauri.sh --sidecar-only
 
-# 2. deps
-cd ../client/tauri && bun install
+# 2. deps — first time only
+cd client/tauri && bun install
 
 # 2b — Rust lives on the external SSD; add it to PATH if `cargo` isn't found:
 export RUSTUP_HOME=/Volumes/Ex-SSD/caches/rust CARGO_HOME=/Volumes/Ex-SSD/caches/cargo
@@ -68,9 +67,11 @@ bun run tauri:dev
 
 > **Engine changes require a sidecar rebuild.** The Go engine is bundled as the
 > sidecar; editing engine code and restarting the app is **not** enough — the
-> running engine keeps the old binary until step 1 is re-run (and the installed
-> `.app` re-bundled with `bun run tauri:build`). This is a classic stale-binary
-> trap: the app UI looks fresh but the engine behind it is not.
+> running engine keeps the old binary until step 1 is re-run. This is a classic
+> stale-binary trap: the app UI looks fresh but the engine behind it is not.
+> `tools/build-tauri.sh` makes the trap impossible for shipped bundles (it
+> always rebuilds the sidecar first, ADR-0041); `--sidecar-only` is the
+> one-command dev refresh above.
 
 **What you can do:**
 
@@ -94,11 +95,14 @@ bun run tauri:dev
 ENGINE_PORT=9100 ./tools/install-daemon.sh
 ```
 
-**Tauri app** — the shipped desktop bundle, engine included:
+**Tauri app** — the shipped desktop bundle, engine included (ADR-0041):
 
 ```sh
-cd client/tauri && bun run tauri:build
+./tools/build-tauri.sh              # gates → fresh engine sidecar → deps → .app/.dmg
+./tools/build-tauri.sh --skip-gates # fast path, no test gates
 ```
+
+Bundles land in `client/tauri/src-tauri/target/release/bundle/`.
 
 **Web** — the same UI self-hosted: run the engine with `ENGINE_BIND=0.0.0.0`
 (LAN exposure is an explicit opt-in) and serve `client/tauri`'s build output;

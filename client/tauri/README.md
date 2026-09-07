@@ -144,12 +144,21 @@ UI also requires the engine's CORS allowlist to include the serving origin
 ## Build (Tauri shell, F8)
 
 ```sh
-# from client/tauri
-bun install
-bun run tauri build      # bundles bin/texteditor-<target-triple> as the sidecar
+# from the repo root — the one desktop-build entry point (ADR-0041)
+./tools/build-tauri.sh              # gates → fresh engine sidecar → deps → bundle
+./tools/build-tauri.sh --skip-gates # fast path, no test gates
+./tools/build-tauri.sh --sidecar-only   # dev refresh: rebuild the sidecar, print the tauri:dev hint
 ```
+
+The script runs the verification gates (`go test`, `bun test` + typecheck,
+`cargo test` — the last only when the control daemon on `:9300` is reachable,
+ADR-0025), then **always rebuilds the engine sidecar from `server/` source**
+(the stale-binary fix), installs deps with a frozen lockfile, and delegates to
+`bun run tauri:build` — whose `beforeBuildCommand` owns the frontend build.
+Bundles land in `src-tauri/target/release/bundle/`.
 
 The engine sidecar binary must be named `texteditor-<target-triple>` (e.g.
 `texteditor-aarch64-apple-darwin`) under `src-tauri/binaries/` (ADR-0021 §1
-"bundled, not installed system-wide"); `tools/build.sh` at the repo root builds
-`bin/texteditor` for the standalone daemon.
+"bundled, not installed system-wide"); the script derives the triple from
+`rustc -vV`. `tools/build.sh` at the repo root builds `bin/texteditor` for the
+standalone daemon (a separate deploy target, ADR-0014 §2).
