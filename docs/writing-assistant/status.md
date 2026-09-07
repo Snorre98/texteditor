@@ -143,6 +143,7 @@ point, contract-first, interface-first coupling.
 7. **Optional doc-sync** — `macos-dev-config/inference-readme.md` documents the needle2 archive but not the new `serve-needle` facade.
 8. **Deferred endpoints** — `GET /sessions/{id}/meter` (ADR-0017), bare `/files` read (ADR-0035); land only when a client needs them.
 9. **Future tools/modes** — `suggest_revision`, `cite`, `search_vault` tools and a `literature-reviewer` mode (architecture.md §64–§65), as data files per ADR-0019.
+10. **Move fleet orchestration into the engine** — `startModel`/`stopModel`/`startFleetPoll`/`stopFleetPoll` + the `FleetView` slice are duplicated in the TUI and Tauri stores. Future ADR: the engine becomes the source of truth serving exactly what selectors need (state feed / higher-level switch surface), shrinking clients to rendering. Recorded in ADR-0040 "Recorded note (2026-09-07)".
 
 ## Verification status
 

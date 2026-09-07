@@ -100,3 +100,28 @@ Forces:
 - **No retention (empty models on outage)** — rejected: the selector would
   vanish exactly when the user needs to see what *was* available; the labeled
   stale projection is more useful and still honest.
+
+## Recorded note (2026-09-07) — client-side fleet orchestration is duplicated; move it engine-side
+
+*Observed after landing this ADR, recorded for the next ADR rather than
+amending this decision:*
+
+Each client store now owns the same fleet orchestration logic — `startModel` /
+`stopModel` (busy flag, action-error capture with the provision hint, refresh
+after the verb), `startFleetPoll` / `stopFleetPoll` (interval, in-flight guard,
+visibility pause), and the `FleetView` slice (`control`/`models`/`error`/`busy`).
+The TUI (Solid) and the Tauri/web editor (Vue) carry nearly identical copies of
+this — client-side duplication of *engine-domain* behavior.
+
+The engine is the natural owner of this: it already owns the last-good
+projection and the lifecycle verbs. If the engine exposed exactly what the
+selectors need — e.g. a fleet state-change feed (state transitions pushed or
+observed engine-side) and/or a higher-level "switch" surface that folds in
+refresh semantics — the clients would shrink to rendering only, per the
+dumb-client principle (ADR-0013 §3) this ADR already relies on.
+
+**Future work (separate ADR):** move fleet orchestration into the engine and
+have clients consume it, eliminating the duplicated store logic in both
+clients. Not a defect in the current contract (`/fleet` + per-model verbs work
+as specified); the duplication is the symptom.
+
