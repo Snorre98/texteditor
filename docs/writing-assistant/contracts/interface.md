@@ -552,7 +552,7 @@ type WordEdit struct { BlockID string; Insertions, Deletions []string }
 
 type DocumentStore interface {
     Open(path string) (documentID string, err error)
-    SaveTree(documentID string, tree []BlockWrite) (Revision, error) // manual autosave (ADR-0038)
+    SaveTree(documentID string, tree []BlockWrite, writeThrough bool) (Revision, error) // manual autosave (ADR-0038); writeThrough mirrors to the opened file (ADR-0039)
     Blocks(documentID string) ([]Block, error)
     ApplyEdit(ctx context.Context, documentID string, edit BlockEdit) (Revision, error) // stages a candidate
     Commit(documentID string, msg string) error                                          // accept → one commit
@@ -586,6 +586,9 @@ block absent from the tree is dropped; a changed `Kind`/`ParentID` retypes/moves
 The engine reconciles, normalizes on write and formats on commit, and commits an
 `autosave @ <ts>` snapshot iff the tree changed (otherwise it returns the current
 HEAD with no new commit). A manual save of a block drops its open candidates.
+When `writeThrough` is true (explicit Save / Cmd+S, not the periodic autosave),
+the canonical markdown is also mirrored back to the opened file path (ADR-0039);
+`Commit` always mirrors when a candidate was applied.
 
 ## 9b. Workspace (Go, leaf)
 

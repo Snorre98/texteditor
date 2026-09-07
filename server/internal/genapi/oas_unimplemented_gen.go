@@ -149,7 +149,8 @@ func (UnimplementedHandler) ProvisionModel(ctx context.Context, params Provision
 // the current tree but absent from the request is deleted; a changed `kind`/`parentId` is
 // retyped/moved. The engine reconciles, normalizes on write and formats on commit, and commits
 // `autosave @ <ts>` iff anything changed (a no-op returns the current HEAD). A manual save of a block
-// drops its open candidates.
+// drops its open candidates. When `writeThrough` is true (explicit Save / Cmd+S, not the periodic
+// autosave), the engine also mirrors the canonical markdown back to the opened file path (ADR-0039).
 //
 // PUT /documents/{id}/tree
 func (UnimplementedHandler) SaveDocument(ctx context.Context, req *SaveTreeRequest, params SaveDocumentParams) (r *Revision, _ error) {

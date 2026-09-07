@@ -64,11 +64,11 @@ function replaceDocument(md: string) {
   view?.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: md } });
 }
 
-async function doSave() {
+async function doSave(writeThrough: boolean) {
   if (!props.store.state.document || !view) return;
   try {
     const tree = markdownToBlockWrites(view.state.doc.toString(), props.store.state.blocks);
-    await props.store.saveTree(tree);
+    await props.store.saveTree(tree, { writeThrough });
     dirty.value = false;
     savedAt.value = new Date();
   } catch (e) {
@@ -156,8 +156,9 @@ onMounted(() => {
       });
     })();
   } else {
-    // Web target: best-effort flush when the tab is being hidden/closed.
-    window.addEventListener("pagehide", () => void doSave());
+    // Web target: best-effort flush when the tab is being hidden/closed. Closing
+    // is an explicit save, so it writes through to the opened file (ADR-0039).
+    window.addEventListener("pagehide", () => void doSave(true));
   }
 });
 

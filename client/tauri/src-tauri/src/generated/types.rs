@@ -115,6 +115,47 @@ pub struct Mention {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SaveTreeRequest {
     pub blocks: Vec<BlockWrite>,
+    /**When true (explicit Save / Cmd+S, not the periodic autosave), the engine also mirrors the canonical markdown back to the opened file path (ADR-0039). Default false — the autosave only snapshots the engine worktree + git.
+*/
+    #[serde(rename = "writeThrough", skip_serializing_if = "Option::is_none")]
+    pub write_through: Option<bool>,
+}
+impl SaveTreeRequest {
+    /// Construct this request with every required wire field.
+    pub fn new(blocks: Vec<BlockWrite>) -> Self {
+        Self {
+            blocks,
+            write_through: None,
+        }
+    }
+    /// Start a dependency-free builder with every required wire field.
+    pub fn builder(blocks: Vec<BlockWrite>) -> SaveTreeRequestBuilder {
+        SaveTreeRequestBuilder::new(blocks)
+    }
+}
+/// Dependency-free builder for [`#struct_name`].
+#[derive(Debug, Clone)]
+#[must_use]
+pub struct SaveTreeRequestBuilder {
+    value: SaveTreeRequest,
+}
+impl SaveTreeRequestBuilder {
+    /// Start a builder with every required wire field.
+    pub fn new(blocks: Vec<BlockWrite>) -> Self {
+        Self {
+            value: SaveTreeRequest::new(blocks),
+        }
+    }
+    #[doc = concat!("Set the optional `", "writeThrough", "` request field.")]
+    #[must_use]
+    pub fn write_through(mut self, write_through: bool) -> Self {
+        self.value.write_through = Some(write_through);
+        self
+    }
+    /// Finish building the request model.
+    pub fn build(self) -> SaveTreeRequest {
+        self.value
+    }
 }
 ///The retrieve/read_note structured result surfacing retrieval to the UI.
 #[derive(Debug, Clone, Deserialize, Serialize)]

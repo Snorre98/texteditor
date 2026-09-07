@@ -27,10 +27,10 @@ function fakeClock() {
 describe("createAutosave (manual-edit silence cadence, ADR-0020 §1)", () => {
   test("keystrokes reset the timer; only silence triggers a save", async () => {
     const clock = fakeClock();
-    const saves: number[] = [];
+    const saves: boolean[] = [];
     const a = createAutosave({
       intervalMs: 10_000,
-      onSave: () => saves.push(saves.length),
+      onSave: (writeThrough) => saves.push(writeThrough),
       setTimeout: clock.setTimeout,
       clearTimeout: clock.clearTimeout,
     });
@@ -42,32 +42,32 @@ describe("createAutosave (manual-edit silence cadence, ADR-0020 §1)", () => {
     expect(saves).toEqual([]); // not yet saved
 
     await clock.fireAll();
-    expect(saves).toEqual([0]);
+    expect(saves).toEqual([false]); // the periodic autosave is engine-internal (ADR-0039)
     expect(clock.pending()).toBe(0);
   });
 
-  test("flush saves immediately and cancels the pending timer", async () => {
+  test("flush saves immediately, writes through, and cancels the pending timer", async () => {
     const clock = fakeClock();
-    const saves: number[] = [];
+    const saves: boolean[] = [];
     const a = createAutosave({
       intervalMs: 10_000,
-      onSave: () => saves.push(saves.length),
+      onSave: (writeThrough) => saves.push(writeThrough),
       setTimeout: clock.setTimeout,
       clearTimeout: clock.clearTimeout,
     });
 
     a.noteEdit();
     await a.flush();
-    expect(saves).toEqual([0]);
+    expect(saves).toEqual([true]); // explicit Save / close-flush mirrors to the file
     expect(clock.pending()).toBe(0);
   });
 
   test("dispose cancels without saving", () => {
     const clock = fakeClock();
-    const saves: number[] = [];
+    const saves: boolean[] = [];
     const a = createAutosave({
       intervalMs: 10_000,
-      onSave: () => saves.push(saves.length),
+      onSave: (writeThrough) => saves.push(writeThrough),
       setTimeout: clock.setTimeout,
       clearTimeout: clock.clearTimeout,
     });

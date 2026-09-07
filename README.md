@@ -74,6 +74,10 @@ bun run tauri:dev
 - Review AI edits **side-by-side** (`@codemirror/merge`) and accept.
 - Edit by hand — keystrokes autosave as snapshots (every ~10 s), kept separate
   from AI commits.
+- **Save writes through to the opened file** — the explicit Save button / Cmd+S
+  and an accepted AI edit mirror the result back to the file you opened (so
+  Obsidian and other editors see it); the periodic autosave stays engine-internal
+  (ADR-0039).
 
 ## Deploy
 

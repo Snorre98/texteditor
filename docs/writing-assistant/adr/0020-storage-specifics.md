@@ -3,6 +3,8 @@
 Status: Accepted
 
 Supersedes: ADR-0004 (block-ID scheme, SQLite ownership, chunking ownership).
+Amended by: ADR-0039 (§2's "worktree is what editors read" is a write-through
+mirror to the opened path, not the worktree itself).
 
 ## Context
 

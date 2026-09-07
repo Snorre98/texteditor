@@ -3303,10 +3303,17 @@ func (s *SaveTreeRequest) encodeFields(e *jx.Encoder) {
 		}
 		e.ArrEnd()
 	}
+	{
+		if s.WriteThrough.Set {
+			e.FieldStart("writeThrough")
+			s.WriteThrough.Encode(e)
+		}
+	}
 }
 
-var jsonFieldsNameOfSaveTreeRequest = [1]string{
+var jsonFieldsNameOfSaveTreeRequest = [2]string{
 	0: "blocks",
+	1: "writeThrough",
 }
 
 // Decode decodes SaveTreeRequest from json.
@@ -3335,6 +3342,16 @@ func (s *SaveTreeRequest) Decode(d *jx.Decoder) error {
 				return nil
 			}(); err != nil {
 				return errors.Wrap(err, "decode field \"blocks\"")
+			}
+		case "writeThrough":
+			if err := func() error {
+				s.WriteThrough.Reset()
+				if err := s.WriteThrough.Decode(d); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"writeThrough\"")
 			}
 		default:
 			return d.Skip()

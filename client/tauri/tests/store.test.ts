@@ -241,7 +241,19 @@ describe("createAppStore", () => {
       { id: "b1", kind: "paragraph", text: "kept" },
     ]);
 
-    expect(calls).toContain("save:2");
+    // The autosave path omits writeThrough (engine-internal snapshot).
+    expect(calls).toContain("save:2:false");
+  });
+
+  test("saveTree with writeThrough mirrors to the opened file (ADR-0039)", async () => {
+    const { api, calls } = stubApi();
+    const store = createAppStore({ api, baseUrl: "http://x" });
+    await store.openDocument("/notes/thesis.md");
+    await store.saveTree([{ id: "b1", kind: "paragraph", text: "edited" }], {
+      writeThrough: true,
+    });
+
+    expect(calls).toContain("save:1:true");
   });
 
   // serving-control.feature — "The TUI switches models by starting and

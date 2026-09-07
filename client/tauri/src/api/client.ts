@@ -128,7 +128,7 @@ export const api = {
       path: { id },
       responseValidator: validator(zCommitDocumentResponse),
     }),
-  saveDocument: (id: string, body: { blocks: BlockWrite[] }) =>
+  saveDocument: (id: string, body: { blocks: BlockWrite[]; writeThrough?: boolean }) =>
     saveDocument({
       client,
       path: { id },

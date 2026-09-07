@@ -163,7 +163,7 @@ export interface AppStore {
   /** Fetch the latest staged candidate text for a block (merge preview). */
   getCandidateText: (blockId: string) => Promise<string | null>;
   /** Manual autosave: send the whole block tree (ADR-0038). */
-  saveTree: (tree: BlockWrite[]) => Promise<void>;
+  saveTree: (tree: BlockWrite[], opts?: { writeThrough?: boolean }) => Promise<void>;
   /** serving-control.feature "TUI switches models": start new → up → stop old. */
   switchModel: (from: string, to: string) => Promise<void>;
   refreshBlocks: () => Promise<void>;
@@ -442,9 +442,16 @@ export function createAppStore(deps: StoreDeps): AppStore {
 
   // saveTree sends the manual-edit whole-tree snapshot (ADR-0038). The engine
   // reconciles, mints IDs for new blocks, formats, and commits iff changed.
-  async function saveTree(tree: BlockWrite[]) {
+  // writeThrough (explicit Save / Cmd+S) additionally mirrors the canonical
+  // markdown back to the opened file (ADR-0039); the periodic autosave omits it.
+  async function saveTree(tree: BlockWrite[], opts?: { writeThrough?: boolean }) {
     if (!state.document) throw new Error("no open document");
-    await call<Revision>(() => deps.api.saveDocument(state.document!.id, { blocks: tree }));
+    await call<Revision>(() =>
+      deps.api.saveDocument(state.document!.id, {
+        blocks: tree,
+        ...(opts?.writeThrough ? { writeThrough: true } : {}),
+      }),
+    );
     await refreshBlocks();
   }
 

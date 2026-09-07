@@ -366,6 +366,7 @@ Full records in [adr/](adr/). Index:
 | 0036 | File mentions: metered, turn-scoped context attachments | Accepted |
 | 0037 | API server CORS policy: explicit origin allowlist for the webview/web targets | Accepted |
 | 0038 | Manual-edit wire route: `PUT /documents/{id}/tree` autosave path | Accepted |
+| 0039 | Manual saves and accepted edits write through to the opened file | Accepted |
 
 ## 10. Quality Requirements
 

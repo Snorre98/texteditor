@@ -1799,6 +1799,10 @@ func (s *SamplingParams) SetMaxTokens(val OptInt) {
 // Ref: #/components/schemas/SaveTreeRequest
 type SaveTreeRequest struct {
 	Blocks []BlockWrite `json:"blocks"`
+	// When true (explicit Save / Cmd+S, not the periodic autosave), the engine also mirrors the canonical
+	// markdown back to the opened file path (ADR-0039). Default false — the autosave only snapshots the
+	// engine worktree + git.
+	WriteThrough OptBool `json:"writeThrough"`
 }
 
 // GetBlocks returns the value of Blocks.
@@ -1806,9 +1810,19 @@ func (s *SaveTreeRequest) GetBlocks() []BlockWrite {
 	return s.Blocks
 }
 
+// GetWriteThrough returns the value of WriteThrough.
+func (s *SaveTreeRequest) GetWriteThrough() OptBool {
+	return s.WriteThrough
+}
+
 // SetBlocks sets the value of Blocks.
 func (s *SaveTreeRequest) SetBlocks(val []BlockWrite) {
 	s.Blocks = val
+}
+
+// SetWriteThrough sets the value of WriteThrough.
+func (s *SaveTreeRequest) SetWriteThrough(val OptBool) {
+	s.WriteThrough = val
 }
 
 // Ref: #/components/schemas/Selection

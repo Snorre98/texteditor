@@ -9,8 +9,12 @@
 export interface AutosaveOptions {
   /** Silence interval after which an edit is autosaved. */
   intervalMs: number;
-  /** Send the current whole-tree snapshot (the store's saveTree). */
-  onSave: () => void | Promise<void>;
+  /**
+   * Send the current whole-tree snapshot (the store's saveTree). `writeThrough`
+   * distinguishes an explicit save (true — mirror to the opened file, ADR-0039)
+   * from the periodic autosave (false — engine-internal snapshot only).
+   */
+  onSave: (writeThrough: boolean) => void | Promise<void>;
   setTimeout?: (fn: () => void, ms: number) => unknown;
   clearTimeout?: (handle: unknown) => void;
 }
@@ -71,12 +75,12 @@ export function createAutosave(opts: AutosaveOptions): Autosave {
       cancel();
       timer = setT(() => {
         timer = null;
-        void opts.onSave();
+        void opts.onSave(false);
       }, intervalMs);
     },
     async flush() {
       cancel();
-      await opts.onSave();
+      await opts.onSave(true);
     },
     dispose() {
       cancel();

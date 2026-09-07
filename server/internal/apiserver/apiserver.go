@@ -219,7 +219,8 @@ func (h *handler) CommitDocument(ctx context.Context, p genapi.CommitDocumentPar
 
 // SaveDocument backs PUT /documents/{id}/tree (ADR-0038): the manual-edit whole-
 // tree snapshot. The engine reconciles, mints IDs for new blocks, formats, and
-// commits `autosave @ <ts>` iff changed.
+// commits `autosave @ <ts>` iff changed; writeThrough mirrors the canonical
+// markdown back to the opened file (ADR-0039).
 func (h *handler) SaveDocument(ctx context.Context, req *genapi.SaveTreeRequest, p genapi.SaveDocumentParams) (*genapi.Revision, error) {
 	tree := make([]dto.BlockWrite, 0, len(req.Blocks))
 	for _, b := range req.Blocks {
@@ -235,7 +236,11 @@ func (h *handler) SaveDocument(ctx context.Context, req *genapi.SaveTreeRequest,
 		}
 		tree = append(tree, bw)
 	}
-	rev, err := h.d.Doc.SaveTree(p.ID, tree)
+	writeThrough := false
+	if v, ok := req.WriteThrough.Get(); ok {
+		writeThrough = v
+	}
+	rev, err := h.d.Doc.SaveTree(p.ID, tree, writeThrough)
 	if err != nil {
 		return nil, err
 	}

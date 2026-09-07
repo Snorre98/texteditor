@@ -57,7 +57,7 @@ func (stubTools) AllowlistFor(dto.Mode) []dto.ToolDef { return nil }
 type stubDoc struct{}
 
 func (stubDoc) Open(string) (string, error) { return "d1", nil }
-func (stubDoc) SaveTree(string, []dto.BlockWrite) (dto.Revision, error) {
+func (stubDoc) SaveTree(string, []dto.BlockWrite, bool) (dto.Revision, error) {
 	return dto.Revision{ID: "r1", Message: "autosave @ 1", Timestamp: 1}, nil
 }
 func (stubDoc) Blocks(string) ([]dto.Block, error) {

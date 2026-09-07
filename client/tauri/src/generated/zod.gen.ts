@@ -135,7 +135,8 @@ export const zSaveTreeRequest = z.object({
             'table'
         ]),
         text: z.string()
-    }))
+    })),
+    writeThrough: z.boolean().optional()
 });
 
 export const zBlockWrite = z.object({

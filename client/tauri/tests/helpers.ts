@@ -73,8 +73,8 @@ export function stubApi(opts: StubApiOptions = {}) {
       calls.push("commit");
       return ok({ id: "r2", message: "accepted" } satisfies Revision);
     },
-    saveDocument: async (_id: string, body: { blocks: unknown[] }) => {
-      calls.push(`save:${body.blocks.length}`);
+    saveDocument: async (_id: string, body: { blocks: unknown[]; writeThrough?: boolean }) => {
+      calls.push(`save:${body.blocks.length}:${String(body.writeThrough ?? false)}`);
       return ok({ id: "r3", message: "autosave @ 1" } satisfies Revision);
     },
     getHistory: async () => ok([] satisfies Revision[]),

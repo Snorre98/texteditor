@@ -27,7 +27,7 @@ import (
 // working tree (ADR-0020 §2).
 type DocumentStore interface {
 	Open(path string) (documentID string, err error)
-	SaveTree(documentID string, tree []dto.BlockWrite) (dto.Revision, error)
+	SaveTree(documentID string, tree []dto.BlockWrite, writeThrough bool) (dto.Revision, error)
 	Blocks(documentID string) ([]dto.Block, error)
 	ApplyEdit(ctx context.Context, documentID string, edit dto.BlockEdit) (dto.Revision, error)
 	Commit(documentID string, msg string) error
@@ -209,8 +209,10 @@ func (s *store) insertBlock(docID, id string, parent *string, pKind string, kind
 // normalizes on write and formats on commit (ADR-0029 §6), drops every block's
 // open candidates (human keystrokes supersede AI proposals), and commits an
 // `autosave @ <ts>` snapshot iff anything changed — an unchanged tree returns the
-// current HEAD with no new commit.
-func (s *store) SaveTree(documentID string, tree []dto.BlockWrite) (dto.Revision, error) {
+// current HEAD with no new commit. When writeThrough is true (explicit Save /
+// Cmd+S, not the periodic autosave), the canonical markdown is also mirrored back
+// to the opened file path (ADR-0039).
+func (s *store) SaveTree(documentID string, tree []dto.BlockWrite, writeThrough bool) (dto.Revision, error) {
 	s.lockFor(documentID).Lock()
 	defer s.lockFor(documentID).Unlock()
 
@@ -295,6 +297,15 @@ func (s *store) SaveTree(documentID string, tree []dto.BlockWrite) (dto.Revision
 	}
 	if !changed {
 		return s.currentRevision(documentID)
+	}
+
+	// Write-through (ADR-0039 §3): mirror to the opened file *before* the
+	// worktree write / DB rewrite / git commit. A failure aborts the save —
+	// nothing is committed, the tree stays dirty, and a retry re-attempts.
+	if writeThrough {
+		if err := s.writeBack(documentID, canonical); err != nil {
+			return dto.Revision{}, err
+		}
 	}
 
 	// Drop open candidates (human keystrokes supersede the AI proposal), rewrite
@@ -522,6 +533,14 @@ func (s *store) Commit(documentID string, msg string) error {
 	if err != nil {
 		return err
 	}
+	// Write-through (ADR-0039): an accepted AI edit mirrors to the opened file,
+	// before the worktree write + commit. Skipped when nothing was applied — the
+	// mirror helper also no-ops when the file already holds the canonical bytes.
+	if len(applied) > 0 {
+		if err := s.writeBack(documentID, canonical); err != nil {
+			return err
+		}
+	}
 	if err := h.writeFile(s.workfileName, []byte(canonical)); err != nil {
 		return err
 	}
@@ -541,6 +560,52 @@ func (s *store) Commit(documentID string, msg string) error {
 		return err
 	}
 	return nil
+}
+
+// writeBack mirrors canonical markdown to the document's opened file path
+// (ADR-0039): the file the user actually reads (Obsidian, the vault) is a
+// write-through mirror of the engine's canonical bytes, written atomically and
+// only when it differs. It must be called under the document lock, before the
+// worktree write + commit, so a write-back failure aborts the whole save.
+func (s *store) writeBack(documentID string, canonical string) error {
+	var path string
+	if err := s.db.QueryRow(`SELECT path FROM documents WHERE id = ?`, documentID).Scan(&path); err != nil {
+		return err
+	}
+	// No-op when the file already holds the canonical bytes (no-op saves and
+	// empty accepts never rewrite the disk file, ADR-0039 §4).
+	if b, err := os.ReadFile(path); err == nil && string(b) == canonical {
+		return nil
+	}
+	return atomicWriteFile(path, []byte(canonical))
+}
+
+// atomicWriteFile writes data to path via a temp file + rename in the same
+// directory, preserving the existing file's mode (0o644 when the file is new).
+// A partial or interleaved write can never be observed at path.
+func atomicWriteFile(path string, data []byte) error {
+	mode := os.FileMode(0o644)
+	if info, err := os.Stat(path); err == nil {
+		mode = info.Mode().Perm()
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".texteditor-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if err := tmp.Chmod(mode); err != nil {
+		tmp.Close()
+		return err
+	}
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, path)
 }
 
 // Diff returns word-level insertions/deletions per block between two revisions

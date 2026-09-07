@@ -111,6 +111,11 @@ export type BlockEdit = {
  */
 export type SaveTreeRequest = {
     blocks: Array<BlockWrite>;
+    /**
+     * When true (explicit Save / Cmd+S, not the periodic autosave), the engine also mirrors the canonical markdown back to the opened file path (ADR-0039). Default false — the autosave only snapshots the engine worktree + git.
+     *
+     */
+    writeThrough?: boolean;
 };
 
 /**

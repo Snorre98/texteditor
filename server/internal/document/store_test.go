@@ -36,6 +36,12 @@ func newTestStore(t *testing.T) Interface {
 
 func openDoc(t *testing.T, s Interface, content string) string {
 	t.Helper()
+	id, _ := openDocPath(t, s, content)
+	return id
+}
+
+func openDocPath(t *testing.T, s Interface, content string) (string, string) {
+	t.Helper()
 	path := filepath.Join(t.TempDir(), "doc.md")
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
@@ -44,7 +50,7 @@ func openDoc(t *testing.T, s Interface, content string) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return id
+	return id, path
 }
 
 func TestOpenBlocksRoundTrip(t *testing.T) {
@@ -201,7 +207,7 @@ func TestSaveTreeAutosaves(t *testing.T) {
 	blocks, _ := s.Blocks(id)
 	rev, err := s.SaveTree(id, []dto.BlockWrite{
 		{ID: &blocks[0].ID, Kind: dto.BlockKindParagraph, Text: "a changed paragraph"},
-	})
+	}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -230,7 +236,7 @@ func TestSaveTreeNoopWhenUnchanged(t *testing.T) {
 	blocks, _ := s.Blocks(id)
 	if _, err := s.SaveTree(id, []dto.BlockWrite{
 		{ID: &blocks[0].ID, Kind: dto.BlockKindParagraph, Text: "a paragraph"},
-	}); err != nil {
+	}, true); err != nil {
 		t.Fatal(err)
 	}
 	// An unchanged tree is a no-op: no new commit.
@@ -254,7 +260,7 @@ func TestSaveTreeMintsAndDrops(t *testing.T) {
 		{Kind: dto.BlockKindParagraph, Text: "fresh block"},     // new (no id)
 		{ID: &blocks[0].ID, Kind: dto.BlockKindParagraph, Text: "block one"}, // kept
 	}
-	if _, err := s.SaveTree(id, tree); err != nil {
+	if _, err := s.SaveTree(id, tree, false); err != nil {
 		t.Fatal(err)
 	}
 	after, _ := s.Blocks(id)
@@ -287,7 +293,7 @@ func TestSaveTreeDropsOpenCandidates(t *testing.T) {
 	// A manual save of the block drops its open candidates (ADR-0038 §5).
 	if _, err := s.SaveTree(id, []dto.BlockWrite{
 		{ID: &blocks[0].ID, Kind: dto.BlockKindParagraph, Text: "human typed"},
-	}); err != nil {
+	}, false); err != nil {
 		t.Fatal(err)
 	}
 	if cands, _ := s.Candidates(id, blocks[0].ID); len(cands) != 0 {
@@ -306,4 +312,119 @@ func mustHead(t *testing.T, s Interface, id string) string {
 		t.Fatal("no commits")
 	}
 	return hist[0].ID
+}
+
+func readFile(t *testing.T, path string) string {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
+func TestSaveTreeWriteThrough(t *testing.T) {
+	s := newTestStore(t)
+	id, path := openDocPath(t, s, "a paragraph")
+
+	blocks, _ := s.Blocks(id)
+	if _, err := s.SaveTree(id, []dto.BlockWrite{
+		{ID: &blocks[0].ID, Kind: dto.BlockKindParagraph, Text: "a changed paragraph"},
+	}, true); err != nil {
+		t.Fatal(err)
+	}
+	// Explicit save mirrors the canonical markdown back to the opened file.
+	if got := readFile(t, path); got != "a changed paragraph" {
+		t.Fatalf("file after write-through = %q", got)
+	}
+}
+
+func TestSaveTreeAutosaveDoesNotWriteBack(t *testing.T) {
+	s := newTestStore(t)
+	id, path := openDocPath(t, s, "a paragraph")
+
+	blocks, _ := s.Blocks(id)
+	if _, err := s.SaveTree(id, []dto.BlockWrite{
+		{ID: &blocks[0].ID, Kind: dto.BlockKindParagraph, Text: "autosaved change"},
+	}, false); err != nil {
+		t.Fatal(err)
+	}
+	// The periodic autosave snapshots the engine only; the disk file is untouched.
+	if got := readFile(t, path); got != "a paragraph" {
+		t.Fatalf("file after autosave = %q, want untouched", got)
+	}
+}
+
+func TestSaveTreeNoopDoesNotWriteBack(t *testing.T) {
+	s := newTestStore(t)
+	id, path := openDocPath(t, s, "a paragraph")
+
+	blocks, _ := s.Blocks(id)
+	// Unchanged tree + writeThrough: no commit, no file write (ADR-0039 §4).
+	if _, err := s.SaveTree(id, []dto.BlockWrite{
+		{ID: &blocks[0].ID, Kind: dto.BlockKindParagraph, Text: "a paragraph"},
+	}, true); err != nil {
+		t.Fatal(err)
+	}
+	hist, _ := s.History(id)
+	if len(hist) != 0 {
+		t.Fatalf("history = %d, want 0 (no-op save must not commit)", len(hist))
+	}
+	if got := readFile(t, path); got != "a paragraph" {
+		t.Fatalf("file after no-op save = %q", got)
+	}
+}
+
+func TestCommitWritesThrough(t *testing.T) {
+	s := newTestStore(t)
+	id, path := openDocPath(t, s, "before edit")
+
+	blocks, _ := s.Blocks(id)
+	if _, err := s.ApplyEdit(context.Background(), id, dto.BlockEdit{BlockID: blocks[0].ID, Text: "after edit"}); err != nil {
+		t.Fatal(err)
+	}
+	// Accepting a candidate is a commit: the opened file must change too.
+	if err := s.Commit(id, "accepted"); err != nil {
+		t.Fatal(err)
+	}
+	if got := readFile(t, path); got != "after edit" {
+		t.Fatalf("file after commit = %q", got)
+	}
+}
+
+func TestCommitWithoutCandidatesDoesNotWriteBack(t *testing.T) {
+	s := newTestStore(t)
+	id, path := openDocPath(t, s, "no candidates")
+
+	if err := s.Commit(id, "empty accept"); err != nil {
+		t.Fatal(err)
+	}
+	if got := readFile(t, path); got != "no candidates" {
+		t.Fatalf("file after empty accept = %q", got)
+	}
+}
+
+func TestWriteBackPreservesFileMode(t *testing.T) {
+	s := newTestStore(t)
+	path := filepath.Join(t.TempDir(), "doc.md")
+	if err := os.WriteFile(path, []byte("a paragraph"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	id, err := s.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	blocks, _ := s.Blocks(id)
+	if _, err := s.SaveTree(id, []dto.BlockWrite{
+		{ID: &blocks[0].ID, Kind: dto.BlockKindParagraph, Text: "changed"},
+	}, true); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Fatalf("file mode = %o, want 600", perm)
+	}
 }

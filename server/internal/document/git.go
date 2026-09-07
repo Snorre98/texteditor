@@ -40,8 +40,10 @@ func initHistory(gitDir, worktreeDir string) (*historyStore, error) {
 	return &historyStore{repo: repo, worktreeDir: worktreeDir}, nil
 }
 
-// writeFile writes canonical markdown into the working tree. It is the single
-// path by which document bytes reach disk (canonical-content invariant, ADR-0029).
+// writeFile writes canonical markdown into the engine's working tree. It is the
+// single path by which the engine worktree bytes reach disk (canonical-content
+// invariant, ADR-0029); ADR-0039 adds a separate write-through mirror to the
+// opened file path, via store.writeBack/atomicWriteFile.
 func (h *historyStore) writeFile(name string, data []byte) error {
 	path := filepath.Join(h.worktreeDir, filepath.FromSlash(name))
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
