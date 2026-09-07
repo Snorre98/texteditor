@@ -93,6 +93,13 @@ type Model struct {
     BaseURL      string       // http://host:port/v1
     Capabilities Capabilities
     ModeTags     []string
+    // ModelID is the id the serving endpoint accepts in the OpenAI `model`
+    // field when it differs from Name (e.g. the HF repo id an mlx runner
+    // serves); the daemon projects it as `modelId` in `list`. Empty means
+    // Name is the wire id. Internal only — never exposed in the client-facing
+    // API (ADR-0016 §1). The loop sends it as the provider request's `model`
+    // (ADR-0011), so name-validating runners accept the request.
+    ModelID string
 }
 
 type LiveState string

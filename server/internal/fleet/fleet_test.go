@@ -38,6 +38,7 @@ func newFakeDaemon(t *testing.T) *fakeDaemon {
 		Name: "gemma4-26b", Host: "127.0.0.1", Port: 8002,
 		Capabilities: dto.Capabilities{ContextLength: 262144},
 		ModeTags:     []string{"editor"},
+		ModelID:      "mlx-community/gemma-4-26B-A4B-it-OptiQ-4bit",
 	})
 	f.add(daemonEntry{
 		Name: "llama3.1-8b", Host: "127.0.0.1", Port: 8003,
@@ -168,6 +169,9 @@ func TestResolveDirect(t *testing.T) {
 	if res.Model.BaseURL != "http://127.0.0.1:8001/v1" {
 		t.Fatalf("baseURL = %q", res.Model.BaseURL)
 	}
+	if res.Model.ModelID != "gemma4-12b" {
+		t.Fatalf("modelId = %q, want Name fallback when the daemon omits it", res.Model.ModelID)
+	}
 }
 
 func TestResolveMergesDefaults(t *testing.T) {
@@ -196,6 +200,10 @@ func TestResolveFallbackLadder(t *testing.T) {
 	}
 	if !res.Degraded || res.UsedName != "gemma4-26b" {
 		t.Fatalf("resolution = %+v, want degraded fallback to gemma4-26b", res)
+	}
+	// The wire id follows the model that actually serves (the fallback).
+	if res.Model.ModelID != "mlx-community/gemma-4-26B-A4B-it-OptiQ-4bit" {
+		t.Fatalf("modelId = %q, want the fallback's repo id", res.Model.ModelID)
 	}
 }
 
@@ -255,6 +263,17 @@ func TestListModels(t *testing.T) {
 	}
 	if len(models) != 3 {
 		t.Fatalf("models = %d, want 3", len(models))
+	}
+	byName := map[string]dto.Model{}
+	for _, m := range models {
+		byName[m.Name] = m
+	}
+	// modelId rides through the projection; entries without one fall back to Name.
+	if byName["gemma4-26b"].ModelID != "mlx-community/gemma-4-26B-A4B-it-OptiQ-4bit" {
+		t.Fatalf("gemma4-26b modelId = %q, want the repo id", byName["gemma4-26b"].ModelID)
+	}
+	if byName["gemma4-12b"].ModelID != "gemma4-12b" {
+		t.Fatalf("gemma4-12b modelId = %q, want Name fallback", byName["gemma4-12b"].ModelID)
 	}
 }
 

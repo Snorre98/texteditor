@@ -26,6 +26,30 @@ export interface Autosave {
 
 export const DEFAULT_AUTOSAVE_INTERVAL_MS = 10_000;
 
+export interface ShortcutLike {
+  metaKey: boolean;
+  ctrlKey: boolean;
+  altKey?: boolean;
+  key: string;
+}
+
+// Whether a keyboard event is the save shortcut (Cmd/Ctrl+S, plain s).
+export function isSaveShortcut(e: ShortcutLike): boolean {
+  return (e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "s" && !e.altKey;
+}
+
+// The toolbar's save-state label: "unsaved changes", "saved at HH:MM:SS", or "".
+export function saveStatusLabel(
+  dirty: boolean,
+  savedAt: Date | null,
+): string {
+  if (dirty) return "unsaved changes";
+  if (savedAt) {
+    return `saved at ${savedAt.toLocaleTimeString()}`;
+  }
+  return "";
+}
+
 export function createAutosave(opts: AutosaveOptions): Autosave {
   const intervalMs = opts.intervalMs;
   const setT: (fn: () => void, ms: number) => unknown =

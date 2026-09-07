@@ -57,6 +57,37 @@ export interface ConnectionState {
   error: string | null;
 }
 
+/** A chronological, phase-level record of a turn's significant events. */
+export type TurnStep =
+  | { kind: "retrieval"; at: number; chunks: number }
+  | { kind: "edit"; at: number; blockId: string }
+  | { kind: "answer"; at: number }
+  | { kind: "done"; at: number; model?: string; degraded?: boolean }
+  | { kind: "error"; at: number; code?: string }
+  | { kind: "backpressure"; at: number };
+
+/** The human label for one turn step (the chat's "what happened" transcript). */
+export function stepLabel(step: TurnStep): string {
+  switch (step.kind) {
+    case "retrieval":
+      return `retrieved ${step.chunks} chunk${step.chunks === 1 ? "" : "s"}`;
+    case "edit":
+      return "proposed an edit";
+    case "answer":
+      return "answered";
+    case "done":
+      return step.degraded
+        ? `complete (degraded${step.model ? `, ${step.model}` : ""})`
+        : step.model
+          ? `complete — ${step.model}`
+          : "complete";
+    case "error":
+      return `failed${step.code ? ` (${step.code})` : ""}`;
+    case "backpressure":
+      return "client buffer overflow — some events dropped";
+  }
+}
+
 export interface TurnState {
   active: boolean;
   /** The answering-phase token stream (state-machine §1). */
@@ -77,6 +108,8 @@ export interface TurnState {
   error: ErrorEvent | null;
   /** A slow-client buffer overflow was labeled by the engine. */
   backpressure: boolean;
+  /** Chronological phase-level record of this turn. */
+  steps: TurnStep[];
 }
 
 /** Per-session state: message history + the session's live turn (ADR-0026 §4). */
@@ -147,6 +180,7 @@ const EMPTY_TURN: TurnState = {
   done: null,
   error: null,
   backpressure: false,
+  steps: [],
 };
 
 function freshSessionState(): SessionState {
@@ -262,6 +296,7 @@ export function createAppStore(deps: StoreDeps): AppStore {
       done: null,
       error: null,
       backpressure: false,
+      steps: [],
     });
     const task: Task = {
       sessionId: input.sessionId,
@@ -272,6 +307,12 @@ export function createAppStore(deps: StoreDeps): AppStore {
     if (input.options) task.options = input.options;
 
     const turn = ss.turn;
+    const edited = new Set<string>();
+    let answerStarted = false;
+    const step = (s: TurnStep) => {
+      turn.steps.push(s);
+    };
+
     await stream(
       state.connection.baseUrl ?? deps.baseUrl,
       task,
@@ -279,6 +320,10 @@ export function createAppStore(deps: StoreDeps): AppStore {
         onEvent: (name: SseEventName, payload: unknown) => {
           switch (name) {
             case "token":
+              if (!answerStarted) {
+                answerStarted = true;
+                step({ kind: "answer", at: Date.now() });
+              }
               turn.tokens += (payload as { text: string }).text;
               break;
             case "meter": {
@@ -290,25 +335,51 @@ export function createAppStore(deps: StoreDeps): AppStore {
               turn.meter = meter;
               break;
             }
-            case "candidate":
-              turn.candidate = payload as CandidateEvent;
+            case "candidate": {
+              const cand = payload as CandidateEvent;
+              turn.candidate = cand;
+              if (cand.blockId && !edited.has(cand.blockId)) {
+                edited.add(cand.blockId);
+                step({ kind: "edit", at: Date.now(), blockId: cand.blockId });
+              }
               break;
-            case "diff":
-              turn.diffs = [...turn.diffs, payload as DiffEvent];
+            }
+            case "diff": {
+              const diff = payload as DiffEvent;
+              turn.diffs = [...turn.diffs, diff];
+              if (diff.blockId && !edited.has(diff.blockId)) {
+                edited.add(diff.blockId);
+                step({ kind: "edit", at: Date.now(), blockId: diff.blockId });
+              }
               break;
-            case "rag":
-              turn.rag = payload as RagEvent;
+            }
+            case "rag": {
+              const rag = payload as RagEvent;
+              turn.rag = rag;
+              step({
+                kind: "retrieval",
+                at: Date.now(),
+                chunks: rag.chunks?.length ?? 0,
+              });
               break;
-            case "done":
-              turn.done = payload as DoneEvent;
+            }
+            case "done": {
+              const done = payload as DoneEvent;
+              turn.done = done;
               turn.active = false;
+              step({ kind: "done", at: Date.now(), model: done.usedModel, degraded: done.degraded });
               break;
-            case "error":
-              turn.error = payload as ErrorEvent;
+            }
+            case "error": {
+              const err = payload as ErrorEvent;
+              turn.error = err;
               turn.active = false;
+              step({ kind: "error", at: Date.now(), code: err.code });
               break;
+            }
             case "backpressure":
               turn.backpressure = true;
+              step({ kind: "backpressure", at: Date.now() });
               break;
           }
         },

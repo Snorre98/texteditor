@@ -808,6 +808,68 @@ func (r *recordingAssembler) Assemble(_ context.Context, in dto.AssemblerInput) 
 	return dto.Payload{Request: dto.Request{ModelName: "gemma4-12b"}}, dto.Breakdown{SystemPrompt: 10, User: 4}, nil
 }
 
+// modelNameAssembler captures the ModelName the loop hands the assembler.
+type modelNameAssembler struct {
+	mu        sync.Mutex
+	modelName string
+}
+
+func (r *modelNameAssembler) Assemble(_ context.Context, in dto.AssemblerInput) (dto.Payload, dto.Breakdown, error) {
+	r.mu.Lock()
+	r.modelName = in.ModelName
+	r.mu.Unlock()
+	return dto.Payload{Request: dto.Request{ModelName: in.ModelName}}, dto.Breakdown{SystemPrompt: 10, User: 4}, nil
+}
+
+// TestWireModelIDReachesAssembler: the provider's `model` field uses the daemon-
+// projected wire id (Model.ModelID), not the manifest name (UsedName), while the
+// done event still labels the manifest name for the user.
+func TestWireModelIDReachesAssembler(t *testing.T) {
+	bus := &stubBus{done: make(chan struct{})}
+	assembler := &modelNameAssembler{}
+	deps := happyPathDeps(bus)
+	deps.Assembler = assembler
+	deps.Fleet = stubFleet{res: dto.Resolution{
+		Model:           dto.Model{Name: "gemma4-12b", BaseURL: "http://x/v1", ModelID: "mlx-community/gemma-4-26B-A4B-it-OptiQ-4bit"},
+		EffectiveParams: dto.SamplingParams{Temperature: 0.3, MaxTokens: 10},
+		UsedName:        "gemma4-12b",
+	}}
+	l := New(deps)
+
+	if _, err := l.Run(context.Background(), dto.Task{
+		SessionID: "s1", ModeName: "proofreader", DocumentID: "d1", UserInput: "fix",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-bus.done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("turn did not complete")
+	}
+
+	assembler.mu.Lock()
+	got := assembler.modelName
+	assembler.mu.Unlock()
+	if got != "mlx-community/gemma-4-26B-A4B-it-OptiQ-4bit" {
+		t.Fatalf("assembler ModelName = %q, want the wire id", got)
+	}
+
+	bus.mu.Lock()
+	defer bus.mu.Unlock()
+	var usedModel string
+	for _, ev := range bus.events {
+		if ev.Type == "done" {
+			var d struct{ UsedModel string `json:"usedModel"` }
+			if err := json.Unmarshal(ev.Data, &d); err == nil {
+				usedModel = d.UsedModel
+			}
+		}
+	}
+	if usedModel != "gemma4-12b" {
+		t.Fatalf("done usedModel = %q, want the manifest name", usedModel)
+	}
+}
+
 func mentionDeps(bus *stubBus) Deps {
 	d := happyPathDeps(bus)
 	d.Workspace = &stubWorkspace{

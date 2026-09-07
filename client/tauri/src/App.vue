@@ -18,6 +18,7 @@ onMounted(async () => {
     const baseUrl = await discoverEngineUrl();
     setEndpoint(baseUrl);
     store.value = createAppStore({ api, baseUrl });
+    await store.value.refreshFleet();
   } catch (e) {
     error.value = e instanceof Error ? e.message : String(e);
   }

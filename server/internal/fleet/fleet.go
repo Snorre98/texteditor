@@ -63,6 +63,7 @@ type daemonEntry struct {
 	} `json:"defaults"`
 	ModeTags    []string `json:"modeTags"`
 	Fingerprint string   `json:"fingerprint,omitempty"` // source.fingerprint; needle entries only (ADR-0028 §4)
+	ModelID     string   `json:"modelId,omitempty"`     // id the runner serves under (the OpenAI `model` field); absent = the manifest name
 
 	state dto.LiveState // fetched per-call via the status verb
 }
@@ -74,11 +75,16 @@ func (e daemonEntry) baseURL() string {
 
 // toModel maps a daemon entry to the public DTO (dropping daemon-owned fields).
 func (e daemonEntry) toModel() dto.Model {
+	modelID := e.ModelID
+	if modelID == "" {
+		modelID = e.Name
+	}
 	return dto.Model{
 		Name:         e.Name,
 		BaseURL:      e.baseURL(),
 		Capabilities: e.Capabilities,
 		ModeTags:     e.ModeTags,
+		ModelID:      modelID,
 	}
 }
 

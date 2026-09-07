@@ -89,7 +89,8 @@ format, never registered).
 | Client | Status | Notes |
 |---|---|---|
 | OpenTUI TUI | ✅ | 6 panels (editor, chat, meter, switcher, RAG, diff); dumb, generated |
-| Tauri markdown editor | ✅ | CodeMirror selection bubble, `@codemirror/merge` candidates, autosave (`PUT /documents/{id}/tree`, ADR-0038) |
+| Tauri editor — engine side | ✅ | sidecar handshake, Vue store, generated client, autosave, `@codemirror/merge` candidates |
+| Tauri editor — UI surface | 🚧 | selection trigger broken + no mode selector / free-form chat / meter / RAG rendering → [`handoff-tauri-ui.md`](plans/handoff-tauri-ui.md) |
 
 ## Deployment targets
 
@@ -97,6 +98,7 @@ format, never registered).
 |---|---|
 | Standalone daemon (launchd, fixed port) | ✅ `tools/build.sh` + `tools/install-daemon.sh` + `deploy/*.plist` |
 | Tauri sidecar (spawn + SIGTERM/SIGKILL) | ✅ `client/tauri/src-tauri/src/sidecar.rs`, headlessly tested |
+| Tauri editor UI | 🚧 shell-only — see the Tauri UI row above and `handoff-tauri-ui.md` |
 | Web (self-host caveat) | ✅ capability adapter web branch; `ENGINE_BIND` opt-in |
 | mDNS LAN discovery | 🚧 deferred (ADR-0021 §1 — `baseUrl` on `/health` is the landed answer) |
 
@@ -130,14 +132,15 @@ point, contract-first, interface-first coupling.
 
 ## TODO list (actionable, ordered)
 
-1. **Commit the D1 seam** — texteditor (`cmd/toolhash`, `routergate/contract_mirror_test.go`, `contracts/needle-facade.md`, plan docs) and `macos-dev-config` (`cmd/serve-needle`, `tools/serve-needle.sh`, `tools/needle-finetune.sh`, `docs/contracts/needle-facade.md`, `models.json`, `daemon_test.go`).
-2. **D1 ML fine-tune** (deferred by design, trigger-gated) — fine-tune Needle 2 over the `cmd/toolhash` vocabulary → produce `needle2.cact` → `needle-finetune.sh` archives it + records `source.fingerprint` → flip one mode to `toolCalling:"router"` → `router-tools-stale` gate clears. Finalize the `.cact` stdout-format assumption (`needle-facade.md §2`).
-3. **Add CI** — no `.github/workflows` exists, yet the plans frame every acceptance criterion as a "CI gate". Add CI for `go test`, `bun test` + typecheck (tui/tauri), `cargo test`; optionally a Gherkin runner for the 9 `.feature` specs (currently prose-only).
-4. **Fix provision tooling** — `macos-dev-config/internal/fleetdaemon/provision.go` shells the deprecated `huggingface-cli`; switch to `hf download` (huggingface-hub ≥ 1.27).
-5. **`InferenceControl` surface** (architecture.md risk #9) — future sibling interface behind the Provider seam, not a planned phase.
-6. **Optional doc-sync** — `macos-dev-config/inference-readme.md` documents the needle2 archive but not the new `serve-needle` facade.
-7. **Deferred endpoints** — `GET /sessions/{id}/meter` (ADR-0017), bare `/files` read (ADR-0035); land only when a client needs them.
-8. **Future tools/modes** — `suggest_revision`, `cite`, `search_vault` tools and a `literature-reviewer` mode (architecture.md §64–§65), as data files per ADR-0019.
+1. **Finish the Tauri UI surface** — fix the broken selection trigger (Option B: toolbar button) and render the store-supported affordances the shell never showed: mode selector, doc-level free-form chat, token meter, RAG results, error surfacing. See [`handoff-tauri-ui.md`](plans/handoff-tauri-ui.md). **This blocks "leverage AI capabilities" in the Tauri editor today.**
+2. **Commit the D1 seam** — texteditor (`cmd/toolhash`, `routergate/contract_mirror_test.go`, `contracts/needle-facade.md`, plan docs) and `macos-dev-config` (`cmd/serve-needle`, `tools/serve-needle.sh`, `tools/needle-finetune.sh`, `docs/contracts/needle-facade.md`, `models.json`, `daemon_test.go`).
+3. **D1 ML fine-tune** (deferred by design, trigger-gated) — fine-tune Needle 2 over the `cmd/toolhash` vocabulary → produce `needle2.cact` → `needle-finetune.sh` archives it + records `source.fingerprint` → flip one mode to `toolCalling:"router"` → `router-tools-stale` gate clears. Finalize the `.cact` stdout-format assumption (`needle-facade.md §2`).
+4. **Add CI** — no `.github/workflows` exists, yet the plans frame every acceptance criterion as a "CI gate". Add CI for `go test`, `bun test` + typecheck (tui/tauri), `cargo test`; optionally a Gherkin runner for the 9 `.feature` specs (currently prose-only).
+5. **Fix provision tooling** — `macos-dev-config/internal/fleetdaemon/provision.go` shells the deprecated `huggingface-cli`; switch to `hf download` (huggingface-hub ≥ 1.27).
+6. **`InferenceControl` surface** (architecture.md risk #9) — future sibling interface behind the Provider seam, not a planned phase.
+7. **Optional doc-sync** — `macos-dev-config/inference-readme.md` documents the needle2 archive but not the new `serve-needle` facade.
+8. **Deferred endpoints** — `GET /sessions/{id}/meter` (ADR-0017), bare `/files` read (ADR-0035); land only when a client needs them.
+9. **Future tools/modes** — `suggest_revision`, `cite`, `search_vault` tools and a `literature-reviewer` mode (architecture.md §64–§65), as data files per ADR-0019.
 
 ## Verification status
 

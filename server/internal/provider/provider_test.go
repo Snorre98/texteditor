@@ -34,6 +34,35 @@ func TestChat(t *testing.T) {
 	}
 }
 
+// TestWireModelField: the OpenAI request body's `model` field is exactly the
+// Request.ModelName the engine hands the provider (the daemon-projected wire id),
+// so a provider that validates model names (e.g. mlx-lm) accepts the request.
+func TestWireModelField(t *testing.T) {
+	var gotModel string
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Model string `json:"model"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		gotModel = body.Model
+		w.Write([]byte(`{"choices":[{"message":{"content":"ok"}}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`))
+	}))
+	defer s.Close()
+
+	g := NewWithClient(s.Client())
+	_, err := g.Chat(context.Background(), targetOf(s), dto.Request{
+		ModelName: "mlx-community/gemma-4-26B-A4B-it-OptiQ-4bit",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotModel != "mlx-community/gemma-4-26B-A4B-it-OptiQ-4bit" {
+		t.Fatalf("wire model = %q, want the request ModelName", gotModel)
+	}
+}
+
 func TestEmbed(t *testing.T) {
 	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`{"data":[{"embedding":[0.1,0.2,0.3]}]}`))

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { createAutosave } from "../src/editor/autosave";
+import { createAutosave, isSaveShortcut, saveStatusLabel } from "../src/editor/autosave";
 
 // A deterministic fake timer: captures scheduled callbacks, fires them manually.
 function fakeClock() {
@@ -76,5 +76,33 @@ describe("createAutosave (manual-edit silence cadence, ADR-0020 §1)", () => {
     a.dispose();
     expect(saves).toEqual([]);
     expect(clock.pending()).toBe(0);
+  });
+});
+
+describe("isSaveShortcut", () => {
+  test("Cmd+S and Ctrl+S are the save shortcut", () => {
+    expect(isSaveShortcut({ metaKey: true, ctrlKey: false, key: "s" })).toBe(true);
+    expect(isSaveShortcut({ metaKey: false, ctrlKey: true, key: "S" })).toBe(true);
+  });
+  test("plain or modified keys are not", () => {
+    expect(isSaveShortcut({ metaKey: false, ctrlKey: false, key: "s" })).toBe(false);
+    expect(isSaveShortcut({ metaKey: true, ctrlKey: false, key: "a" })).toBe(false);
+    expect(isSaveShortcut({ metaKey: true, ctrlKey: false, altKey: true, key: "s" })).toBe(
+      false,
+    );
+  });
+});
+
+describe("saveStatusLabel", () => {
+  test("dirty wins over saved-at", () => {
+    expect(saveStatusLabel(true, null)).toBe("unsaved changes");
+    expect(saveStatusLabel(true, new Date())).toBe("unsaved changes");
+  });
+  test("a clean save shows the saved-at time", () => {
+    const label = saveStatusLabel(false, new Date("2026-01-01T12:00:00"));
+    expect(label.startsWith("saved at ")).toBe(true);
+  });
+  test("no state renders nothing", () => {
+    expect(saveStatusLabel(false, null)).toBe("");
   });
 });

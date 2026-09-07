@@ -25,6 +25,11 @@ type Model struct {
 	BaseURL      string // http://host:port/v1
 	Capabilities Capabilities
 	ModeTags     []string
+	// ModelID is the id the serving endpoint accepts in the OpenAI `model`
+	// field, when it differs from Name (e.g. the HF repo id an mlx runner
+	// serves). Absent (empty) means Name is the wire id. Internal only — never
+	// projected into the client-facing API (ADR-0016 §1).
+	ModelID string
 }
 
 // Target is an already-resolved serving endpoint handed to the Provider

@@ -53,7 +53,13 @@ management and target `start`/`stop`; the engine client ignores them
 (daemon-owned fields). `fingerprint` is optional: the model's
 `source.fingerprint`, projected only when `source.kind == "needle"` (the tool
 routing fine-tune artifact). It feeds the engine's `router-tools-stale` startup
-gate (ADR-0028 §4) and is absent from every other entry.
+gate (ADR-0028 §4) and is absent from every other entry. `modelId` is optional:
+the id the runner serves under — the value a provider accepts in the OpenAI
+`model` field — projected when it differs from the manifest `name`. For
+`hf`/`gguf` sources it is the repo/file the runner loads; for `needle`/`delegate`
+it is omitted and consumers use the manifest name. The engine sends it as the
+provider request's `model` so name-validating runners (e.g. mlx-lm) accept the
+request.
 
 ```json
 {
@@ -66,7 +72,8 @@ gate (ADR-0028 §4) and is absent from every other entry.
       "port": 8085,
       "capabilities": { "contextLength": 131072, "thinkingMode": false, "supportsSystemPrompt": true },
       "defaults": { "temperature": 0.5 },
-      "modeTags": ["drafter"]
+      "modeTags": ["drafter"],
+      "modelId": "mlx-community/Mistral-Small-3.1-Text-24B-Instruct-2503-4bit"
     },
     {
       "name": "needle-router",

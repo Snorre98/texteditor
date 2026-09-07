@@ -246,7 +246,7 @@ func (l *loop) runTurn(ctx context.Context, turnID string, task dto.Task) {
 
 	payload, breakdown, err := l.d.Assembler.Assemble(ctx, dto.AssemblerInput{
 		Mode:      m,
-		ModelName: res.UsedName,
+		ModelName: res.Model.ModelID, // the id the provider accepts (may differ from the manifest name)
 		Params:    res.EffectiveParams,
 		Tools:     tools,
 		RAGChunks: chunks,

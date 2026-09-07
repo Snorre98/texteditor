@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { createAppStore, ZERO_TALLY, type SubmitTurnInput } from "../src/state/store";
+import { createAppStore, stepLabel, ZERO_TALLY, type SubmitTurnInput } from "../src/state/store";
 import type { MeterEvent } from "../src/generated/types.gen";
 import { fakeStream, fail, ok, stubApi } from "./helpers";
 
@@ -144,6 +144,71 @@ describe("createAppStore", () => {
     const t = turnOf(store, "s1")!;
     expect(t.error).toEqual({ code: "provider-unreachable", message: "down" });
     expect(t.active).toBe(false);
+  });
+
+  test("the turn step log records significant events in order (chronological)", async () => {
+    const { api } = stubApi();
+    const stream = fakeStream([
+      { name: "token", payload: { text: "Fix " } },
+      { name: "diff", payload: { ok: true, blockId: "b1", insertions: ["x"] } },
+      { name: "rag", payload: { ok: true, chunks: [{ blockId: "b9", text: "c" }] } },
+      { name: "done", payload: { degraded: false, usedModel: "gemma4-26b-moe" } },
+    ]);
+    const store = createAppStore({ api, baseUrl: "http://x", stream: stream.run });
+    await store.submitTurn({
+      sessionId: "s1",
+      modeName: "proofreader",
+      documentId: "d1",
+      userInput: "fix",
+    });
+
+    const t = turnOf(store, "s1")!;
+    expect(t.steps.map((s) => s.kind)).toEqual(["answer", "edit", "retrieval", "done"]);
+    expect(t.steps[1]).toMatchObject({ kind: "edit", blockId: "b1" });
+    expect(t.steps[2]).toMatchObject({ kind: "retrieval", chunks: 1 });
+    expect(t.steps[3]).toMatchObject({
+      kind: "done",
+      model: "gemma4-26b-moe",
+      degraded: false,
+    });
+  });
+
+  test("the step log emits exactly one answer step and dedupes edits per block", async () => {
+    const { api } = stubApi();
+    const stream = fakeStream([
+      { name: "token", payload: { text: "a" } },
+      { name: "token", payload: { text: "b" } },
+      { name: "candidate", payload: { ok: true, blockId: "b1" } },
+      { name: "diff", payload: { ok: true, blockId: "b1", insertions: ["x"] } },
+      { name: "diff", payload: { ok: true, blockId: "b2", insertions: ["y"] } },
+      { name: "done", payload: {} },
+    ]);
+    const store = createAppStore({ api, baseUrl: "http://x", stream: stream.run });
+    await store.submitTurn({
+      sessionId: "s1",
+      modeName: "proofreader",
+      documentId: "d1",
+      userInput: "fix",
+    });
+
+    const t = turnOf(store, "s1")!;
+    expect(t.steps.filter((s) => s.kind === "answer")).toHaveLength(1);
+    expect(t.steps.filter((s) => s.kind === "edit")).toHaveLength(2);
+  });
+
+  describe("stepLabel", () => {
+    test("renders a human label per step kind", () => {
+      expect(stepLabel({ kind: "retrieval", at: 0, chunks: 3 })).toBe("retrieved 3 chunks");
+      expect(stepLabel({ kind: "retrieval", at: 0, chunks: 1 })).toBe("retrieved 1 chunk");
+      expect(stepLabel({ kind: "edit", at: 0, blockId: "b1" })).toBe("proposed an edit");
+      expect(stepLabel({ kind: "answer", at: 0 })).toBe("answered");
+      expect(
+        stepLabel({ kind: "done", at: 0, model: "m", degraded: false }),
+      ).toBe("complete — m");
+      expect(stepLabel({ kind: "done", at: 0, degraded: true })).toContain("degraded");
+      expect(stepLabel({ kind: "error", at: 0, code: "x" })).toBe("failed (x)");
+      expect(stepLabel({ kind: "backpressure", at: 0 })).toContain("dropped");
+    });
   });
 
   test("createSession is create-or-resume and anchors to a block", async () => {

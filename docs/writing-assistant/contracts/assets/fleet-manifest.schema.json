@@ -36,7 +36,7 @@
           "additionalProperties": false,
           "required": ["kind"],
           "properties": {
-            "kind": { "type": "string", "enum": ["hf", "gguf", "needle"] },
+            "kind": { "type": "string", "enum": ["hf", "gguf", "needle", "delegate"] },
             "repo": { "type": "string", "description": "HF repo id, if kind == hf." },
             "file": { "type": "string", "description": "Filename under models/gguf/, if kind == gguf." },
             "fingerprint": { "type": "string", "description": "Tool-set hash the .cact was fine-tuned against, if kind == needle." }
