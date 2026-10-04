@@ -29,6 +29,10 @@ type PutSessionContextRes interface {
 	putSessionContextRes()
 }
 
+type ResolveLocateRes interface {
+	resolveLocateRes()
+}
+
 type SaveDocumentRes interface {
 	saveDocumentRes()
 }

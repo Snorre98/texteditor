@@ -199,6 +199,16 @@ type Invoker interface {
 	//
 	// PUT /sessions/{id}/context
 	PutSessionContext(ctx context.Context, request *ContextPolicy, params PutSessionContextParams) (PutSessionContextRes, error)
+	// ResolveLocate invokes resolveLocate operation.
+	//
+	// When a `/locate` turn resolves to a fuzzy match it emits a `locate` event with ranked candidates and
+	// waits (bounded) for the user's choice. This route resumes the turn: pick a candidate by its
+	// `chunkKey`, or cancel to degrade the turn to plain chat. No model call and no edit happen before the
+	// choice. An unknown turn id is a typed 404; a turn that is not waiting on a picker (already answered,
+	// timed out, or never ambiguous) is a typed 409.
+	//
+	// POST /turns/{id}/locate
+	ResolveLocate(ctx context.Context, request *LocateChoice, params ResolveLocateParams) (ResolveLocateRes, error)
 	// SaveDocument invokes saveDocument operation.
 	//
 	// The manual-edit wire path (ADR-0038): the client's whole block-tree snapshot. Array order =
@@ -2935,6 +2945,112 @@ func (c *Client) sendPutSessionContext(ctx context.Context, request *ContextPoli
 
 	stage = "DecodeResponse"
 	result, err := decodePutSessionContextResponse(resp)
+	if err != nil {
+		return res, errors.Wrap(err, "decode response")
+	}
+
+	return result, nil
+}
+
+// ResolveLocate invokes resolveLocate operation.
+//
+// When a `/locate` turn resolves to a fuzzy match it emits a `locate` event with ranked candidates and
+// waits (bounded) for the user's choice. This route resumes the turn: pick a candidate by its
+// `chunkKey`, or cancel to degrade the turn to plain chat. No model call and no edit happen before the
+// choice. An unknown turn id is a typed 404; a turn that is not waiting on a picker (already answered,
+// timed out, or never ambiguous) is a typed 409.
+//
+// POST /turns/{id}/locate
+func (c *Client) ResolveLocate(ctx context.Context, request *LocateChoice, params ResolveLocateParams) (ResolveLocateRes, error) {
+	res, err := c.sendResolveLocate(ctx, request, params)
+	return res, err
+}
+
+func (c *Client) sendResolveLocate(ctx context.Context, request *LocateChoice, params ResolveLocateParams) (res ResolveLocateRes, err error) {
+	otelAttrs := []attribute.KeyValue{
+		otelogen.OperationID("resolveLocate"),
+		semconv.HTTPRequestMethodKey.String("POST"),
+		semconv.URLTemplateKey.String("/turns/{id}/locate"),
+	}
+	otelAttrs = append(otelAttrs, c.cfg.Attributes...)
+
+	// Run stopwatch.
+	startTime := time.Now()
+	defer func() {
+		// Use floating point division here for higher precision (instead of Millisecond method).
+		elapsedDuration := time.Since(startTime)
+		c.duration.Record(ctx, float64(elapsedDuration)/float64(time.Millisecond), metric.WithAttributes(otelAttrs...))
+	}()
+
+	// Increment request counter.
+	c.requests.Add(ctx, 1, metric.WithAttributes(otelAttrs...))
+
+	// Start a span for this request.
+	ctx, span := c.cfg.Tracer.Start(ctx, ResolveLocateOperation,
+		trace.WithAttributes(otelAttrs...),
+		clientSpanKind,
+	)
+	// Track stage for error reporting.
+	var stage string
+	defer func() {
+		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, stage)
+			c.errors.Add(ctx, 1, metric.WithAttributes(otelAttrs...))
+		}
+		span.End()
+	}()
+
+	stage = "BuildURL"
+	u := uri.Clone(c.requestURL(ctx))
+	var pathParts [3]string
+	pathParts[0] = "/turns/"
+	{
+		// Encode "id" parameter.
+		e := uri.NewPathEncoder(uri.PathEncoderConfig{
+			Param:   "id",
+			Style:   uri.PathStyleSimple,
+			Explode: false,
+		})
+		if err := func() error {
+			return e.EncodeValue(conv.StringToString(params.ID))
+		}(); err != nil {
+			return res, errors.Wrap(err, "encode path")
+		}
+		encoded, err := e.Result()
+		if err != nil {
+			return res, errors.Wrap(err, "encode path")
+		}
+		pathParts[1] = encoded
+	}
+	pathParts[2] = "/locate"
+	uri.AddPathParts(u, pathParts[:]...)
+
+	stage = "EncodeRequest"
+	r, err := ht.NewRequest(ctx, "POST", u)
+	if err != nil {
+		return res, errors.Wrap(err, "create request")
+	}
+	if err := encodeResolveLocateRequest(request, r); err != nil {
+		return res, errors.Wrap(err, "encode request")
+	}
+
+	stage = "SendRequest"
+	resp, err := c.cfg.Client.Do(r)
+	if err != nil {
+		return res, errors.Wrap(err, "do request")
+	}
+	body := resp.Body
+	defer func() {
+		// Drain the body to EOF before closing, so the underlying
+		// connection can be reused by the Transport regardless of the
+		// response status code. See https://github.com/ogen-go/ogen/issues/1670.
+		_, _ = io.Copy(io.Discard, body)
+		_ = body.Close()
+	}()
+
+	stage = "DecodeResponse"
+	result, err := decodeResolveLocateResponse(resp)
 	if err != nil {
 		return res, errors.Wrap(err, "decode response")
 	}

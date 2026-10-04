@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"errors"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -24,6 +25,7 @@ import (
 	"texteditor/internal/document"
 	"texteditor/internal/filesystem"
 	"texteditor/internal/fleet"
+	"texteditor/internal/locate"
 	"texteditor/internal/meter"
 	"texteditor/internal/mode"
 	"texteditor/internal/pathutil"
@@ -38,6 +40,11 @@ import (
 // AgentLoop is the Agent loop public API (interface.md §7).
 type AgentLoop interface {
 	Run(ctx context.Context, task dto.Task) (turnID string, err error)
+	// ResolveLocate answers an open `/locate` ambiguity picker for a waiting
+	// turn (ADR-0048 §4): a chosen candidate resumes the anchored turn, a cancel
+	// degrades it to plain chat. ErrNoPendingLocate (typed 409) is returned when
+	// the turn is not waiting on a picker.
+	ResolveLocate(turnID string, choice dto.LocateChoice) error
 }
 
 // Interface is an alias for AgentLoop (the contracted name, interface.md §7).
@@ -65,6 +72,9 @@ type Deps struct {
 	Bus        Emitter
 	Pipeline   pipeline.Interface   // the one global turn policy (ADR-0045 §3)
 	Filesystem filesystem.Interface // mentions read (ADR-0036, ADR-0049 §6)
+	// Locate is the deterministic `/locate` resolver (ADR-0048 §2). When nil,
+	// `/locate` degrades to plain chat with a not-found label.
+	Locate locate.Resolver
 }
 
 // Mention caps (ADR-0036 §2) — constants in the loop package, not mode data.
@@ -85,11 +95,17 @@ var (
 // loop is the concrete Agent loop.
 type loop struct {
 	d Deps
+
+	// pending holds one open `/locate` ambiguity picker per waiting turn
+	// (ADR-0048 §4). It is in-memory and turn-scoped: a choice resumes the turn,
+	// a cancel/timeout degrades it to plain chat.
+	pendingMu sync.Mutex
+	pending   map[string]*pendingLocate
 }
 
 // New returns an Agent loop over the supplied dependencies.
 func New(d Deps) AgentLoop {
-	return &loop{d: d}
+	return &loop{d: d, pending: map[string]*pendingLocate{}}
 }
 
 // Run starts a turn asynchronously, returning its turnID. Events are tagged with
@@ -200,6 +216,13 @@ func errPathOutsideAllowedRoots(path string) error {
 }
 
 func (l *loop) runTurn(ctx context.Context, turnID string, task dto.Task) {
+	// `/locate` is deterministic preprocessing, parsed at the very start before
+	// mentions and session append (ADR-0048 §1/§6). The command line is stripped;
+	// the pasted chunk becomes the effective user input used for the session,
+	// the default retrieval query, and assembly. No Task change, no model call.
+	effectiveInput, locateChunk, isLocate := parseLocateCommand(task.UserInput)
+	task.UserInput = effectiveInput
+
 	m, res, err := l.validate(task)
 	if err != nil {
 		l.emit(turnID, dto.Event{Type: "error", Data: errorData(err)})
@@ -240,6 +263,17 @@ func (l *loop) runTurn(ctx context.Context, turnID string, task dto.Task) {
 	if err := l.d.Workspaces.RouteTurn(turnID, wsID, task.SessionID); err != nil {
 		l.emit(turnID, dto.Event{Type: "error", Data: errorData(err)})
 		return
+	}
+
+	// `/locate`: resolve the pasted chunk deterministically (the open document
+	// first, then the workspace corpus index), emit the `locate` event, and — for
+	// a fuzzy match — wait for the ambiguity picker before any model call or edit
+	// (ADR-0048 §2/§4). Not-found and cancel/timeout degrade to plain chat; the
+	// locate outcome is recorded in the snapshot either way.
+	var anchor *anchor
+	var locateRaw json.RawMessage
+	if isLocate {
+		anchor, locateRaw = l.locateTurn(ctx, turnID, task, svc, locateChunk)
 	}
 
 	// planning: read session history + retrieved chunks.
@@ -298,6 +332,21 @@ func (l *loop) runTurn(ctx context.Context, turnID string, task dto.Task) {
 
 	tools := toolsFor(l.d.Tools)
 
+	// Anchored turn (ADR-0048 §5): inject the anchored block and its neighbors as
+	// a mention-component attachment (no new meter component) and append a
+	// deterministic replacement-only instruction to the assembled user input. The
+	// session keeps the clean chunk; only the model call sees the instruction. The
+	// anchor is also set as the turn's selection for router context/snapshot.
+	assemblyInput := task.UserInput
+	if anchor != nil {
+		mentions = append(mentions, dto.MentionContent{
+			Path: anchor.path + "#" + anchor.blockID,
+			Text: anchor.context,
+		})
+		assemblyInput = task.UserInput + "\n\n" + locateInstruction
+		task.Selection = &dto.Selection{BlockID: anchor.blockID}
+	}
+
 	payload, breakdown, err := l.d.Assembler.Assemble(ctx, dto.AssemblerInput{
 		Mode:      m,
 		ModelName: res.Model.ModelID, // the id the provider accepts (may differ from the manifest name)
@@ -308,7 +357,7 @@ func (l *loop) runTurn(ctx context.Context, turnID string, task dto.Task) {
 		RAGChunks: autoChunks,
 		History:   history,
 		Mentions:  mentions,
-		UserInput: task.UserInput,
+		UserInput: assemblyInput,
 	})
 	if err != nil {
 		l.emit(turnID, dto.Event{Type: "error", Data: errorData(err)})
@@ -321,7 +370,7 @@ func (l *loop) runTurn(ctx context.Context, turnID string, task dto.Task) {
 	// metadata, and the retrieved/pinned chunks; the assembler never knows about
 	// sessions or workspaces.
 	loopDrops := append(excludedDrops, notFoundDrops...)
-	snapshot := buildSnapshot(turnID, task, wsID, eff.Query, eff.AutoRag, autoChunks, pinnedChunks, loopDrops, payload)
+	snapshot := buildSnapshot(turnID, task, wsID, eff.Query, eff.AutoRag, autoChunks, pinnedChunks, loopDrops, locateRaw, payload)
 	rawSnapshot, err := json.Marshal(snapshot)
 	if err != nil {
 		l.emit(turnID, dto.Event{Type: "error", Data: errorData(err)})
@@ -337,7 +386,7 @@ func (l *loop) runTurn(ctx context.Context, turnID string, task dto.Task) {
 
 	// The turn state machine (state-machine.md §1): planning → (dispatching →
 	// observing)* → answering. policy.MaxSteps is the one global bound.
-	result, err := l.runSteps(ctx, turnID, task, target, payload, tools, policy.MaxSteps)
+	result, err := l.runSteps(ctx, turnID, task, target, payload, tools, anchor, policy.MaxSteps)
 	if err != nil {
 		l.emit(turnID, dto.Event{Type: "error", Data: errorData(err)})
 		return
@@ -371,7 +420,7 @@ type streamResult struct {
 // (the assembled message list) across round-trips, threading assistant
 // tool_calls and tool results. It returns the final stream result (the answering
 // round), bounded by the global pipeline maxSteps.
-func (l *loop) runSteps(ctx context.Context, turnID string, task dto.Task, target dto.Target, payload dto.Payload, tools []dto.ToolDef, maxSteps int) (streamResult, error) {
+func (l *loop) runSteps(ctx context.Context, turnID string, task dto.Task, target dto.Target, payload dto.Payload, tools []dto.ToolDef, anchor *anchor, maxSteps int) (streamResult, error) {
 	msgs := payload.Messages
 
 	steps := 0
@@ -429,7 +478,10 @@ func (l *loop) runSteps(ctx context.Context, turnID string, task dto.Task, targe
 			// Document-scoped tools need the turn's documentID; it is injected
 			// here (the loop holds task.DocumentID), never exposed to the model in
 			// the tool schema (config/tools/*.json expose only the model's fields).
-			rawArgs = injectDocumentID(tc.Name, task, rawArgs)
+			// An anchored `/locate` turn also forces edit_markdown's blockId and
+			// baseHash from the anchor, overriding anything the model supplied
+			// (ADR-0048 §5), so the model only has to produce the replacement text.
+			rawArgs = injectDocumentID(tc.Name, task, anchor, rawArgs)
 
 			out, toolErr := l.d.Executor.Invoke(ctx, tc.Name, rawArgs)
 
@@ -457,8 +509,10 @@ func (l *loop) runSteps(ctx context.Context, turnID string, task dto.Task, targe
 // binding (ADR-0029: edits target a block in a document the loop is scoped to).
 // For edit_markdown it also carries the turn's preset so the staged candidate's
 // derived commit message names the mode (ADR-0020 §1); the model never sees
-// either field in the tool schema.
-func injectDocumentID(name string, task dto.Task, args json.RawMessage) json.RawMessage {
+// either field in the tool schema. An anchored `/locate` turn forces the target
+// block and its base-hash guard from the anchor (ADR-0048 §5), overriding any
+// model-supplied values.
+func injectDocumentID(name string, task dto.Task, anchor *anchor, args json.RawMessage) json.RawMessage {
 	if name != "edit_markdown" && name != "diff" {
 		return args
 	}
@@ -467,8 +521,14 @@ func injectDocumentID(name string, task dto.Task, args json.RawMessage) json.Raw
 		_ = json.Unmarshal(args, &merged)
 	}
 	merged["documentId"] = task.DocumentID
-	if name == "edit_markdown" && task.ModeName != "" {
-		merged["modeName"] = task.ModeName
+	if name == "edit_markdown" {
+		if task.ModeName != "" {
+			merged["modeName"] = task.ModeName
+		}
+		if anchor != nil {
+			merged["blockId"] = anchor.blockID
+			merged["baseHash"] = anchor.baseHash
+		}
 	}
 	out, _ := json.Marshal(merged)
 	return out
@@ -555,7 +615,7 @@ func (l *loop) emitRag(turnID string, chunks []dto.Chunk) {
 // nothing: provenance, drops, and budget all come from the pure assembler; only
 // the turn/session/workspace envelope, retrieval metadata, loop-level drops
 // (excluded/not-found), and the human-override labels are added here.
-func buildSnapshot(turnID string, task dto.Task, workspaceID, retrievalQuery string, autoRag bool, autoChunks, pinnedChunks []dto.Chunk, loopDrops []dto.ContextDrop, payload dto.Payload) dto.ContextSnapshot {
+func buildSnapshot(turnID string, task dto.Task, workspaceID, retrievalQuery string, autoRag bool, autoChunks, pinnedChunks []dto.Chunk, loopDrops []dto.ContextDrop, locateRaw json.RawMessage, payload dto.Payload) dto.ContextSnapshot {
 	messages := make([]dto.ContextMessage, 0, len(payload.Provenance))
 	for _, p := range payload.Provenance {
 		messages = append(messages, dto.ContextMessage{
@@ -592,6 +652,7 @@ func buildSnapshot(turnID string, task dto.Task, workspaceID, retrievalQuery str
 		Chunks:         chunks,
 		Drops:          drops,
 		Budget:         budget,
+		Locate:         locateRaw,
 		CreatedAt:      time.Now().Unix(),
 	}
 }

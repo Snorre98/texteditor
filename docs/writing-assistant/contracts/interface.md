@@ -274,6 +274,7 @@ type ChunkRef struct { // tray pin/exclude reference (ADR-0049 §8)
 
 type Retriever interface {
     Query(ctx context.Context, text string, topK int) ([]Chunk, error)
+    SearchText(ctx context.Context, query string, limit int) ([]Chunk, error) // FTS5-only, embedding-free (ADR-0048 §2)
     Index(ctx context.Context, documentID string) error
     IndexPath(ctx context.Context, path, contentHash string) error
     Evict(ctx context.Context, chunkKeyOrPath string) error
@@ -281,6 +282,12 @@ type Retriever interface {
     Get(ctx context.Context, refs []ChunkRef) ([]Chunk, error)
 }
 ```
+
+*Amendment (Phase D, ADR-0048 §2):* the Retriever gains `SearchText`, a
+deterministic **FTS5-only** lexical search (sanitized MATCH, no embedding, no
+vec0 KNN) returning provenance-bearing chunks best-first. `/locate` uses it so
+locating is independent of the embedding model and token-free. Zero matches is
+not an error.
 
 *Amendment (Track 1, TUI session):* `Chunk` gains camelCase JSON tags — it
 crosses the API wire via the `rag` SSE event, which must stay camelCase like
@@ -413,8 +420,8 @@ type ContextPolicy struct {
 }
 
 // ContextSnapshot is the persisted per-turn record (GET /turns/{id}/context and
-// the `context` SSE payload). Decision (Phase F) and Locate (Phase D) are
-// reserved optional records, unimplemented in C3.
+// the `context` SSE payload). Decision (Phase F) is a reserved optional record;
+// Locate (Phase D) carries the LocateResult JSON for a `/locate` turn.
 type ContextSnapshot struct {
     TurnID, SessionID, WorkspaceID string
     RetrievalQuery                 string
@@ -423,8 +430,41 @@ type ContextSnapshot struct {
     Chunks                         []Chunk
     Drops                          []ContextDrop
     Budget                         []BudgetUsage
-    Decision, Locate               json.RawMessage // reserved, omitempty
+    Decision, Locate               json.RawMessage // Decision reserved; Locate = LocateResult
     CreatedAt                      int64
+}
+
+// LocateResult is the deterministic `/locate` chunk-anchoring outcome
+// (ADR-0048 §3). Status ∈ resolved | ambiguous | not-found; MatchType ∈
+// exact | fuzzy. It is emitted as the `locate` SSE event (TurnID populated on
+// the event only, so a client can answer the picker) and recorded in
+// ContextSnapshot.Locate (without TurnID; the envelope already has it).
+type LocateResult struct {
+    TurnID     string            // event only; empty in the snapshot record
+    Status     string
+    MatchType  string
+    Confidence float64
+    DocumentID string
+    Path       string
+    BlockID    string
+    ChunkKey   string
+    Span       []string          // first..last block ids (multi-block match)
+    Candidates []LocateCandidate // ranked, ambiguous only
+    Stale      bool
+    Context    string            // anchor block + neighbors, or a degrade label
+}
+
+type LocateCandidate struct {
+    DocumentID, Path, BlockID, ChunkKey, TextPreview string
+    Score                                            float64
+    Stale                                            bool
+}
+
+// LocateChoice is the picker's answer (POST /turns/{id}/locate): pick a
+// candidate by ChunkKey, or Cancel to plain chat.
+type LocateChoice struct {
+    ChunkKey string
+    Cancel   bool
 }
 
 type ContextAssembler interface {
@@ -553,6 +593,10 @@ type Task struct {
 
 type AgentLoop interface {
     Run(ctx context.Context, task Task) (turnID string, err error) // async
+    // ResolveLocate answers a waiting `/locate` ambiguity picker (ADR-0048 §4):
+    // a chosen candidate resumes the anchored turn, a cancel degrades it to
+    // plain chat. ErrNoPendingLocate (typed 409) when the turn is not waiting.
+    ResolveLocate(turnID string, choice LocateChoice) error
 }
 ```
 
@@ -604,6 +648,24 @@ budget-shared), emits the `rag` event for the post-exclude/pre-truncation auto
 set only, and records the effective `retrievalQuery`/`autoRag` plus pinned/
 auto chunks (pins labeled `pinned`/`humanOverride`) in the snapshot. The
 override is never persisted.)
+
+(Amended by ADR-0048 §1/§4/§5 (Phase D): `Task` is unchanged — `/locate` is a
+leading-line command parsed at the very start of `Run` before mentions and the
+session append. The command line is stripped; the pasted chunk becomes the
+effective user input used for the session, the default retrieval query, and
+assembly. The loop resolves the chunk (open document → workspace corpus index)
+through the sealed `internal/locate` resolver, emits the `locate` SSE event
+(the `LocateResult` JSON, with `turnId` on the event), and records it in
+`ContextSnapshot.Locate`. A fuzzy (or multi-exact) outcome opens an in-memory
+picker keyed by turnID and **waits** (bounded, 120s) — no model call and no edit
+before the choice; `ResolveLocate` answers it. A resolved open-document match
+anchors the turn: the anchor block plus one neighbor on each side is injected as
+a `mention`-component attachment (`Source: <path>#<blockId>`), a deterministic
+replacement-only instruction is appended to the assembled user input (not the
+session), `Task.Selection` is set, and `edit_markdown`'s `blockId` + `baseHash`
+are forced from the anchor so the model supplies only `text`. Not-found and
+cancel/timeout degrade to plain chat with a labeled outcome. Locating is
+deterministic and token-free.)
 
 ## 8. Mode registry + Tool registry + Tool executor (Go)
 

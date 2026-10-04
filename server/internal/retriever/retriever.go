@@ -37,6 +37,11 @@ import (
 // ADR-0049 §4).
 type Retriever interface {
 	Query(ctx context.Context, text string, topK int) ([]dto.Chunk, error)
+	// SearchText is the deterministic, embedding-free lexical search used by
+	// `/locate` (ADR-0048 §2): a sanitized FTS5 MATCH over the workspace index,
+	// returning provenance-bearing chunks best-first. It never embeds and never
+	// calls a model.
+	SearchText(ctx context.Context, query string, limit int) ([]dto.Chunk, error)
 	// Index chunks a versioned document's block tree (ADR-0049 §4).
 	Index(ctx context.Context, documentID string) error
 	// IndexPath chunks and indexes one corpus file path-keyed (ADR-0049 §4).
@@ -408,6 +413,44 @@ func (r *retriever) Query(ctx context.Context, text string, topK int) ([]dto.Chu
 	fused := rrfFuse(vecKeys, ftsKeys)
 	if len(fused) > topK {
 		fused = fused[:topK]
+	}
+	return r.chunksByKeys(ctx, fused)
+}
+
+// SearchText runs a sanitized FTS5 MATCH only (no embedding, no vec0 KNN) and
+// returns the matching chunks best-first. It is the deterministic lexical
+// surface `/locate` uses so locating stays independent of the embedding model
+// (ADR-0048 §2/§3). Zero matches is not an error (failure-semantics §3).
+func (r *retriever) SearchText(ctx context.Context, query string, limit int) ([]dto.Chunk, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+	if err := r.ensureBaseSchema(ctx); err != nil {
+		return nil, err
+	}
+	q := ftsQuery(query)
+	if q == "" {
+		return nil, nil
+	}
+	rows, err := r.db.QueryContext(ctx,
+		`SELECT chunk_key, bm25(blocks_ft) AS rank FROM blocks_ft
+		 WHERE blocks_ft MATCH ? ORDER BY rank LIMIT ?`, q, limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var fused []scored
+	for rows.Next() {
+		var key string
+		var rank float64
+		if err := rows.Scan(&key, &rank); err != nil {
+			return nil, err
+		}
+		fused = append(fused, scored{key: key, score: -rank})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return r.chunksByKeys(ctx, fused)
 }

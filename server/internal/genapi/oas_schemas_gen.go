@@ -1030,10 +1030,9 @@ type ContextSnapshot struct {
 	Drops          []ContextDrop    `json:"drops"`
 	Budget         []BudgetUsage    `json:"budget"`
 	// Reserved for Phase F decision records; not implemented in Phase C3.
-	Decision *ContextSnapshotDecision `json:"decision"`
-	// Reserved for Phase D locate outcomes; not implemented in Phase C3.
-	Locate    *ContextSnapshotLocate `json:"locate"`
-	CreatedAt int64                  `json:"createdAt"`
+	Decision  *ContextSnapshotDecision `json:"decision"`
+	Locate    OptLocateResult          `json:"locate"`
+	CreatedAt int64                    `json:"createdAt"`
 }
 
 // GetTurnId returns the value of TurnId.
@@ -1087,7 +1086,7 @@ func (s *ContextSnapshot) GetDecision() *ContextSnapshotDecision {
 }
 
 // GetLocate returns the value of Locate.
-func (s *ContextSnapshot) GetLocate() *ContextSnapshotLocate {
+func (s *ContextSnapshot) GetLocate() OptLocateResult {
 	return s.Locate
 }
 
@@ -1147,7 +1146,7 @@ func (s *ContextSnapshot) SetDecision(val *ContextSnapshotDecision) {
 }
 
 // SetLocate sets the value of Locate.
-func (s *ContextSnapshot) SetLocate(val *ContextSnapshotLocate) {
+func (s *ContextSnapshot) SetLocate(val OptLocateResult) {
 	s.Locate = val
 }
 
@@ -1160,9 +1159,6 @@ func (*ContextSnapshot) getTurnContextRes() {}
 
 // Reserved for Phase F decision records; not implemented in Phase C3.
 type ContextSnapshotDecision struct{}
-
-// Reserved for Phase D locate outcomes; not implemented in Phase C3.
-type ContextSnapshotLocate struct{}
 
 // One corpus file's index status. Corpus files are never documents rows and never versioned (ADR-0049
 // §4); `id` is the stable path-derived identity (sha256 prefix of the canonical path).
@@ -1819,6 +1815,7 @@ const (
 	EventTypeDiff         EventType = "diff"
 	EventTypeRag          EventType = "rag"
 	EventTypeContext      EventType = "context"
+	EventTypeLocate       EventType = "locate"
 	EventTypeDone         EventType = "done"
 	EventTypeError        EventType = "error"
 	EventTypeBackpressure EventType = "backpressure"
@@ -1833,6 +1830,7 @@ func (EventType) AllValues() []EventType {
 		EventTypeDiff,
 		EventTypeRag,
 		EventTypeContext,
+		EventTypeLocate,
 		EventTypeDone,
 		EventTypeError,
 		EventTypeBackpressure,
@@ -1853,6 +1851,8 @@ func (s EventType) MarshalText() ([]byte, error) {
 	case EventTypeRag:
 		return []byte(s), nil
 	case EventTypeContext:
+		return []byte(s), nil
+	case EventTypeLocate:
 		return []byte(s), nil
 	case EventTypeDone:
 		return []byte(s), nil
@@ -1885,6 +1885,9 @@ func (s *EventType) UnmarshalText(data []byte) error {
 		return nil
 	case EventTypeContext:
 		*s = EventTypeContext
+		return nil
+	case EventTypeLocate:
+		*s = EventTypeLocate
 		return nil
 	case EventTypeDone:
 		*s = EventTypeDone
@@ -2361,6 +2364,349 @@ func (s *LiveStateResponseState) UnmarshalText(data []byte) error {
 	}
 }
 
+// One ranked `/locate` anchor candidate in an ambiguous result (ADR-0048 §4). `chunkKey` is the
+// picker's choice key (the block id for an open-document block, else the indexed chunk key).
+// Ref: #/components/schemas/LocateCandidate
+type LocateCandidate struct {
+	DocumentId  OptString `json:"documentId"`
+	Path        string    `json:"path"`
+	BlockId     OptString `json:"blockId"`
+	ChunkKey    string    `json:"chunkKey"`
+	Score       float64   `json:"score"`
+	TextPreview string    `json:"textPreview"`
+	Stale       OptBool   `json:"stale"`
+}
+
+// GetDocumentId returns the value of DocumentId.
+func (s *LocateCandidate) GetDocumentId() OptString {
+	return s.DocumentId
+}
+
+// GetPath returns the value of Path.
+func (s *LocateCandidate) GetPath() string {
+	return s.Path
+}
+
+// GetBlockId returns the value of BlockId.
+func (s *LocateCandidate) GetBlockId() OptString {
+	return s.BlockId
+}
+
+// GetChunkKey returns the value of ChunkKey.
+func (s *LocateCandidate) GetChunkKey() string {
+	return s.ChunkKey
+}
+
+// GetScore returns the value of Score.
+func (s *LocateCandidate) GetScore() float64 {
+	return s.Score
+}
+
+// GetTextPreview returns the value of TextPreview.
+func (s *LocateCandidate) GetTextPreview() string {
+	return s.TextPreview
+}
+
+// GetStale returns the value of Stale.
+func (s *LocateCandidate) GetStale() OptBool {
+	return s.Stale
+}
+
+// SetDocumentId sets the value of DocumentId.
+func (s *LocateCandidate) SetDocumentId(val OptString) {
+	s.DocumentId = val
+}
+
+// SetPath sets the value of Path.
+func (s *LocateCandidate) SetPath(val string) {
+	s.Path = val
+}
+
+// SetBlockId sets the value of BlockId.
+func (s *LocateCandidate) SetBlockId(val OptString) {
+	s.BlockId = val
+}
+
+// SetChunkKey sets the value of ChunkKey.
+func (s *LocateCandidate) SetChunkKey(val string) {
+	s.ChunkKey = val
+}
+
+// SetScore sets the value of Score.
+func (s *LocateCandidate) SetScore(val float64) {
+	s.Score = val
+}
+
+// SetTextPreview sets the value of TextPreview.
+func (s *LocateCandidate) SetTextPreview(val string) {
+	s.TextPreview = val
+}
+
+// SetStale sets the value of Stale.
+func (s *LocateCandidate) SetStale(val OptBool) {
+	s.Stale = val
+}
+
+// The ambiguity picker's answer (ADR-0048 §4): pick a candidate by its `chunkKey`, or cancel to
+// degrade the turn to plain chat.
+// Ref: #/components/schemas/LocateChoice
+type LocateChoice struct {
+	ChunkKey OptString `json:"chunkKey"`
+	Cancel   OptBool   `json:"cancel"`
+}
+
+// GetChunkKey returns the value of ChunkKey.
+func (s *LocateChoice) GetChunkKey() OptString {
+	return s.ChunkKey
+}
+
+// GetCancel returns the value of Cancel.
+func (s *LocateChoice) GetCancel() OptBool {
+	return s.Cancel
+}
+
+// SetChunkKey sets the value of ChunkKey.
+func (s *LocateChoice) SetChunkKey(val OptString) {
+	s.ChunkKey = val
+}
+
+// SetCancel sets the value of Cancel.
+func (s *LocateChoice) SetCancel(val OptBool) {
+	s.Cancel = val
+}
+
+// The deterministic `/locate` chunk-anchoring outcome (ADR-0048 §3), recorded in the turn's context
+// snapshot, emitted as the `locate` SSE event, and returned by the picker route. `status` is resolved
+// | ambiguous | not-found; `matchType` is exact | fuzzy. Fuzzy matches always require confirmation, so
+// a fuzzy outcome is `ambiguous` even with one candidate.
+// Ref: #/components/schemas/LocateResult
+type LocateResult struct {
+	// Populated only on the emitted `locate` SSE event so a client can answer the ambiguity picker via
+	// POST /turns/{id}/locate; absent from the snapshot record (the snapshot envelope already carries
+	// turnId).
+	TurnId     OptString                `json:"turnId"`
+	Status     LocateResultStatus       `json:"status"`
+	MatchType  OptLocateResultMatchType `json:"matchType"`
+	Confidence OptFloat64               `json:"confidence"`
+	DocumentId OptString                `json:"documentId"`
+	Path       OptString                `json:"path"`
+	BlockId    OptString                `json:"blockId"`
+	ChunkKey   OptString                `json:"chunkKey"`
+	Span       []string                 `json:"span"`
+	Candidates []LocateCandidate        `json:"candidates"`
+	Stale      OptBool                  `json:"stale"`
+	Context    OptString                `json:"context"`
+}
+
+// GetTurnId returns the value of TurnId.
+func (s *LocateResult) GetTurnId() OptString {
+	return s.TurnId
+}
+
+// GetStatus returns the value of Status.
+func (s *LocateResult) GetStatus() LocateResultStatus {
+	return s.Status
+}
+
+// GetMatchType returns the value of MatchType.
+func (s *LocateResult) GetMatchType() OptLocateResultMatchType {
+	return s.MatchType
+}
+
+// GetConfidence returns the value of Confidence.
+func (s *LocateResult) GetConfidence() OptFloat64 {
+	return s.Confidence
+}
+
+// GetDocumentId returns the value of DocumentId.
+func (s *LocateResult) GetDocumentId() OptString {
+	return s.DocumentId
+}
+
+// GetPath returns the value of Path.
+func (s *LocateResult) GetPath() OptString {
+	return s.Path
+}
+
+// GetBlockId returns the value of BlockId.
+func (s *LocateResult) GetBlockId() OptString {
+	return s.BlockId
+}
+
+// GetChunkKey returns the value of ChunkKey.
+func (s *LocateResult) GetChunkKey() OptString {
+	return s.ChunkKey
+}
+
+// GetSpan returns the value of Span.
+func (s *LocateResult) GetSpan() []string {
+	return s.Span
+}
+
+// GetCandidates returns the value of Candidates.
+func (s *LocateResult) GetCandidates() []LocateCandidate {
+	return s.Candidates
+}
+
+// GetStale returns the value of Stale.
+func (s *LocateResult) GetStale() OptBool {
+	return s.Stale
+}
+
+// GetContext returns the value of Context.
+func (s *LocateResult) GetContext() OptString {
+	return s.Context
+}
+
+// SetTurnId sets the value of TurnId.
+func (s *LocateResult) SetTurnId(val OptString) {
+	s.TurnId = val
+}
+
+// SetStatus sets the value of Status.
+func (s *LocateResult) SetStatus(val LocateResultStatus) {
+	s.Status = val
+}
+
+// SetMatchType sets the value of MatchType.
+func (s *LocateResult) SetMatchType(val OptLocateResultMatchType) {
+	s.MatchType = val
+}
+
+// SetConfidence sets the value of Confidence.
+func (s *LocateResult) SetConfidence(val OptFloat64) {
+	s.Confidence = val
+}
+
+// SetDocumentId sets the value of DocumentId.
+func (s *LocateResult) SetDocumentId(val OptString) {
+	s.DocumentId = val
+}
+
+// SetPath sets the value of Path.
+func (s *LocateResult) SetPath(val OptString) {
+	s.Path = val
+}
+
+// SetBlockId sets the value of BlockId.
+func (s *LocateResult) SetBlockId(val OptString) {
+	s.BlockId = val
+}
+
+// SetChunkKey sets the value of ChunkKey.
+func (s *LocateResult) SetChunkKey(val OptString) {
+	s.ChunkKey = val
+}
+
+// SetSpan sets the value of Span.
+func (s *LocateResult) SetSpan(val []string) {
+	s.Span = val
+}
+
+// SetCandidates sets the value of Candidates.
+func (s *LocateResult) SetCandidates(val []LocateCandidate) {
+	s.Candidates = val
+}
+
+// SetStale sets the value of Stale.
+func (s *LocateResult) SetStale(val OptBool) {
+	s.Stale = val
+}
+
+// SetContext sets the value of Context.
+func (s *LocateResult) SetContext(val OptString) {
+	s.Context = val
+}
+
+type LocateResultMatchType string
+
+const (
+	LocateResultMatchTypeExact LocateResultMatchType = "exact"
+	LocateResultMatchTypeFuzzy LocateResultMatchType = "fuzzy"
+)
+
+// AllValues returns all LocateResultMatchType values.
+func (LocateResultMatchType) AllValues() []LocateResultMatchType {
+	return []LocateResultMatchType{
+		LocateResultMatchTypeExact,
+		LocateResultMatchTypeFuzzy,
+	}
+}
+
+// MarshalText implements encoding.TextMarshaler.
+func (s LocateResultMatchType) MarshalText() ([]byte, error) {
+	switch s {
+	case LocateResultMatchTypeExact:
+		return []byte(s), nil
+	case LocateResultMatchTypeFuzzy:
+		return []byte(s), nil
+	default:
+		return nil, errors.Errorf("invalid value: %q", s)
+	}
+}
+
+// UnmarshalText implements encoding.TextUnmarshaler.
+func (s *LocateResultMatchType) UnmarshalText(data []byte) error {
+	switch LocateResultMatchType(data) {
+	case LocateResultMatchTypeExact:
+		*s = LocateResultMatchTypeExact
+		return nil
+	case LocateResultMatchTypeFuzzy:
+		*s = LocateResultMatchTypeFuzzy
+		return nil
+	default:
+		return errors.Errorf("invalid value: %q", data)
+	}
+}
+
+type LocateResultStatus string
+
+const (
+	LocateResultStatusResolved  LocateResultStatus = "resolved"
+	LocateResultStatusAmbiguous LocateResultStatus = "ambiguous"
+	LocateResultStatusNotFound  LocateResultStatus = "not-found"
+)
+
+// AllValues returns all LocateResultStatus values.
+func (LocateResultStatus) AllValues() []LocateResultStatus {
+	return []LocateResultStatus{
+		LocateResultStatusResolved,
+		LocateResultStatusAmbiguous,
+		LocateResultStatusNotFound,
+	}
+}
+
+// MarshalText implements encoding.TextMarshaler.
+func (s LocateResultStatus) MarshalText() ([]byte, error) {
+	switch s {
+	case LocateResultStatusResolved:
+		return []byte(s), nil
+	case LocateResultStatusAmbiguous:
+		return []byte(s), nil
+	case LocateResultStatusNotFound:
+		return []byte(s), nil
+	default:
+		return nil, errors.Errorf("invalid value: %q", s)
+	}
+}
+
+// UnmarshalText implements encoding.TextUnmarshaler.
+func (s *LocateResultStatus) UnmarshalText(data []byte) error {
+	switch LocateResultStatus(data) {
+	case LocateResultStatusResolved:
+		*s = LocateResultStatusResolved
+		return nil
+	case LocateResultStatusAmbiguous:
+		*s = LocateResultStatusAmbiguous
+		return nil
+	case LocateResultStatusNotFound:
+		*s = LocateResultStatusNotFound
+		return nil
+	default:
+		return errors.Errorf("invalid value: %q", data)
+	}
+}
+
 // A turn-scoped file attachment (ADR-0036); absolute path resolved by the client.
 // Ref: #/components/schemas/Mention
 type Mention struct {
@@ -2627,6 +2973,70 @@ func (s *ModelLiveState) UnmarshalText(data []byte) error {
 	}
 }
 
+// The typed refusal when POST /turns/{id}/locate answers a turn that is not waiting on a locate picker
+// (already answered, timed out, or never ambiguous).
+// Ref: #/components/schemas/NoPendingLocate
+type NoPendingLocate struct {
+	Error  NoPendingLocateError `json:"error"`
+	TurnId string               `json:"turnId"`
+}
+
+// GetError returns the value of Error.
+func (s *NoPendingLocate) GetError() NoPendingLocateError {
+	return s.Error
+}
+
+// GetTurnId returns the value of TurnId.
+func (s *NoPendingLocate) GetTurnId() string {
+	return s.TurnId
+}
+
+// SetError sets the value of Error.
+func (s *NoPendingLocate) SetError(val NoPendingLocateError) {
+	s.Error = val
+}
+
+// SetTurnId sets the value of TurnId.
+func (s *NoPendingLocate) SetTurnId(val string) {
+	s.TurnId = val
+}
+
+func (*NoPendingLocate) resolveLocateRes() {}
+
+type NoPendingLocateError string
+
+const (
+	NoPendingLocateErrorNoPendingLocate NoPendingLocateError = "no-pending-locate"
+)
+
+// AllValues returns all NoPendingLocateError values.
+func (NoPendingLocateError) AllValues() []NoPendingLocateError {
+	return []NoPendingLocateError{
+		NoPendingLocateErrorNoPendingLocate,
+	}
+}
+
+// MarshalText implements encoding.TextMarshaler.
+func (s NoPendingLocateError) MarshalText() ([]byte, error) {
+	switch s {
+	case NoPendingLocateErrorNoPendingLocate:
+		return []byte(s), nil
+	default:
+		return nil, errors.Errorf("invalid value: %q", s)
+	}
+}
+
+// UnmarshalText implements encoding.TextUnmarshaler.
+func (s *NoPendingLocateError) UnmarshalText(data []byte) error {
+	switch NoPendingLocateError(data) {
+	case NoPendingLocateErrorNoPendingLocate:
+		*s = NoPendingLocateErrorNoPendingLocate
+		return nil
+	default:
+		return errors.Errorf("invalid value: %q", data)
+	}
+}
+
 // A typed not-found refusal for a routing lookup that resolved to no record (an unknown turn or
 // session id). The engine never invents data.
 // Ref: #/components/schemas/NotFound
@@ -2669,6 +3079,7 @@ func (s *NotFound) SetID(val string) {
 func (*NotFound) getSessionMeterRes()   {}
 func (*NotFound) getTurnContextRes()    {}
 func (*NotFound) putSessionContextRes() {}
+func (*NotFound) resolveLocateRes()     {}
 
 type NotFoundError string
 
@@ -3128,6 +3539,98 @@ func (o OptInt64) Or(d int64) int64 {
 	return d
 }
 
+// NewOptLocateResult returns new OptLocateResult with value set to v.
+func NewOptLocateResult(v LocateResult) OptLocateResult {
+	return OptLocateResult{
+		Value: v,
+		Set:   true,
+	}
+}
+
+// OptLocateResult is optional LocateResult.
+type OptLocateResult struct {
+	Value LocateResult
+	Set   bool
+}
+
+// IsSet returns true if OptLocateResult was set.
+func (o OptLocateResult) IsSet() bool { return o.Set }
+
+// Reset unsets value.
+func (o *OptLocateResult) Reset() {
+	var v LocateResult
+	o.Value = v
+	o.Set = false
+}
+
+// SetTo sets value to v.
+func (o *OptLocateResult) SetTo(v LocateResult) {
+	o.Set = true
+	o.Value = v
+}
+
+// Get returns value and boolean that denotes whether value was set.
+func (o OptLocateResult) Get() (v LocateResult, ok bool) {
+	if !o.Set {
+		return v, false
+	}
+	return o.Value, true
+}
+
+// Or returns value if set, or given parameter if does not.
+func (o OptLocateResult) Or(d LocateResult) LocateResult {
+	if v, ok := o.Get(); ok {
+		return v
+	}
+	return d
+}
+
+// NewOptLocateResultMatchType returns new OptLocateResultMatchType with value set to v.
+func NewOptLocateResultMatchType(v LocateResultMatchType) OptLocateResultMatchType {
+	return OptLocateResultMatchType{
+		Value: v,
+		Set:   true,
+	}
+}
+
+// OptLocateResultMatchType is optional LocateResultMatchType.
+type OptLocateResultMatchType struct {
+	Value LocateResultMatchType
+	Set   bool
+}
+
+// IsSet returns true if OptLocateResultMatchType was set.
+func (o OptLocateResultMatchType) IsSet() bool { return o.Set }
+
+// Reset unsets value.
+func (o *OptLocateResultMatchType) Reset() {
+	var v LocateResultMatchType
+	o.Value = v
+	o.Set = false
+}
+
+// SetTo sets value to v.
+func (o *OptLocateResultMatchType) SetTo(v LocateResultMatchType) {
+	o.Set = true
+	o.Value = v
+}
+
+// Get returns value and boolean that denotes whether value was set.
+func (o OptLocateResultMatchType) Get() (v LocateResultMatchType, ok bool) {
+	if !o.Set {
+		return v, false
+	}
+	return o.Value, true
+}
+
+// Or returns value if set, or given parameter if does not.
+func (o OptLocateResultMatchType) Or(d LocateResultMatchType) LocateResultMatchType {
+	if v, ok := o.Get(); ok {
+		return v
+	}
+	return d
+}
+
 // NewOptModelLiveState returns new OptModelLiveState with value set to v.
 func NewOptModelLiveState(v ModelLiveState) OptModelLiveState {
 	return OptModelLiveState{
@@ -3454,6 +3957,11 @@ func (s *PutCorpusRequest) SetInclude(val []string) {
 func (s *PutCorpusRequest) SetExclude(val []string) {
 	s.Exclude = val
 }
+
+// ResolveLocateNoContent is response for ResolveLocate operation.
+type ResolveLocateNoContent struct{}
+
+func (*ResolveLocateNoContent) resolveLocateRes() {}
 
 // Ref: #/components/schemas/Revision
 type Revision struct {

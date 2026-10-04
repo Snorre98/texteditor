@@ -20,7 +20,7 @@ multi-root corpus, workspace-sharded context storage).
 |---|---|---|---|
 | **Fleet gateway** | model discovery, resolution (merge + gates + fallback), lifecycle | `ListModels()`, `Resolve(name, opts) → Resolution`, `Status(name) → LiveState`, `ListStatus() → []ModelState` (batch `status/all`, ADR-0040), `Start(name)` (blocking), `Stop(name)`, `Provision(ctx, name) → provisionID`, `Fingerprint(name) → string` | daemon HTTP client (ADR-0025), verb mapping, fallback ladder |
 | **Provider gateway** (leaf) | OpenAI-compatible REST/SSE calls | `Chat(ctx, target, req)`, `Stream(ctx, target, req, emit)`, `Embed(ctx, target, text)` | retry/backoff, per-server `-np 1` serialization, framing |
-| **Agent loop** | the turn loop: task → plan → tools → observe → answer | `Run(ctx, task) → (turnID, err)` (async) | turn state machine, dispatch/observe, truncation, snapshot build/persist, `RouteTurn`, auto-RAG `rag` + `context` events |
+| **Agent loop** | the turn loop: task → plan → tools → observe → answer | `Run(ctx, task) → (turnID, err)` (async), `ResolveLocate(turnID, choice)` (ADR-0048 §4) | turn state machine, dispatch/observe, truncation, snapshot build/persist, `RouteTurn`, auto-RAG `rag` + `context` + `locate` events, `/locate` parse/anchor, in-memory picker registry |
 | **Mode registry** (leaf) | prompt presets (name/systemPrompt/defaultModel) | `List()`, `Get(name)` | mode file loading (go:embed), validation |
 | **Pipeline policy** (leaf) | the one global turn policy (step cap + budgets + auto-RAG top-k) | `Policy() → PipelinePolicy` | `config/pipeline.json` loading, schema validation |
 | **Tool registry** (leaf) | tool definitions + JSON schemas (global) | `Register(tool)`, `List()` | schema validation, name-keyed binding metadata |
@@ -28,7 +28,8 @@ multi-root corpus, workspace-sharded context storage).
 | **Tool decider** (optional) | tool-intent resolution ("which tool, what args") from a writer's `request_tool` intent | `SignalTool()`, `Decide(ctx, intent, c) → (RouterResult, error)` | prompt layout, Provider.Chat, confidence threshold τ, `.cact` fingerprint |
 | **Context assembler** (leaf) | the exact token payload + per-component attribution + per-message provenance/drops/budget | `Assemble(ctx, in) → (Payload, Breakdown)` | prompt layout, budget truncation, attribution accounting, provenance, labeled drops, budget utilization, front-loaded pinned chunks sharing the RAG budget |
 | **Token metering** | counts + attribution + persistence + per-session aggregation | `Attribute(ctx, turnID, breakdown, counts) → Attributed`, `SessionUsage(ctx, sessionID)`, `SessionBreakdown(ctx, sessionID) → SessionMeter` | scale-to-total, per-workspace shard `meter.db` writes, thinking-token reconciliation (ADR-0024), per-component cumulative aggregate |
-| **Retriever** | retrieval (hybrid semantic + lexical, provenance, eviction, status) | `Query(ctx, text, topK) → []Chunk`, `Index(ctx, documentID)`, `IndexPath(ctx, path, hash)`, `Evict(ctx, ref)`, `Status() → []IndexedDocument`, `Get(ctx, refs) → []Chunk` | embedding (via Fleet+Provider), sqlite-vec KNN + FTS5 bm25 fused with RRF, per-workspace shard `index.db` |
+| **Retriever** | retrieval (hybrid semantic + lexical, provenance, eviction, status) + embedding-free FTS search for `/locate` | `Query(ctx, text, topK) → []Chunk`, `SearchText(ctx, query, limit) → []Chunk`, `Index(ctx, documentID)`, `IndexPath(ctx, path, hash)`, `Evict(ctx, ref)`, `Status() → []IndexedDocument`, `Get(ctx, refs) → []Chunk` | embedding (via Fleet+Provider), sqlite-vec KNN + FTS5 bm25 fused with RRF, sanitized FTS5 MATCH (no embed), per-workspace shard `index.db` |
+| **Locate resolver** (sealed) | deterministic, token-free `/locate` chunk anchoring: normalize → exact → fuzzy over the open document then the workspace corpus index | `Resolve(ctx, {chunk, documentID}) → LocateResult` (ADR-0048) | markdown-strip/whitespace/case normalization, normalized-hash fast path, multi-block span windows, trigram/token Dice fuzzy (threshold 0.85), candidate ranking, staleness vs `Retriever.Status` + bounded disk read |
 | **Chunker** (leaf) | chunking (heading-aware, paragraph-aligned, size-bounded) | `Chunk(tree []Block, maxTokens int) → ([]Chunk, error)`, `ChunkMarkdown(raw string, maxTokens int) → ([]Chunk, error)` | splitting algorithm |
 | **TextFormatter** (leaf) | formatting: normalize + validate + format block content | `Normalize(kind, text)`, `Validate(kind, text)`, `Format(kind, text)` | hardcoded opinionated style, structural checks |
 | **Document store** | document, blocks, version history | `Open`, `Save`, `Blocks`, `ApplyEdit`, `Commit`, `Diff`, `History`, `Candidates` | git (go-git), block-UUID minting, candidate side-table, word-diff |
@@ -91,6 +92,7 @@ flowchart LR
         WStore[Workspace store]
         Shards[Shard manager]
         Corpus[Corpus service]
+        Locate[Locate resolver]
         Bus[SSE event bus]
     end
     subgraph serving[Serving]
@@ -136,6 +138,10 @@ flowchart LR
     Corpus --> FS
     Corpus --> Shards
     Loop --> FS
+    Loop --> Locate
+    Locate --> Doc
+    Locate --> Retriever
+    Locate --> FS
     Meter --> Bus
     Fleet --> Daemon
     Daemon --> Manifest
@@ -164,6 +170,10 @@ flowchart LR
 - The `Document store` is **not** a leaf (depends on `TextFormatter` to normalize on
   `ApplyEdit` and format on `Commit`/`Save`) — a deliberate consequence of
   ADR-0029.
+- The `Locate resolver` is **not** a leaf (depends on the Document store for the
+  open document's blocks, the Retriever for the embedding-free corpus search and
+  status, and the Filesystem for bounded staleness reads) — a deliberate
+  consequence of ADR-0048. It calls **no** model and no embedding path.
 
 ## 3. Public API signatures
 
@@ -172,8 +182,8 @@ Precise Go signatures and pure-DTO type definitions live in
 
 - **Fleet + Provider + Retriever + Assembler + Meter + Document store +
   Session store + Event bus + TextFormatter + Filesystem + Workspace store +
-  Shard manager** — exact Go interface signatures (ADR-0016, ADR-0026,
-  ADR-0029, ADR-0035, ADR-0049).
+  Shard manager + Locate resolver** — exact Go interface signatures (ADR-0016,
+  ADR-0026, ADR-0029, ADR-0035, ADR-0048, ADR-0049).
 - **Serving lifecycle** — the verb contract (ADR-0007), now transported by the
   control daemon (ADR-0025).
 - The **fleet manifest schema** (two-tier) — `contracts/data-model.md` §2

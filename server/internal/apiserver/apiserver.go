@@ -704,6 +704,35 @@ func (h *handler) GetTurnContext(ctx context.Context, p genapi.GetTurnContextPar
 	return &snap, nil
 }
 
+// ResolveLocate backs POST /turns/{id}/locate (ADR-0048 §4): answer a waiting
+// turn's `/locate` ambiguity picker. An unknown turn is the typed 404; a turn
+// that is not waiting on a picker is the typed 409. The 204 carries no body —
+// the resumed turn keeps streaming on its existing /turn connection.
+func (h *handler) ResolveLocate(ctx context.Context, req *genapi.LocateChoice, p genapi.ResolveLocateParams) (genapi.ResolveLocateRes, error) {
+	if _, _, ok, err := h.d.Workspaces.TurnRoute(p.ID); err != nil {
+		return nil, err
+	} else if !ok {
+		return notFound("turn", p.ID), nil
+	}
+	choice := dto.LocateChoice{}
+	if v, ok := req.ChunkKey.Get(); ok {
+		choice.ChunkKey = v
+	}
+	if v, ok := req.Cancel.Get(); ok {
+		choice.Cancel = v
+	}
+	if err := h.d.Loop.ResolveLocate(p.ID, choice); err != nil {
+		if errors.Is(err, loop.ErrNoPendingLocate) {
+			return &genapi.NoPendingLocate{
+				Error:  genapi.NoPendingLocateErrorNoPendingLocate,
+				TurnId: p.ID,
+			}, nil
+		}
+		return nil, err
+	}
+	return &genapi.ResolveLocateNoContent{}, nil
+}
+
 // GetSessionMeter backs GET /sessions/{id}/meter (ADR-0044 §4): resolve the
 // session's workspace shard and aggregate its meter_events by component. An
 // unknown session is the typed 404.

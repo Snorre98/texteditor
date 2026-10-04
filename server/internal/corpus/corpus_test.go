@@ -77,7 +77,10 @@ func (f *fakeRetriever) has(path string) bool {
 }
 
 func (f *fakeRetriever) Query(context.Context, string, int) ([]dto.Chunk, error) { return nil, nil }
-func (f *fakeRetriever) Index(context.Context, string) error                     { return nil }
+func (f *fakeRetriever) SearchText(context.Context, string, int) ([]dto.Chunk, error) {
+	return nil, nil
+}
+func (f *fakeRetriever) Index(context.Context, string) error { return nil }
 func (f *fakeRetriever) Get(context.Context, []dto.ChunkRef) ([]dto.Chunk, error) {
 	return nil, nil
 }

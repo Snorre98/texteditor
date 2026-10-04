@@ -432,6 +432,50 @@ export const zNotFound = z.object({
     id: z.string()
 });
 
+export const zNoPendingLocate = z.object({
+    error: z.enum([
+        'no-pending-locate'
+    ]),
+    turnId: z.string()
+});
+
+export const zLocateChoice = z.object({
+    chunkKey: z.string().optional(),
+    cancel: z.boolean().optional()
+});
+
+export const zLocateCandidate = z.object({
+    documentId: z.string().optional(),
+    path: z.string(),
+    blockId: z.string().optional(),
+    chunkKey: z.string(),
+    score: z.number(),
+    textPreview: z.string(),
+    stale: z.boolean().optional()
+});
+
+export const zLocateResult = z.object({
+    turnId: z.string().optional(),
+    status: z.enum([
+        'resolved',
+        'ambiguous',
+        'not-found'
+    ]),
+    matchType: z.enum([
+        'exact',
+        'fuzzy'
+    ]).optional(),
+    confidence: z.number().optional(),
+    documentId: z.string().optional(),
+    path: z.string().optional(),
+    blockId: z.string().optional(),
+    chunkKey: z.string().optional(),
+    span: z.array(z.string()).optional(),
+    candidates: z.array(zLocateCandidate).optional(),
+    stale: z.boolean().optional(),
+    context: z.string().optional()
+});
+
 export const zEvent = z.object({
     type: z.enum([
         'token',
@@ -440,6 +484,7 @@ export const zEvent = z.object({
         'diff',
         'rag',
         'context',
+        'locate',
         'done',
         'error',
         'backpressure'
@@ -568,7 +613,7 @@ export const zContextSnapshot = z.object({
         limit: z.number().int().optional()
     })),
     decision: z.object({}).optional(),
-    locate: z.object({}).optional(),
+    locate: zLocateResult.optional(),
     createdAt: z.coerce.bigint()
 });
 
@@ -630,6 +675,8 @@ export const zBudgetUsage = z.object({
 });
 
 export const zContextEvent = zContextSnapshot;
+
+export const zLocateEvent = zLocateResult;
 
 export const zDoneEvent = z.object({
     degraded: z.boolean().optional(),
@@ -704,5 +751,7 @@ export const zGetSessionMessagesResponse = z.array(zMessage);
 export const zPutSessionContextResponse = zSession;
 
 export const zGetTurnContextResponse = zContextSnapshot;
+
+export const zResolveLocateResponse = z.void();
 
 export const zGetSessionMeterResponse = zSessionMeter;

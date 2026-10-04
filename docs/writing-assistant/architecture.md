@@ -162,6 +162,7 @@ flowchart TB
         WStore[Workspace store]
         Shards[Shard manager]
         Corpus[Corpus service]
+        Locate[Locate resolver]
         Bus[SSE event bus]
     end
     Daemon[Control daemon]
@@ -190,6 +191,10 @@ flowchart TB
     Loop --> Shards
     Loop --> FS
     Loop --> Decider
+    Loop --> Locate
+    Locate --> Doc
+    Locate --> Ret
+    Locate --> FS
     Decider --> Fleet
     Decider --> Prov
     Assembler --> Mode
@@ -214,7 +219,7 @@ flowchart TB
 |---|---|---|---|
 | Fleet gateway | model discovery, resolution (merge + gates + fallback), lifecycle | `ListModels`, `Resolve(name, opts) → Resolution`, `Status`, `Start` (blocking), `Stop`, `Provision` (async), `Fingerprint` (router sync gate) | daemon HTTP client, fallback ladder |
 | Provider gateway | OpenAI-compatible REST/SSE calls | `Chat(ctx, target, params)`, `Stream(ctx, target, params, emit)`, `Embed(ctx, target, text)` | retry/backoff, `-np 1` serialization |
-| Agent loop | turn loop (thin orchestrator, session-scoped) | `Run(ctx, task) → (turnID, err)` (async) | turn state machine, dispatch/observe, snapshot build/persist, `RouteTurn`, auto-RAG `rag` + `context` events |
+| Agent loop | turn loop (thin orchestrator, session-scoped) | `Run(ctx, task) → (turnID, err)` (async), `ResolveLocate(turnID, choice)` | turn state machine, dispatch/observe, snapshot build/persist, `RouteTurn`, auto-RAG `rag` + `context` + `locate` events, `/locate` parse/anchor, in-memory picker |
 | Mode registry | prompt presets as data (name + system prompt + default model) | `List`, `Get` | validation, file loading |
 | Pipeline policy | one global turn policy: step cap, context budgets, auto-RAG top-k (ADR-0045) | `Policy` | schema validation, `config/pipeline.json` |
 | Tool registry | tool definitions + schemas (all tools global) | `Register`, `List` | schema validation |
@@ -222,7 +227,8 @@ flowchart TB
 | Tool decider (optional) | tool-intent resolution ("which tool, what args") from a writer's `request_tool` intent — **parked/unwired** (ADR-0045) | `SignalTool`, `Decide(ctx, intent, c)` | prompt layout, Provider.Chat, τ threshold, `.cact` fingerprint |
 | Context assembler | payload + attribution + per-message provenance/drops/budget (pure) | `Assemble(ctx, in) → (Payload, Breakdown)` | layout, truncation, accounting, provenance, labeled drops, budget utilization, front-loaded pins sharing the RAG budget |
 | Token metering | counts + attribution + persistence + per-session aggregation | `Attribute(ctx, turnID, breakdown, counts)`, `SessionUsage`, `SessionBreakdown` | scale-to-total, shard `meter.db`, per-component cumulative aggregate |
-| Retriever | hybrid retrieval + provenance + eviction + status, per workspace shard | `Query`, `Index`, `IndexPath`, `Evict`, `Status`, `Get` | embedding, vec0 KNN + FTS5 bm25 fused with RRF, shard `index.db` |
+| Retriever | hybrid retrieval + provenance + eviction + status, per workspace shard | `Query`, `SearchText`, `Index`, `IndexPath`, `Evict`, `Status`, `Get` | embedding, vec0 KNN + FTS5 bm25 fused with RRF, sanitized FTS5 MATCH (embedding-free, ADR-0048), shard `index.db` |
+| Locate resolver | deterministic, token-free `/locate` anchoring: normalize → exact → fuzzy over the open document then the corpus index | `Resolve(ctx, {chunk, documentID}) → LocateResult` | markdown/whitespace/case normalization, normalized-hash fast path, span windows, trigram/token Dice (0.85), ranking, staleness |
 | Chunker | chunking (pure) | `Chunk(tree []Block, maxTokens int)` | splitting algorithm |
 | TextFormatter | formatting (pure) | `Normalize(kind, text)`, `Validate(kind, text)`, `Format(kind, text)` | hardcoded opinionated style |
 | Document store | document + versions | `Open`, `Save`, `Blocks`, `ApplyEdit`, `Commit`, `Diff`, `History`, `Candidates` | git, block UUIDs, candidate side-table |

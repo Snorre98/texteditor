@@ -4,6 +4,10 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -11,11 +15,14 @@ import (
 	_ "modernc.org/sqlite"
 
 	"texteditor/internal/assembler"
+	"texteditor/internal/document"
 	"texteditor/internal/filesystem"
+	"texteditor/internal/locate"
 	"texteditor/internal/meter"
 	"texteditor/internal/retriever"
 	"texteditor/internal/session"
 	"texteditor/internal/shard"
+	"texteditor/internal/textformatter"
 	"texteditor/internal/workspace"
 	"texteditor/shared/dto"
 )
@@ -73,12 +80,16 @@ func (stubAssembler) Assemble(_ context.Context, in dto.AssemblerInput) (dto.Pay
 
 type stubProvider struct {
 	stream func(ctx context.Context, emit func(dto.RawEvent)) error
+	calls  *int
 }
 
 func (s stubProvider) Chat(context.Context, dto.Target, dto.Request) (dto.Completion, error) {
 	return dto.Completion{}, nil
 }
 func (s stubProvider) Stream(ctx context.Context, t dto.Target, r dto.Request, emit func(dto.RawEvent)) error {
+	if s.calls != nil {
+		*s.calls++
+	}
 	return s.stream(ctx, emit)
 }
 func (stubProvider) Embed(context.Context, dto.Target, string) ([]float32, error) { return nil, nil }
@@ -97,14 +108,22 @@ func (s stubFleet) Stop(string) error                                       { re
 func (s stubFleet) Provision(context.Context, string) (string, error)       { return "", nil }
 func (s stubFleet) Fingerprint(string) (string, error)                      { return "", nil }
 
-type stubDoc struct{}
+type stubDoc struct {
+	blocks []dto.Block
+	path   string
+}
 
 func (stubDoc) Open(string) (dto.OpenResult, error) { return dto.OpenResult{}, nil }
-func (stubDoc) Path(string) (string, error)         { return "/vault/d1.md", nil }
+func (s stubDoc) Path(string) (string, error) {
+	if s.path != "" {
+		return s.path, nil
+	}
+	return "/vault/d1.md", nil
+}
 func (stubDoc) SaveTree(string, []dto.BlockWrite, dto.SaveOptions) (dto.WriteResult, error) {
 	return dto.WriteResult{}, nil
 }
-func (stubDoc) Blocks(string) ([]dto.Block, error) { return nil, nil }
+func (s stubDoc) Blocks(string) ([]dto.Block, error) { return s.blocks, nil }
 func (stubDoc) ApplyEdit(context.Context, string, dto.BlockEdit) (dto.Revision, error) {
 	return dto.Revision{}, nil
 }
@@ -123,6 +142,9 @@ type stubRetriever struct {
 	getChunks []dto.Chunk
 	getRefs   [][]dto.ChunkRef
 	getCalls  int
+
+	searchChunks []dto.Chunk
+	status       []dto.IndexedDocument
 }
 
 func (s *stubRetriever) Query(_ context.Context, text string, topK int) ([]dto.Chunk, error) {
@@ -132,10 +154,20 @@ func (s *stubRetriever) Query(_ context.Context, text string, topK int) ([]dto.C
 	s.mu.Unlock()
 	return s.chunks, nil
 }
-func (*stubRetriever) Index(context.Context, string) error             { return nil }
+func (*stubRetriever) Index(context.Context, string) error { return nil }
+func (s *stubRetriever) SearchText(_ context.Context, text string, limit int) ([]dto.Chunk, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.texts = append(s.texts, text)
+	return s.searchChunks, nil
+}
 func (*stubRetriever) IndexPath(context.Context, string, string) error { return nil }
 func (*stubRetriever) Evict(context.Context, string) error             { return nil }
-func (*stubRetriever) Status() ([]dto.IndexedDocument, error)          { return nil, nil }
+func (s *stubRetriever) Status() ([]dto.IndexedDocument, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.status, nil
+}
 func (s *stubRetriever) Get(_ context.Context, refs []dto.ChunkRef) ([]dto.Chunk, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -167,11 +199,35 @@ type stubPipeline struct{ policy dto.PipelinePolicy }
 
 func (s stubPipeline) Policy() dto.PipelinePolicy { return s.policy }
 
+// stubLocate is a configurable `/locate` resolver for loop tests.
+type stubLocate struct {
+	mu     sync.Mutex
+	result dto.LocateResult
+	err    error
+	calls  int
+	chunks []string
+}
+
+func (s *stubLocate) Resolve(_ context.Context, req locate.Request) (dto.LocateResult, error) {
+	s.mu.Lock()
+	s.calls++
+	s.chunks = append(s.chunks, req.Chunk)
+	s.mu.Unlock()
+	return s.result, s.err
+}
+
+func (s *stubLocate) callCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.calls
+}
+
 type stubSessions struct {
 	hist      []dto.Message
 	policy    json.RawMessage
 	mu        sync.Mutex
 	snapshots map[string]json.RawMessage
+	appended  []dto.Message
 }
 
 func newStubSessions() *stubSessions { return &stubSessions{snapshots: map[string]json.RawMessage{}} }
@@ -186,8 +242,19 @@ func (s *stubSessions) Resume(string) (dto.Session, error) {
 	defer s.mu.Unlock()
 	return dto.Session{ContextPolicy: s.policy}, nil
 }
-func (s *stubSessions) Append(string, dto.Message) error      { return nil }
+func (s *stubSessions) Append(_ string, msg dto.Message) error {
+	s.mu.Lock()
+	s.appended = append(s.appended, msg)
+	s.mu.Unlock()
+	return nil
+}
 func (s *stubSessions) History(string) ([]dto.Message, error) { return s.hist, nil }
+
+func (s *stubSessions) appendedMessages() []dto.Message {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]dto.Message(nil), s.appended...)
+}
 
 func (s *stubSessions) SetContextPolicy(_ string, policy json.RawMessage) error {
 	s.mu.Lock()
@@ -362,6 +429,7 @@ func happyPathDeps(bus *stubBus) Deps {
 		Workspaces: stubWorkspaces{},
 		Filesystem: &stubFilesystem{files: map[string]string{}, err: map[string]error{}},
 		Bus:        bus,
+		Locate:     &stubLocate{result: dto.LocateResult{Status: dto.LocateStatusNotFound}},
 		Pipeline: stubPipeline{policy: dto.PipelinePolicy{
 			MaxSteps:         6,
 			MaxHistoryTokens: 32000,
@@ -1302,7 +1370,7 @@ func hasEvent(events []dto.Event, typ string) bool {
 func TestInjectDocumentIDCarriesMode(t *testing.T) {
 	task := dto.Task{DocumentID: "d1", ModeName: "proofreader"}
 
-	out := injectDocumentID("edit_markdown", task, json.RawMessage(`{"blockId":"b1","text":"x"}`))
+	out := injectDocumentID("edit_markdown", task, nil, json.RawMessage(`{"blockId":"b1","text":"x"}`))
 	var m map[string]interface{}
 	if err := json.Unmarshal(out, &m); err != nil {
 		t.Fatal(err)
@@ -1311,7 +1379,7 @@ func TestInjectDocumentIDCarriesMode(t *testing.T) {
 		t.Fatalf("edit args = %v, want documentId + modeName", m)
 	}
 
-	out = injectDocumentID("diff", task, json.RawMessage(`{}`))
+	out = injectDocumentID("diff", task, nil, json.RawMessage(`{}`))
 	m = map[string]interface{}{}
 	if err := json.Unmarshal(out, &m); err != nil {
 		t.Fatal(err)
@@ -1646,4 +1714,394 @@ func newRealMeter(t *testing.T) meter.Interface {
 		t.Fatal(err)
 	}
 	return meter.New(db, nil)
+}
+
+// --------------------- /locate chunk anchoring (ADR-0048) ---------------------
+
+// waitForEvent polls the bus until an event of the given type appears.
+func waitForEvent(t *testing.T, bus *stubBus, typ string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if hasEvent(busEvents(t, bus), typ) {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("event %q never appeared: %+v", typ, busEvents(t, bus))
+}
+
+func locateEventOf(t *testing.T, events []dto.Event) dto.LocateResult {
+	t.Helper()
+	for _, ev := range events {
+		if ev.Type == "locate" {
+			var res dto.LocateResult
+			if err := json.Unmarshal(ev.Data, &res); err != nil {
+				t.Fatal(err)
+			}
+			return res
+		}
+	}
+	t.Fatalf("no locate event: %+v", events)
+	return dto.LocateResult{}
+}
+
+func locateResultInSnapshot(t *testing.T, snap dto.ContextSnapshot) dto.LocateResult {
+	t.Helper()
+	if len(snap.Locate) == 0 {
+		t.Fatal("snapshot has no locate record")
+	}
+	var res dto.LocateResult
+	if err := json.Unmarshal(snap.Locate, &res); err != nil {
+		t.Fatal(err)
+	}
+	return res
+}
+
+// Scenario: An exact paste resolves to its block; the command line is stripped
+// from the session, the locate event precedes any token, and the snapshot
+// records the outcome.
+func TestLocateExactStripsCommandAndAnchors(t *testing.T) {
+	bus := &stubBus{done: make(chan struct{})}
+	deps := happyPathDeps(bus)
+	deps.Doc = stubDoc{
+		path:   "/vault/d1.md",
+		blocks: []dto.Block{{ID: "b1", Kind: dto.BlockKindParagraph, Text: "Anchored paragraph.", Hash: "h1"}},
+	}
+	calls := 0
+	deps.Provider = stubProvider{calls: &calls, stream: func(ctx context.Context, emit func(dto.RawEvent)) error {
+		emit(dto.RawEvent{Type: "token", Data: json.RawMessage(`{"text":"ok"}`)})
+		emit(dto.RawEvent{Type: "done", Data: json.RawMessage(`{"inputTokens":10,"outputTokens":2}`)})
+		return nil
+	}}
+	deps.Locate = &stubLocate{result: dto.LocateResult{
+		Status: dto.LocateStatusResolved, MatchType: dto.LocateMatchExact, Confidence: 1.0,
+		DocumentID: "d1", BlockID: "b1", Path: "/vault/d1.md",
+	}}
+	sessions := newStubSessions()
+	shardSvc(deps).Sessions = sessions
+
+	l := New(deps)
+	turnID, err := l.Run(context.Background(), dto.Task{
+		SessionID: "s1", ModeName: "proofreader", DocumentID: "d1",
+		UserInput: "/locate\nAnchored paragraph.",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitDone(t, bus)
+
+	events := busEvents(t, bus)
+	loc := locateEventOf(t, events)
+	if loc.Status != dto.LocateStatusResolved || loc.BlockID != "b1" {
+		t.Fatalf("locate event = %+v, want resolved b1", loc)
+	}
+	// Locate precedes the answer: the first locate event is before the first token.
+	locIdx, tokIdx := -1, -1
+	for i, ev := range events {
+		if ev.Type == "locate" && locIdx < 0 {
+			locIdx = i
+		}
+		if ev.Type == "token" && tokIdx < 0 {
+			tokIdx = i
+		}
+	}
+	if locIdx < 0 || tokIdx < 0 || locIdx > tokIdx {
+		t.Fatalf("locate must precede tokens: locate=%d token=%d", locIdx, tokIdx)
+	}
+	// The command line is stripped from the session; the chunk is what is stored.
+	appended := sessions.appendedMessages()
+	if len(appended) == 0 || appended[0].Role != "user" || appended[0].Content != "Anchored paragraph." {
+		t.Fatalf("appended = %+v, want the stripped chunk", appended)
+	}
+	// The resolver saw the chunk, not the command.
+	sl := deps.Locate.(*stubLocate)
+	if len(sl.chunks) != 1 || sl.chunks[0] != "Anchored paragraph." {
+		t.Fatalf("resolver chunks = %v", sl.chunks)
+	}
+	// The snapshot records the locate outcome.
+	if got := locateResultInSnapshot(t, snapshotOf(t, events)); got.Status != dto.LocateStatusResolved {
+		t.Fatalf("snapshot locate = %+v, want resolved", got)
+	}
+	// Locating is deterministic and token-free: exactly one model round ran (the
+	// answer), so the locate step added no provider call.
+	if calls != 1 {
+		t.Fatalf("provider calls = %d, want 1 (no model call for locate)", calls)
+	}
+	_ = turnID
+}
+
+// Scenario: Not found degrades to plain chat with a labeled warning and no
+// anchor; the model still runs on the stripped input.
+func TestLocateNotFoundProceedsAsPlainChat(t *testing.T) {
+	bus := &stubBus{done: make(chan struct{})}
+	deps := happyPathDeps(bus)
+	deps.Locate = &stubLocate{result: dto.LocateResult{Status: dto.LocateStatusNotFound}}
+	sessions := newStubSessions()
+	shardSvc(deps).Sessions = sessions
+
+	l := New(deps)
+	_, err := l.Run(context.Background(), dto.Task{
+		SessionID: "s1", ModeName: "proofreader", DocumentID: "d1",
+		UserInput: "/locate\nSome unlocatable text.",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitDone(t, bus)
+
+	events := busEvents(t, bus)
+	if got := locateEventOf(t, events); got.Status != dto.LocateStatusNotFound {
+		t.Fatalf("locate event = %+v, want not-found", got)
+	}
+	if !hasEvent(events, "done") {
+		t.Fatal("plain chat did not complete")
+	}
+	appended := sessions.appendedMessages()
+	if len(appended) == 0 || appended[0].Role != "user" || appended[0].Content != "Some unlocatable text." {
+		t.Fatalf("appended = %+v, want stripped chunk", appended)
+	}
+	if got := locateResultInSnapshot(t, snapshotOf(t, events)); got.Status != dto.LocateStatusNotFound {
+		t.Fatalf("snapshot locate = %+v, want not-found", got)
+	}
+}
+
+// Scenario: Fuzzy matches require confirmation; the turn waits and resolves on
+// the choice, with no model call before the choice.
+func TestLocateAmbiguousWaitsAndResolves(t *testing.T) {
+	bus := &stubBus{done: make(chan struct{})}
+	deps := happyPathDeps(bus)
+	calls := 0
+	deps.Provider = stubProvider{calls: &calls, stream: func(ctx context.Context, emit func(dto.RawEvent)) error {
+		emit(dto.RawEvent{Type: "token", Data: json.RawMessage(`{"text":"rewritten"}`)})
+		emit(dto.RawEvent{Type: "done", Data: json.RawMessage(`{"inputTokens":9,"outputTokens":2}`)})
+		return nil
+	}}
+	deps.Doc = stubDoc{
+		path:   "/vault/d1.md",
+		blocks: []dto.Block{{ID: "b1", Kind: dto.BlockKindParagraph, Text: "Fuzzy match here.", Hash: "h1"}},
+	}
+	deps.Locate = &stubLocate{result: dto.LocateResult{
+		Status: dto.LocateStatusAmbiguous, MatchType: dto.LocateMatchFuzzy, Confidence: 0.9,
+		Candidates: []dto.LocateCandidate{{
+			DocumentID: "d1", BlockID: "b1", Path: "/vault/d1.md", ChunkKey: "b1", Score: 0.9,
+		}},
+	}}
+	sessions := newStubSessions()
+	shardSvc(deps).Sessions = sessions
+
+	l := New(deps)
+	turnID, err := l.Run(context.Background(), dto.Task{
+		SessionID: "s1", ModeName: "proofreader", DocumentID: "d1",
+		UserInput: "/locate\nFuzzy match heer.",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForEvent(t, bus, "locate")
+	if calls != 0 {
+		t.Fatalf("provider called %d times before the picker choice", calls)
+	}
+	if err := l.ResolveLocate(turnID, dto.LocateChoice{ChunkKey: "b1"}); err != nil {
+		t.Fatalf("ResolveLocate: %v", err)
+	}
+	waitDone(t, bus)
+
+	if calls == 0 {
+		t.Fatal("provider was never called after the choice")
+	}
+	if got := locateResultInSnapshot(t, snapshotOf(t, busEvents(t, bus))); got.Status != dto.LocateStatusResolved || got.BlockID != "b1" {
+		t.Fatalf("snapshot locate = %+v, want resolved b1", got)
+	}
+}
+
+// Cancel degrades to plain chat with a labeled not-found outcome.
+func TestLocateCancelDegrades(t *testing.T) {
+	bus := &stubBus{done: make(chan struct{})}
+	deps := happyPathDeps(bus)
+	deps.Locate = &stubLocate{result: dto.LocateResult{
+		Status: dto.LocateStatusAmbiguous, MatchType: dto.LocateMatchFuzzy,
+		Candidates: []dto.LocateCandidate{{Path: "/vault/d1.md", ChunkKey: "b1", BlockID: "b1", Score: 0.9}},
+	}}
+	l := New(deps)
+	turnID, err := l.Run(context.Background(), dto.Task{
+		SessionID: "s1", ModeName: "proofreader", DocumentID: "d1",
+		UserInput: "/locate\nsomething fuzzy",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForEvent(t, bus, "locate")
+	if err := l.ResolveLocate(turnID, dto.LocateChoice{Cancel: true}); err != nil {
+		t.Fatalf("ResolveLocate(cancel): %v", err)
+	}
+	waitDone(t, bus)
+	if got := locateResultInSnapshot(t, snapshotOf(t, busEvents(t, bus))); got.Status != dto.LocateStatusNotFound {
+		t.Fatalf("snapshot locate = %+v, want not-found after cancel", got)
+	}
+}
+
+// Timeout degrades to plain chat with a labeled fail-open (short injected wait).
+func TestLocateTimeoutDegrades(t *testing.T) {
+	old := locatePickerTimeout
+	locatePickerTimeout = 40 * time.Millisecond
+	defer func() { locatePickerTimeout = old }()
+
+	bus := &stubBus{done: make(chan struct{})}
+	deps := happyPathDeps(bus)
+	deps.Locate = &stubLocate{result: dto.LocateResult{
+		Status: dto.LocateStatusAmbiguous, MatchType: dto.LocateMatchFuzzy,
+		Candidates: []dto.LocateCandidate{{Path: "/vault/d1.md", ChunkKey: "b1", BlockID: "b1", Score: 0.9}},
+	}}
+	l := New(deps)
+	if _, err := l.Run(context.Background(), dto.Task{
+		SessionID: "s1", ModeName: "proofreader", DocumentID: "d1",
+		UserInput: "/locate\nsomething fuzzy",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	waitDone(t, bus)
+	res := locateResultInSnapshot(t, snapshotOf(t, busEvents(t, bus)))
+	if res.Status != dto.LocateStatusNotFound || res.Context != "locate-cancelled" {
+		t.Fatalf("snapshot locate = %+v, want labeled timeout fail-open", res)
+	}
+}
+
+// Resolving a turn that is not waiting on a picker is the typed refusal.
+func TestResolveLocateUnknownTurn(t *testing.T) {
+	bus := &stubBus{done: make(chan struct{})}
+	l := New(happyPathDeps(bus))
+	if err := l.ResolveLocate("nope", dto.LocateChoice{ChunkKey: "x"}); !errors.Is(err, ErrNoPendingLocate) {
+		t.Fatalf("ResolveLocate(unknown) = %v, want ErrNoPendingLocate", err)
+	}
+}
+
+// Scenario: The anchored turn is block-scoped. A real document store is used:
+// the model supplies only `text`, the loop forces blockId + baseHash from the
+// anchor, a candidate is staged against the anchored block, and accepting writes
+// through to disk (ADR-0048 §5, ADR-0047).
+func TestLocateAnchoredEditWritesThrough(t *testing.T) {
+	ctx := context.Background()
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.SetMaxOpenConns(1)
+	t.Cleanup(func() { db.Close() })
+	if err := document.Migrate(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+	doc, err := document.NewStore(db, t.TempDir(), t.TempDir(), textformatter.New())
+	if err != nil {
+		t.Fatal(err)
+	}
+	note := filepath.Join(t.TempDir(), "note.md")
+	if err := os.WriteFile(note, []byte("The quick brown fox jumps over the lazy dog.\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	open, err := doc.Open(note)
+	if err != nil {
+		t.Fatal(err)
+	}
+	blocks, err := doc.Blocks(open.DocumentID)
+	if err != nil || len(blocks) == 0 {
+		t.Fatalf("blocks: %v (%d)", err, len(blocks))
+	}
+	blockID, blockHash := blocks[0].ID, blocks[0].Hash
+
+	exec := &anchoredExecutor{doc: doc, documentID: open.DocumentID, wantBlock: blockID, wantHash: blockHash}
+	step := 0
+	provider := stubProvider{stream: func(ctx context.Context, emit func(dto.RawEvent)) error {
+		if step == 0 {
+			step++
+			// The model supplies only `text`; the loop injects the target.
+			emit(dto.RawEvent{Type: "tool_call", Data: json.RawMessage(
+				`{"id":"tc1","name":"edit_markdown","arguments":"{\"text\":\"A quick brown fox leaps over a lazy dog.\"}"}`)})
+			return nil
+		}
+		emit(dto.RawEvent{Type: "token", Data: json.RawMessage(`{"text":"done"}`)})
+		emit(dto.RawEvent{Type: "done", Data: json.RawMessage(`{"inputTokens":12,"outputTokens":3}`)})
+		return nil
+	}}
+
+	bus := &stubBus{done: make(chan struct{})}
+	deps := happyPathDeps(bus)
+	deps.Doc = doc
+	deps.Provider = provider
+	deps.Executor = exec
+	deps.Locate = &stubLocate{result: dto.LocateResult{
+		Status: dto.LocateStatusResolved, MatchType: dto.LocateMatchExact, Confidence: 1.0,
+		DocumentID: open.DocumentID, BlockID: blockID, Path: note,
+	}}
+	l := New(deps)
+	if _, err := l.Run(ctx, dto.Task{
+		SessionID: "s1", ModeName: "proofreader", DocumentID: open.DocumentID,
+		UserInput: "/locate\nThe quick brown fox jumps over the lazy dog.",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	waitDone(t, bus)
+
+	if !exec.sawForcedArgs {
+		t.Fatal("edit_markdown did not receive the forced blockId/baseHash anchor")
+	}
+	cands, err := doc.Candidates(open.DocumentID, blockID)
+	if err != nil || len(cands) == 0 {
+		t.Fatalf("candidates = %d (%v), want the anchored block to be staged", len(cands), err)
+	}
+	if cands[0].Text == "" || cands[0].BlockID != blockID {
+		t.Fatalf("candidate = %+v, want anchored block %s", cands[0], blockID)
+	}
+
+	wr, err := doc.Commit(open.DocumentID, dto.CommitOptions{})
+	if err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	if !wr.WrittenThrough {
+		t.Fatal("commit did not write through")
+	}
+	onDisk, err := os.ReadFile(note)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(onDisk), "leaps") {
+		t.Fatalf("disk file not written through: %q", onDisk)
+	}
+}
+
+// anchoredExecutor stages an edit through a real document store, asserting the
+// loop forced the anchor's blockId + baseHash into the tool args.
+type anchoredExecutor struct {
+	doc        document.Interface
+	documentID string
+	wantBlock  string
+	wantHash   string
+
+	sawForcedArgs bool
+}
+
+func (e *anchoredExecutor) Invoke(_ context.Context, name string, args json.RawMessage) (json.RawMessage, error) {
+	if name != "edit_markdown" {
+		return nil, nil
+	}
+	var in struct {
+		BlockID  string `json:"blockId"`
+		BaseHash string `json:"baseHash"`
+		Text     string `json:"text"`
+	}
+	if err := json.Unmarshal(args, &in); err != nil {
+		return nil, err
+	}
+	if in.BlockID == e.wantBlock && in.BaseHash == e.wantHash {
+		e.sawForcedArgs = true
+	}
+	_, err := e.doc.ApplyEdit(context.Background(), e.documentID, dto.BlockEdit{
+		BlockID: in.BlockID,
+		Text:    in.Text,
+		Guards:  []dto.Guard{{BlockID: in.BlockID, Hash: in.BaseHash}},
+	})
+	if err != nil {
+		return nil, err
+	}
+	return json.RawMessage(`{"ok":true,"blockId":"` + in.BlockID + `"}`), nil
 }

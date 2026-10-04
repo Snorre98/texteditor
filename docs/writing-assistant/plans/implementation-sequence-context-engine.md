@@ -27,6 +27,15 @@ The order is **engine-first**: the write boundary and the pipeline are made
 trustworthy before the client is rebuilt, so the new TUI is written against a
 fixed engine.
 
+**Execution order (agreed 2026-10-04).** Phase D is in flight and E1 may run in
+parallel with it. The sequence is **D → E1 → C5 → E2 → E3**: E1 (transport +
+walking skeleton) consumes neither D nor C5; C5 (ADR-0051) is an engine phase
+placed before E2 so the TUI renders its thinking/budget labels; E2/E3 consume
+D's locate surfaces and C5's thinking/budget surfaces. OpenTUI stays frozen
+in-tree throughout. Handoff prompts:
+[`handoff-e1.md`](handoff-e1.md), [`handoff-c5.md`](handoff-c5.md),
+[`handoff-e2.md`](handoff-e2.md), [`handoff-e3.md`](handoff-e3.md).
+
 ---
 
 ## Phase A — Approve → file updated, reliably (ADR-0047)
@@ -79,7 +88,7 @@ edit the file externally mid-turn → conflict, no clobber.
 Recorded follow-up (ADR-0051): `config/pipeline.json` and its schema gain the
 `thinking` default, `reserveOutputTokens`, `sessionBudgetSoftRatio`, and the
 `compaction` object — data-only, presets stay three-field. The behavior lands in
-Phase C item 7.
+Phase C5.
 
 Gate: each preset runs an edit turn; no behavioral mode fields remain.
 
@@ -112,26 +121,13 @@ Engine-first: workspace/corpus state and the pipeline land before the tray UI.
    /corpus/documents/{id}` (idempotent eviction); `ALLOWED_ROOTS` bounds both
    `GET /directories` and corpus indexing with a typed refusal; `index`
    progress event (Phase C defines none).
-7. **Reasoning policy + context budgets (ADR-0051)** — thinking policy
-   `off|auto|on` (pipeline default, session policy + `Task.context` override;
-   never a preset field); `auto` = one labeled escalation after a structured
-   failure; provider maps the runner's thinking toggle with a labeled
-   `thinking-unsupported` degrade; exact thinking metering + a `thinking` SSE
-   event; a thinking budget whose truncation is labeled (never an empty
-   `done`); the per-turn context-window gate (priority drops labeled
-   `context-window`, typed `context-window-exceeded` when fixed+pinned+user
-   alone overflow); `Session.tokenBudget` soft warning / hard refusal
-   (`session-budget-exceeded`); metered, labeled compaction of oldest history
-   (own meter row, pins + recent turns survive); per-turn measurements
-   (prompt/thinking/completion tokens, wall-clock, model + quant, window
-   utilization) recorded with the snapshot/meter. Contract additions are
-   additive and OpenAPI-first.
+7. **Reasoning policy + context budgets (ADR-0051)** — split out as
+   **Phase C5** below (engine; sequenced between E1 and E2); it is not part of
+   the landed C1–C4 set.
 
-Gate: open a vault → workspace registered + shard populated → multi-root scope
-and idempotent eviction behave → auto-RAG provenance visible → any turn
-explainable after it ends → a mechanical edit runs thinking-off with exact
-thinking accounting, and an over-window or over-budget turn is refused or
-compacted with a label (never silently truncated).
+Gate (C1–C4): open a vault → workspace registered + shard populated → multi-root
+scope and idempotent eviction behave → auto-RAG provenance visible → any turn
+explainable after it ends.
 
 ---
 
@@ -160,43 +156,150 @@ file; ambiguity and not-found behave as contracted.
 
 ---
 
-## Phase E — Ratatui TUI v2 (ADR-0046)
+## Phase E1 — Ratatui transport + walking skeleton (ADR-0046)
 
-May start after Phase B if a usable client is needed sooner; otherwise after
-Phase D. The corpus tree and context tray consume Phase C's `/corpus` surface
-and per-workspace shards — they must not ship against an empty index.
+May start immediately, in parallel with Phase D. Scope is the client's
+transport and a usable chat loop — no corpus tree, no tray, no reader, and no
+C5 labels; those land in E2/E3 against the fixed engine.
 
-1. **Crate** `client/tui-rs/`: Ratatui + crossterm, plain cargo, tokio bridge
-   (async generated calls + stream → UI channel).
-2. **Regenerated Rust client** with its own `openapi-to-rust.toml` and
-   committed `src/generated/` (fixes the stale `/fleet` gap).
-3. **Rust SSE decoder** per ADR-0031 (framing + typed dispatch; label
-   unknown/invalid; stop at terminal).
-4. **Discovery**: `ENGINE_URL` > `ENGINE_PORT` > `127.0.0.1:9100`; `/health`
-   probe and `baseUrl` adoption.
-5. **UI**: chat streaming, preset tabs, **read-only document reader pane**
-   (canonical markdown joined from `GET /documents/{id}/blocks`, rendered with
-   `tui-markdown`, toggleable beside chat — ADR-0050), meter, RAG/context
-   panel, diff/approve, status line (target file, write-through/conflict
-   state), bracketed paste, `@`-mention picker (engine support exists,
-   ADR-0036), workspace open/resume, corpus tree (multi-root scope,
-   per-document status, index/evict/rebuild, allowed-roots boundary UX),
-   context tray (assembled components with pin/remove, editable retrieval
-   query, auto-RAG toggle, pin-for-session), session list/resume scoped to the
-   workspace, cancel generation, session titles. The reader is built over a
-   `Block[]` view-model with the `PUT /documents/{id}/tree` write path left
-   unwired; **no editor and no manual save** (ADR-0050).
-6. **Fleet orchestration engine-side** (ADR-0040 recorded note) before or with
-   the client; the TUI renders `/fleet` only. Fold in the daemon reliability
-   fixes the lifecycle verbs depend on (pass `NAME` to `serve.sh`, stop through
-   `serve.sh stop`, health-probe state reconciliation, delegate log mapping).
-7. **Build + retirement**: `tools/build-tui-rs.sh` (plain cargo; SSD env
-   documented, never auto-set); freeze OpenTUI now, retire it after the parity
+1. **Crate** `client/tui-rs/`: Ratatui + crossterm, plain cargo (no Tauri CLI,
+   no Node/Bun), tokio bridge (async generated calls + the `/turn` byte stream
+   → a UI channel; the render loop stays synchronous and render-only).
+2. **Regenerated Rust client**: the crate owns its own `openapi-to-rust.toml`
+   and committed `src/generated/` (fixes the stale `/fleet` gap; includes the
+   C1–C4 routes). Tauri's generated tree stays untouched.
+3. **Rust SSE decoder** per ADR-0031: framing, per-event serde dispatch, unknown
+   or invalid events labeled and skipped, terminal stop. It must tolerate the
+   future `locate` (D) and `thinking` (C5) events as unknown until E2.
+4. **Discovery**: `ENGINE_URL` > numeric `ENGINE_PORT` >
+   `http://127.0.0.1:9100`, `/health` probe, `baseUrl` adoption.
+5. **UI v1**: chat with streaming, preset tabs (`GET /modes`), diff preview +
+   approve (`POST /edits` → `/commits`), status line (connection, resolved
+   model, target file, write-through/conflict), bracketed paste. No editor and
+   no manual save — approve is the write boundary (ADR-0047).
+6. **Bootstrap**: open a document (`POST /documents`), create/resume a session,
+   `POST /turn` (`workspaceId` optional; the canonical-parent fallback covers
+   pre-workspace flows).
+7. **Build**: `tools/build-tui-rs.sh` (plain `cargo build`; the external-SSD
+   `RUSTUP_HOME`/`CARGO_HOME` exports documented, never auto-set — ADR-0043).
+
+Gate: `cargo test` and the build script are green; a live-model run chats,
+streams, produces a candidate, approves it, and the file on disk changes (or a
+conflict is labeled).
+
+---
+
+## Phase C5 — Reasoning policy + context-window budgets (ADR-0051)
+
+Engine phase, sequenced **before E2** (the TUI renders its labels); it may run
+after or in parallel with E1. Full scope from ADR-0051:
+
+1. **Thinking policy** `off|auto|on`: pipeline default
+   (`config/pipeline.json`), session policy + `Task.context` override, never a
+   preset field. `auto` runs thinking-off first and retries **once** with
+   thinking-on after a structured failure (`invalid-structure`, `guard-failed`,
+   or no tool call and no answer), labeled `thinking-escalated`, bounded by the
+   step cap.
+2. **Runner mapping** with labeled degradation: mlx-lm
+   `chat_template_kwargs: {"enable_thinking": false}`, llama.cpp where jinja
+   templates are enabled, OpenAI-compatible `reasoning_effort`/vendor fields; an
+   unsupported runner degrades to thinking-on labeled `thinking-unsupported`.
+3. **Exact thinking accounting + progress**: the provider surfaces reasoning
+   deltas as a raw event; the loop accumulates them; the meter attributes them
+   exactly (ADR-0024's approximation remains only when the count is omitted); a
+   `thinking` SSE event lets clients show an indicator.
+4. **Thinking budget**: a reasoning cap in the pipeline; hitting it emits
+   `thinking-truncated`; a `length` turn with neither tool call nor answer is a
+   labeled error, never an empty `done`.
+5. **Per-turn context-window gate**: priority-ordered assembly against
+   `model.capabilities.contextLength` with the output reserve; drops labeled
+   `context-window`; fixed + pinned + user alone over the window → typed
+   `context-window-exceeded` before any provider call.
+6. **Session budget live**: soft ratio warning (`session-budget-soft`), hard
+   threshold refusal (`session-budget-exceeded`) unless metered compaction
+   succeeds first.
+7. **Metered compaction**: oldest turns → one labeled summary (its own meter
+   row, thinking-off, bounded); pins and recent turns survive; the snapshot
+   records `compacted` + the summarized range.
+8. **Measurements**: prompt/thinking/completion tokens, wall-clock latency,
+   model + quant, window utilization recorded per turn with the snapshot/meter.
+9. **Data**: `config/pipeline.json` + schema gain `thinking`,
+   `reserveOutputTokens`, `sessionBudgetSoftRatio`, `compaction
+   {enabled,triggerHistoryTokens,keepRecentTurns}` — validated fail-fast.
+10. **Contract**: additive OpenAPI-first — `thinking` event, typed budget
+    errors, snapshot/meter fields. `behaviors/context-budgets.feature` is
+    normative.
+
+Suggested checkpoints: **C5a** thinking policy + runner mapping + exact
+accounting + `thinking` event + measurements; **C5b** window gate + soft/hard
+budgets + compaction + typed errors.
+
+Gate: a mechanical edit runs thinking-off with exact thinking accounting; an
+over-window or over-budget turn is refused or compacted with a label — never
+silently truncated; `context-budgets.feature` scenarios pass.
+
+---
+
+## Phase E2 — Context surfaces + engine additions (ADR-0046, ADR-0049, ADR-0050, ADR-0051, ADR-0048)
+
+Requires Phase D (locate) and Phase C5 (thinking/budget labels). Builds the
+context-management half of the TUI over E1's transport.
+
+1. **Workspace + sessions**: open/resume a workspace (`GET/POST /workspaces`),
+   bounded directory browser (`GET /directories`, typed
+   `path-outside-allowed-roots` UX), workspace-scoped session list/resume
+   (`GET /sessions?workspaceId=`).
+2. **Engine additions (OpenAPI-first)**: optional `title` on
+   `CreateSessionRequest` + a rename route, and an explicit
+   `POST /turns/{id}/cancel` (turn-scoped cancel registry; labeled terminal
+   outcome; partial usage metered).
+3. **Reader pane** (ADR-0050): `Block[]` → `\n\n` join → `tui-markdown`,
+   toggleable beside chat; the `PUT /documents/{id}/tree` write path stays
+   unwired.
+4. **Inspector panels**: meter (`meter` event + `GET /sessions/{id}/meter`),
+   RAG/context (`rag` + `context` snapshots: messages, chunks, drops, budget,
+   `pinned`/`humanOverride` labels).
+5. **Context tray**: pin/remove, exclude, editable retrieval query, auto-RAG
+   toggle; `PUT /sessions/{id}/context` (pin-for-session) + per-turn
+   `Task.context` overrides.
+6. **Corpus tree**: multi-root scope, per-document status, index/evict/rebuild
+   (`/corpus`, `/corpus/index`, `DELETE /corpus/documents/{id}`).
+7. **Mentions + paste**: `@`-mention picker (`Task.mentions`), bracketed paste
+   throughout.
+8. **Locate UI** (D): `locate` event rendering, ambiguity picker
+   (`POST /turns/{id}/locate`), anchored-turn status.
+9. **C5 labels**: thinking indicator (`thinking` event), window/budget/
+   compaction labels, latency/token readouts from the measurements.
+
+Gate: `cargo test` green; a manual vault run exercises workspace → corpus
+index/status/evict → tray pin/exclude → reader → meter/context → mentions →
+locate; cancel leaves a labeled terminal state; thinking/budget labels render.
+
+---
+
+## Phase E3 — Orchestration, daemon reliability, parity (ADR-0046, ADR-0040)
+
+Closes the client swap.
+
+1. **Engine-side model orchestration** (ADR-0040 recorded note): on a degraded
+   resolve, the engine attempts one flagged, bounded `Fleet.Start(default)` and
+   re-resolves; the failure is labeled. The TUI renders `/fleet` and issues raw
+   lifecycle verbs only — no busy/poll/switch logic in the client.
+2. **Daemon reliability fixes** (`macos-dev-config`), because the lifecycle
+   verbs the TUI uses must be trustworthy: pass `NAME` to `serve.sh` (correct
+   `serve-<name>.log` + `/log/{name}`), label with the model name not the
+   runner, stop through `serve.sh stop` (pkill pattern; detached runners must
+   die), reconcile live state by health probe when unknown/after a daemon
+   restart, resolve or remove the `SERVE_PORT_<NAME>` hint, and fix the
+   delegate log-path mapping.
+3. **Build + parity**: `tools/build-tui-rs.sh` gains the test gate; the parity
    checklist (chat, reader, tabs, meter, RAG/context, diff/approve,
-   write-through status, fleet render, paste).
+   write-through status, fleet render, paste) is verified end-to-end.
+4. **Retirement state**: OpenTUI stays **frozen in-tree** (decision recorded;
+   it is unreferenced by builds and docs as the active client).
 
-Gate: the parity checklist passes against the fixed engine; approving an edit
-shows the written path or a conflict.
+Gate: engine and daemon `go test ./...` green; the parity checklist passes;
+approving an edit shows the written path or a conflict.
 
 ---
 

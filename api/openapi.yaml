@@ -514,7 +514,8 @@ paths:
             `data: <payload>` where <type> is one of the Event.type enum values
             and <payload> is the matching component schema (TokenEvent,
             MeterEvent, CandidateEvent, DiffEvent, RagEvent, ContextEvent,
-            DoneEvent, ErrorEvent, BackpressureEvent). One turn per connection: the server
+            LocateEvent, DoneEvent, ErrorEvent, BackpressureEvent). One turn per
+            connection: the server
             demultiplexes a turn's events to exactly one client stream, so
             payloads do not repeat the turnId. (ADR-0017 §6, amended.)
           content:
@@ -654,6 +655,46 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/NotFound'
+
+  /turns/{id}/locate:
+    post:
+      operationId: resolveLocate
+      summary: Answer a waiting turn's `/locate` ambiguity picker (ADR-0048 §4)
+      description: >
+        When a `/locate` turn resolves to a fuzzy match it emits a `locate` event
+        with ranked candidates and waits (bounded) for the user's choice. This
+        route resumes the turn: pick a candidate by its `chunkKey`, or cancel to
+        degrade the turn to plain chat. No model call and no edit happen before
+        the choice. An unknown turn id is a typed 404; a turn that is not waiting
+        on a picker (already answered, timed out, or never ambiguous) is a typed
+        409.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LocateChoice'
+      responses:
+        '204':
+          description: the choice was delivered to the waiting turn
+        '404':
+          description: no turn exists with the id
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotFound'
+        '409':
+          description: the turn is not waiting on a locate picker
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NoPendingLocate'
 
   /sessions/{id}/meter:
     get:
@@ -1350,6 +1391,100 @@ components:
         id:
           type: string
 
+    NoPendingLocate:
+      type: object
+      description: >
+        The typed refusal when POST /turns/{id}/locate answers a turn that is
+        not waiting on a locate picker (already answered, timed out, or never
+        ambiguous).
+      required: [error, turnId]
+      properties:
+        error:
+          type: string
+          enum: [no-pending-locate]
+        turnId:
+          type: string
+
+    LocateChoice:
+      type: object
+      description: >
+        The ambiguity picker's answer (ADR-0048 §4): pick a candidate by its
+        `chunkKey`, or cancel to degrade the turn to plain chat.
+      properties:
+        chunkKey:
+          type: string
+        cancel:
+          type: boolean
+
+    LocateCandidate:
+      type: object
+      description: >
+        One ranked `/locate` anchor candidate in an ambiguous result (ADR-0048
+        §4). `chunkKey` is the picker's choice key (the block id for an
+        open-document block, else the indexed chunk key).
+      required: [path, chunkKey, score, textPreview]
+      properties:
+        documentId:
+          type: string
+        path:
+          type: string
+        blockId:
+          type: string
+        chunkKey:
+          type: string
+        score:
+          type: number
+        textPreview:
+          type: string
+        stale:
+          type: boolean
+
+    LocateResult:
+      type: object
+      description: >
+        The deterministic `/locate` chunk-anchoring outcome (ADR-0048 §3),
+        recorded in the turn's context snapshot, emitted as the `locate` SSE
+        event, and returned by the picker route. `status` is resolved |
+        ambiguous | not-found; `matchType` is exact | fuzzy. Fuzzy matches always
+        require confirmation, so a fuzzy outcome is `ambiguous` even with one
+        candidate.
+      required: [status]
+      properties:
+        turnId:
+          type: string
+          description: >
+            Populated only on the emitted `locate` SSE event so a client can
+            answer the ambiguity picker via POST /turns/{id}/locate; absent from
+            the snapshot record (the snapshot envelope already carries turnId).
+        status:
+          type: string
+          enum: [resolved, ambiguous, not-found]
+        matchType:
+          type: string
+          enum: [exact, fuzzy]
+        confidence:
+          type: number
+        documentId:
+          type: string
+        path:
+          type: string
+        blockId:
+          type: string
+        chunkKey:
+          type: string
+        span:
+          type: array
+          items:
+            type: string
+        candidates:
+          type: array
+          items:
+            $ref: '#/components/schemas/LocateCandidate'
+        stale:
+          type: boolean
+        context:
+          type: string
+
     # SSE event vocabulary (ADR-0017 §6, amended Track 1 TUI session). The
     # hand-framed server writes `event: <type>` + `data: <payload>`; the client
     # codegens (Hey API + Zod, openapi-to-rust) consume the payload schemas
@@ -1366,7 +1501,7 @@ components:
       properties:
         type:
           type: string
-          enum: [token, meter, candidate, diff, rag, context, done, error, backpressure]
+          enum: [token, meter, candidate, diff, rag, context, locate, done, error, backpressure]
 
     TokenEvent:
       type: object
@@ -1578,8 +1713,7 @@ components:
           type: object
           description: Reserved for Phase F decision records; not implemented in Phase C3.
         locate:
-          type: object
-          description: Reserved for Phase D locate outcomes; not implemented in Phase C3.
+          $ref: '#/components/schemas/LocateResult'
         createdAt:
           type: integer
           format: int64
@@ -1675,6 +1809,10 @@ components:
     ContextEvent:
       allOf:
         - $ref: '#/components/schemas/ContextSnapshot'
+
+    LocateEvent:
+      allOf:
+        - $ref: '#/components/schemas/LocateResult'
 
     DoneEvent:
       type: object

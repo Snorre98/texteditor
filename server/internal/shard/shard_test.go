@@ -15,10 +15,13 @@ import (
 type stubRetriever struct{}
 
 func (stubRetriever) Query(context.Context, string, int) ([]dto.Chunk, error) { return nil, nil }
-func (stubRetriever) Index(context.Context, string) error                     { return nil }
-func (stubRetriever) IndexPath(context.Context, string, string) error         { return nil }
-func (stubRetriever) Evict(context.Context, string) error                     { return nil }
-func (stubRetriever) Status() ([]dto.IndexedDocument, error)                  { return nil, nil }
+func (stubRetriever) SearchText(context.Context, string, int) ([]dto.Chunk, error) {
+	return nil, nil
+}
+func (stubRetriever) Index(context.Context, string) error             { return nil }
+func (stubRetriever) IndexPath(context.Context, string, string) error { return nil }
+func (stubRetriever) Evict(context.Context, string) error             { return nil }
+func (stubRetriever) Status() ([]dto.IndexedDocument, error)          { return nil, nil }
 func (stubRetriever) Get(context.Context, []dto.ChunkRef) ([]dto.Chunk, error) {
 	return nil, nil
 }

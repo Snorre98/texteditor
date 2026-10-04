@@ -34,6 +34,7 @@ const (
 	ProvisionModelOperation      OperationName = "ProvisionModel"
 	PutCorpusOperation           OperationName = "PutCorpus"
 	PutSessionContextOperation   OperationName = "PutSessionContext"
+	ResolveLocateOperation       OperationName = "ResolveLocate"
 	SaveDocumentOperation        OperationName = "SaveDocument"
 	StartModelOperation          OperationName = "StartModel"
 	StartTurnOperation           OperationName = "StartTurn"

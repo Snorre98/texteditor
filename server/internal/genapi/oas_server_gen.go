@@ -180,6 +180,16 @@ type Handler interface {
 	//
 	// PUT /sessions/{id}/context
 	PutSessionContext(ctx context.Context, req *ContextPolicy, params PutSessionContextParams) (PutSessionContextRes, error)
+	// ResolveLocate implements resolveLocate operation.
+	//
+	// When a `/locate` turn resolves to a fuzzy match it emits a `locate` event with ranked candidates and
+	// waits (bounded) for the user's choice. This route resumes the turn: pick a candidate by its
+	// `chunkKey`, or cancel to degrade the turn to plain chat. No model call and no edit happen before the
+	// choice. An unknown turn id is a typed 404; a turn that is not waiting on a picker (already answered,
+	// timed out, or never ambiguous) is a typed 409.
+	//
+	// POST /turns/{id}/locate
+	ResolveLocate(ctx context.Context, req *LocateChoice, params ResolveLocateParams) (ResolveLocateRes, error)
 	// SaveDocument implements saveDocument operation.
 	//
 	// The manual-edit wire path (ADR-0038): the client's whole block-tree snapshot. Array order =

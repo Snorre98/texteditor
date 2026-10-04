@@ -23,6 +23,7 @@ import (
 	"texteditor/internal/filesystem"
 	"texteditor/internal/fleet"
 	"texteditor/internal/genapi"
+	"texteditor/internal/loop"
 	"texteditor/internal/session"
 	"texteditor/internal/shard"
 	"texteditor/internal/textformatter"
@@ -305,7 +306,8 @@ func (s *stubLoopEmitter) Run(ctx context.Context, task dto.Task) (string, error
 	return id, nil
 }
 
-// ------------------------- tests -------------------------
+// ResolveLocate satisfies loop.Interface; these stubs never open a picker.
+func (*stubLoopEmitter) ResolveLocate(string, dto.LocateChoice) error { return nil }
 
 func TestHealth(t *testing.T) {
 	srv, _ := newTestServer(t)
@@ -625,6 +627,9 @@ func (c *captureLoop) Run(_ context.Context, task dto.Task) (string, error) {
 	return id, nil
 }
 
+// ResolveLocate satisfies loop.Interface.
+func (c *captureLoop) ResolveLocate(string, dto.LocateChoice) error { return nil }
+
 func TestStartTurnDecodesMentions(t *testing.T) {
 	bus := &fakeBus{}
 	loop := &captureLoop{bus: bus}
@@ -793,6 +798,9 @@ func (s *stagingLoop) setErr(err error) {
 	defer s.mu.Unlock()
 	s.err = err
 }
+
+// ResolveLocate satisfies loop.Interface.
+func (s *stagingLoop) ResolveLocate(string, dto.LocateChoice) error { return nil }
 
 func (s *stagingLoop) runErr() error {
 	s.mu.Lock()
@@ -1177,6 +1185,9 @@ func (s *snapshotLoop) Run(_ context.Context, task dto.Task) (string, error) {
 	return id, nil
 }
 
+// ResolveLocate satisfies loop.Interface.
+func (s *snapshotLoop) ResolveLocate(string, dto.LocateChoice) error { return nil }
+
 // TestContextSnapshotE2EMatchesEvent covers context-inspector "A completed turn
 // persists a context snapshot": the snapshot persisted through the real session
 // store is returned by GET /turns/{id}/context and is the same data the loop
@@ -1260,6 +1271,9 @@ func (c *captureContextLoop) Run(_ context.Context, task dto.Task) (string, erro
 	}()
 	return id, nil
 }
+
+// ResolveLocate satisfies loop.Interface.
+func (c *captureContextLoop) ResolveLocate(string, dto.LocateChoice) error { return nil }
 
 func TestStartTurnDecodesContext(t *testing.T) {
 	bus := &fakeBus{}
@@ -1433,5 +1447,112 @@ func TestPutSessionContextUnknownIsTyped404(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "not-found") || !strings.Contains(rec.Body.String(), "session") {
 		t.Fatalf("404 body = %s", rec.Body.String())
+	}
+}
+
+// --------------------- /locate picker route (ADR-0048 §4) ---------------------
+
+// locateLoop records ResolveLocate calls and returns a configured error.
+type locateLoop struct {
+	mu      sync.Mutex
+	choices []dto.LocateChoice
+	err     error
+}
+
+func (*locateLoop) Run(context.Context, dto.Task) (string, error) { return "t1", nil }
+
+func (l *locateLoop) ResolveLocate(_ string, c dto.LocateChoice) error {
+	l.mu.Lock()
+	l.choices = append(l.choices, c)
+	l.mu.Unlock()
+	return l.err
+}
+
+func (l *locateLoop) recorded() []dto.LocateChoice {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]dto.LocateChoice(nil), l.choices...)
+}
+
+func TestResolveLocateRoute204(t *testing.T) {
+	bus := &fakeBus{}
+	ll := &locateLoop{}
+	srv, err := New(Deps{
+		Fleet:      stubFleet{},
+		Modes:      stubModes{},
+		Tools:      stubTools{},
+		Doc:        stubDoc{},
+		Filesystem: &stubFilesystem{},
+		Workspaces: stubWorkspaces{},
+		Shards:     stubShards{svc: &shard.Services{Sessions: stubSessions{}}},
+		Loop:       ll,
+	}, bus)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/turns/t1/locate", strings.NewReader(`{"chunkKey":"b1"}`))
+	req.Header.Set("Content-Type", "application/json")
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("resolve locate = %d, body %s", rec.Code, rec.Body.String())
+	}
+	got := ll.recorded()
+	if len(got) != 1 || got[0].ChunkKey != "b1" || got[0].Cancel {
+		t.Fatalf("choice = %+v, want chunkKey b1", got)
+	}
+}
+
+func TestResolveLocateUnknownTurn404(t *testing.T) {
+	bus := &fakeBus{}
+	srv, err := New(Deps{
+		Fleet:      stubFleet{},
+		Modes:      stubModes{},
+		Tools:      stubTools{},
+		Doc:        stubDoc{},
+		Filesystem: &stubFilesystem{},
+		Workspaces: emptyWorkspaces{},
+		Shards:     stubShards{svc: &shard.Services{Sessions: stubSessions{}}},
+		Loop:       &locateLoop{},
+	}, bus)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/turns/nope/locate", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("unknown turn = %d, body %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "not-found") || !strings.Contains(rec.Body.String(), "turn") {
+		t.Fatalf("404 body = %s", rec.Body.String())
+	}
+}
+
+func TestResolveLocateNoPending409(t *testing.T) {
+	bus := &fakeBus{}
+	srv, err := New(Deps{
+		Fleet:      stubFleet{},
+		Modes:      stubModes{},
+		Tools:      stubTools{},
+		Doc:        stubDoc{},
+		Filesystem: &stubFilesystem{},
+		Workspaces: stubWorkspaces{},
+		Shards:     stubShards{svc: &shard.Services{Sessions: stubSessions{}}},
+		Loop:       &locateLoop{err: loop.ErrNoPendingLocate},
+	}, bus)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/turns/t1/locate", strings.NewReader(`{"cancel":true}`))
+	req.Header.Set("Content-Type", "application/json")
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("no pending locate = %d, body %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "no-pending-locate") {
+		t.Fatalf("409 body = %s", rec.Body.String())
 	}
 }

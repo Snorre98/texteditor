@@ -173,6 +173,42 @@ func TestQueryZeroK(t *testing.T) {
 	}
 }
 
+// TestSearchTextFTSOnly covers the `/locate` lexical surface (ADR-0048 §2): a
+// sanitized FTS5 MATCH with provenance, no embedding call.
+func TestSearchTextFTSOnly(t *testing.T) {
+	embedder := &stubEmbedder{dim: 8}
+	r := newTestRetriever(t, twoBlockDocs("/vault/note.md"), &stubFiles{}, embedder)
+	ctx := context.Background()
+	if err := r.Index(ctx, "d1"); err != nil {
+		t.Fatal(err)
+	}
+	before := embedder.callCount()
+
+	// Punctuation in the query must not break the FTS MATCH syntax.
+	chunks, err := r.SearchText(ctx, `alpha, "beta" gamma`, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(chunks) == 0 {
+		t.Fatal("SearchText returned no chunks")
+	}
+	if chunks[0].ChunkKey != "d1#0" || chunks[0].Path != "/vault/note.md" || chunks[0].Text == "" {
+		t.Fatalf("chunk provenance = %+v", chunks[0])
+	}
+	if embedder.callCount() != before {
+		t.Fatalf("SearchText embedded: calls %d -> %d", before, embedder.callCount())
+	}
+
+	// A punctuation-only query sanitizes to no terms.
+	empty, err := r.SearchText(ctx, "!!! ???", 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(empty) != 0 {
+		t.Fatalf("punctuation-only query = %v, want empty", empty)
+	}
+}
+
 func TestIndexEmptyDocument(t *testing.T) {
 	r := newTestRetriever(t, &stubDocs{path: "/vault/empty.md"}, &stubFiles{}, &stubEmbedder{dim: 8})
 	if err := r.Index(context.Background(), "d1"); err != nil {

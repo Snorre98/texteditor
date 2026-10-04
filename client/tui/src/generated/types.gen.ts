@@ -390,11 +390,66 @@ export type NotFound = {
 };
 
 /**
+ * The typed refusal when POST /turns/{id}/locate answers a turn that is not waiting on a locate picker (already answered, timed out, or never ambiguous).
+ *
+ */
+export type NoPendingLocate = {
+    error: 'no-pending-locate';
+    turnId: string;
+};
+
+/**
+ * The ambiguity picker's answer (ADR-0048 §4): pick a candidate by its `chunkKey`, or cancel to degrade the turn to plain chat.
+ *
+ */
+export type LocateChoice = {
+    chunkKey?: string;
+    cancel?: boolean;
+};
+
+/**
+ * One ranked `/locate` anchor candidate in an ambiguous result (ADR-0048 §4). `chunkKey` is the picker's choice key (the block id for an open-document block, else the indexed chunk key).
+ *
+ */
+export type LocateCandidate = {
+    documentId?: string;
+    path: string;
+    blockId?: string;
+    chunkKey: string;
+    score: number;
+    textPreview: string;
+    stale?: boolean;
+};
+
+/**
+ * The deterministic `/locate` chunk-anchoring outcome (ADR-0048 §3), recorded in the turn's context snapshot, emitted as the `locate` SSE event, and returned by the picker route. `status` is resolved | ambiguous | not-found; `matchType` is exact | fuzzy. Fuzzy matches always require confirmation, so a fuzzy outcome is `ambiguous` even with one candidate.
+ *
+ */
+export type LocateResult = {
+    /**
+     * Populated only on the emitted `locate` SSE event so a client can answer the ambiguity picker via POST /turns/{id}/locate; absent from the snapshot record (the snapshot envelope already carries turnId).
+     *
+     */
+    turnId?: string;
+    status: 'resolved' | 'ambiguous' | 'not-found';
+    matchType?: 'exact' | 'fuzzy';
+    confidence?: number;
+    documentId?: string;
+    path?: string;
+    blockId?: string;
+    chunkKey?: string;
+    span?: Array<string>;
+    candidates?: Array<LocateCandidate>;
+    stale?: boolean;
+    context?: string;
+};
+
+/**
  * Framing marker for the SSE stream: the `event:` line carries `type`; the `data:` line carries the payload schema matching that type. The payload JSON itself has no `type` field.
  *
  */
 export type Event = {
-    type: 'token' | 'meter' | 'candidate' | 'diff' | 'rag' | 'context' | 'done' | 'error' | 'backpressure';
+    type: 'token' | 'meter' | 'candidate' | 'diff' | 'rag' | 'context' | 'locate' | 'done' | 'error' | 'backpressure';
 };
 
 export type TokenEvent = {
@@ -517,12 +572,7 @@ export type ContextSnapshot = {
     decision?: {
         [key: string]: unknown;
     };
-    /**
-     * Reserved for Phase D locate outcomes; not implemented in Phase C3.
-     */
-    locate?: {
-        [key: string]: unknown;
-    };
+    locate?: LocateResult;
     createdAt: number;
 };
 
@@ -593,6 +643,8 @@ export type BudgetUsage = {
 };
 
 export type ContextEvent = ContextSnapshot;
+
+export type LocateEvent = LocateResult;
 
 export type DoneEvent = {
     degraded?: boolean;
@@ -1115,7 +1167,7 @@ export type StartTurnData = {
 
 export type StartTurnResponses = {
     /**
-     * SSE event stream. Each message is `event: <type>` followed by `data: <payload>` where <type> is one of the Event.type enum values and <payload> is the matching component schema (TokenEvent, MeterEvent, CandidateEvent, DiffEvent, RagEvent, ContextEvent, DoneEvent, ErrorEvent, BackpressureEvent). One turn per connection: the server demultiplexes a turn's events to exactly one client stream, so payloads do not repeat the turnId. (ADR-0017 §6, amended.)
+     * SSE event stream. Each message is `event: <type>` followed by `data: <payload>` where <type> is one of the Event.type enum values and <payload> is the matching component schema (TokenEvent, MeterEvent, CandidateEvent, DiffEvent, RagEvent, ContextEvent, LocateEvent, DoneEvent, ErrorEvent, BackpressureEvent). One turn per connection: the server demultiplexes a turn's events to exactly one client stream, so payloads do not repeat the turnId. (ADR-0017 §6, amended.)
      *
      */
     200: Event;
@@ -1229,6 +1281,37 @@ export type GetTurnContextResponses = {
 };
 
 export type GetTurnContextResponse = GetTurnContextResponses[keyof GetTurnContextResponses];
+
+export type ResolveLocateData = {
+    body: LocateChoice;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/turns/{id}/locate';
+};
+
+export type ResolveLocateErrors = {
+    /**
+     * no turn exists with the id
+     */
+    404: NotFound;
+    /**
+     * the turn is not waiting on a locate picker
+     */
+    409: NoPendingLocate;
+};
+
+export type ResolveLocateError = ResolveLocateErrors[keyof ResolveLocateErrors];
+
+export type ResolveLocateResponses = {
+    /**
+     * the choice was delivered to the waiting turn
+     */
+    204: void;
+};
+
+export type ResolveLocateResponse = ResolveLocateResponses[keyof ResolveLocateResponses];
 
 export type GetSessionMeterData = {
     body?: never;
