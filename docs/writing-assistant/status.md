@@ -18,7 +18,7 @@ Last verified: 2026-10-04.
 | Router seam (D2–D5) + enablement seam (D1 minus the ML job) | ✅ committed (`504cd16`); **parked** (ADR-0045) — packages in-tree, unwired |
 | Track 2 — Deployment (E) · Tauri editor (F) | ✅ landed — **frozen** (ADR-0044) |
 | Fleet observability surface (ADR-0040 — `/fleet`, batch status, selectors) | ✅ |
-| Context-engine refocus (write-through safety, presets, RAG wiring, context inspector, `/locate`, context management — workspaces, multi-root corpus, tray — Ratatui TUI) | 🚧 active roadmap — Phase B landed; C–F remain — [`plans/implementation-sequence-context-engine.md`](plans/implementation-sequence-context-engine.md) |
+| Context-engine refocus (write-through safety, presets, RAG wiring, context inspector, `/locate`, context management — workspaces, multi-root corpus, tray — Ratatui TUI + reader pane) | 🚧 active roadmap — Phase B landed; C–F remain — [`plans/implementation-sequence-context-engine.md`](plans/implementation-sequence-context-engine.md) |
 | D1 ML fine-tune (Needle 2 `.cact` + flip a mode to `router`) | 🚧 deferred by trigger |
 | CI automation | 🚧 none |
 | `InferenceControl` surface (risk #9) | 🚧 deferred |
@@ -39,7 +39,7 @@ Last verified: 2026-10-04.
 
 | Layer | Status | Notes |
 |---|---|---|
-| Layer 3 — Clients (dumb, swappable) | ✅ | TUI v2 (Ratatui, ADR-0046) in progress; OpenTUI + Tauri editor + web frozen; one contract (ADR-0014) |
+| Layer 3 — Clients (dumb, swappable) | ✅ | TUI v2 (Ratatui, ADR-0046) in progress, incl. a read-only reader pane (ADR-0050); OpenTUI + Tauri editor + web frozen; one contract (ADR-0014) |
 | API contract | ✅ | 20 routes incl. Track-1.5 + ADR-0038/0040 amendments; the deferred `/sessions/{id}/meter` is intentionally absent |
 | Layer 2 — Engine | ✅ | all modules below |
 | Layer 0 — Model serving | ✅ | via control daemon (ADR-0025/0027/0033), not a raw Ollama port |
@@ -152,7 +152,7 @@ The phases (A–F) are detailed in
 2. ✅ **Phase B — prompt presets + one pipeline (ADR-0045)** — landed: modes are `name`/`systemPrompt`/`defaultModel`; `config/pipeline.json` is the one validated policy (maxSteps + budgets + autoRagTopK); one agentic loop, all tools global, auto-RAG always; router parked/unwired.
 3. **Phase C — real RAG + context management + context inspector (ADR-0044, ADR-0049)** — production indexing + vault bulk ingest; workspace registry (`workspaces.db`) + per-workspace context-state shards; multi-root corpus scope (default `**/*.md`, hidden dirs excluded) with canonicalized dedupe; `ALLOWED_ROOTS` boundary on browsing + indexing; idempotent eviction (vec0 + FTS) and per-document status (`/corpus`); hybrid FTS5 + vec0 fusion; auto-RAG `rag` events; labeled truncation; assembler v2 + persisted snapshots + `context` route + `GET /sessions/{id}/meter`.
 4. **Phase D — `/locate` (ADR-0048)** — engine-side command parse; normalized exact-then-fuzzy resolver over the open document then the vault; `locate` event + snapshot record; ambiguity picker; anchored guarded edit.
-5. **Phase E — Ratatui TUI v2 (ADR-0046)** — `client/tui-rs/`; regenerated Rust client + Rust SSE decoder; preset tabs, meter, context panel, diff/approve, write-through status, bracketed paste, mentions/sessions/cancel; workspace open/resume, corpus tree (multi-root scope, status, index/evict/rebuild, allowed-roots UX), context tray (pin/remove, retrieval query, auto-RAG, pin-for-session); fleet orchestration engine-side + daemon reliability fixes; retire OpenTUI on parity.
+5. **Phase E — Ratatui TUI v2 (ADR-0046)** — `client/tui-rs/`; regenerated Rust client + Rust SSE decoder; preset tabs, read-only reader pane (ADR-0050 — rendered markdown over the block tree, `tui-markdown`, write path unwired), meter, context panel, diff/approve, write-through status, bracketed paste, mentions/sessions/cancel; workspace open/resume, corpus tree (multi-root scope, status, index/evict/rebuild, allowed-roots UX), context tray (pin/remove, retrieval query, auto-RAG, pin-for-session); fleet orchestration engine-side + daemon reliability fixes; retire OpenTUI on parity.
 6. **Phase F — decision layer (Laya) + thesis validation** — `laya-decider` runner; one global retrieval-gating policy; second meter row; golden-query metrics; model evaluation; budget defaults recorded.
 7. **Add CI** — no `.github/workflows` exists, yet the plans frame every acceptance criterion as a "CI gate". Engine `go test ./...`, TUI (`cargo test` for tui-rs; OpenTUI/Tauri gates skipped while frozen); optionally a Gherkin runner for the 14 `.feature` specs (currently prose-only). The build seam is ready: `tools/build-tauri.sh` (ADR-0043) is CI-shaped — no machine-specific paths, frozen lockfile, skippable gates.
 8. **Fix provision tooling** — `macos-dev-config/internal/fleetdaemon/provision.go` shells the deprecated `huggingface-cli`; switch to `hf download` (huggingface-hub ≥ 1.27).

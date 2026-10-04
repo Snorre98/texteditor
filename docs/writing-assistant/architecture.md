@@ -341,6 +341,7 @@ flowchart TB
 | Filesystem boundary | `ALLOWED_ROOTS` bounds `GET /directories` browsing and corpus indexing; outside paths are typed refusals, even at `ENGINE_BIND=0.0.0.0` — ADR-0049, ADR-0021 |
 | Edit formatting | the engine owns the bytes: whole-block edits, `TextFormatter` normalize/validate/format, block-level guard, structured edit result — ADR-0029 |
 | Workspace navigation | engine-served shallow directory listing (Workspace leaf) + turn-scoped, metered `@`-mentions that are read-only context, never versioned documents — ADR-0035, ADR-0036 |
+| Document reader | read-only rendered markdown over the engine block tree (`GET /documents/{id}/blocks`, joined fragments, `tui-markdown`); a toggleable pane shaped over a `Block[]` view-model to extend into an editor, with the `SaveTree` write path left unwired; approve stays the only write boundary — ADR-0050 |
 | Inference control surface | a future `InferenceControl` interface *behind* the Provider seam (a sibling of `ProviderGateway`, not a change to it); the "knobs" (logprobs, grammar, KV, speculative decoding) are decoupled from the OpenAI-compatible contract for the MVP — `research/vision-native-local-llm-text-editing.md` |
 | Deployment/security | sidecar spawn dynamic-port-default; localhost bind; Tailscale deny-by-default — ADR-0021 |
 
@@ -395,10 +396,11 @@ Full records in [adr/](adr/). Index:
 | 0043 | One-script Tauri build (`tools/build-tauri.sh`) | Accepted — frozen (0044) |
 | 0044 | Context-engine north-star: TUI-first, explainable context, decision layer | Accepted — extended by 0045 (no per-mode decision config) and 0046 (Rust TUI) |
 | 0045 | Prompt presets: one turn pipeline, behavioral mode fields removed | Accepted |
-| 0046 | TUI v2: standalone Ratatui (Rust) client, replacing OpenTUI | Accepted |
+| 0046 | TUI v2: standalone Ratatui (Rust) client, replacing OpenTUI | Accepted — amended by 0050 (reader pane) |
 | 0047 | Auto write-through on approve with external-change detection | Accepted |
 | 0048 | `/locate`: anchor a pasted chunk to its vault location | Accepted |
 | 0049 | Context management: workspaces, multi-root corpus, allowed-roots boundary, context tray | Accepted — amends 0016 (per-instance SQLite), 0026 (workspace-scoped sessions), 0035 §3 (workspace entity; leaf rename) |
+| 0050 | TUI reader pane: read-only rendered markdown over the engine block tree, editor-extensible | Accepted — amends 0046 §5/§9 |
 
 ## 10. Quality Requirements
 

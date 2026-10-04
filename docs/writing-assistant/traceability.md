@@ -57,6 +57,7 @@ row: ADR-0001/0016 map to it and to §2/§5.2/§8.
 | 0047 | §5.2, §6, §8 | versioning | interface, data-model, failure-semantics | Q4 |
 | 0048 | §4, §5.2, §6, §8 | locate-anchor | interface, data-model | Q4, Q6 |
 | 0049 | §4, §5.2, §8 | context-management | interface, data-model | Q1, Q6 |
+| 0050 | §3, §7 | client-swap | module-boundaries | — |
 
 ## Behavior contract ↔ quality scenario coverage
 
@@ -77,7 +78,7 @@ row: ADR-0001/0016 map to it and to §2/§5.2/§8.
 | provider-hotswap.feature | 0005, 0009, 0015, 0016, 0019 |
 | token-metering.feature | 0011, 0016, 0022, 0024, 0036 |
 | versioning.feature | 0004, 0020, 0038, 0039 |
-| client-swap.feature | 0002, 0013, 0016, 0017, 0023, 0037 |
+| client-swap.feature | 0002, 0013, 0016, 0017, 0023, 0037, 0046, 0050 |
 | sessions.feature | 0026 |
 | tool-routing.feature | 0028 |
 | edit-integrity.feature | 0029 |
@@ -157,6 +158,9 @@ row: ADR-0001/0016 map to it and to §2/§5.2/§8.
 - ADR-0044 → *extended* (not reversed) by ADR-0045 (the decision layer gets
   one global policy, not per-mode config) and ADR-0046 (Rust codegen is
   unfrozen for the Ratatui TUI only; Tauri/web remain frozen).
+- ADR-0046 §5/§9 → *amended* by ADR-0050: the TUI gains a read-only document
+  reader pane (rendered markdown over the engine block tree) whose write path is
+  left unwired; no editor, no manual save — ADR-0047 still holds.
 - ADR-0011/0036/0044/0048 → *extended* (not reversed) by ADR-0049: workspaces,
   a multi-root corpus scope with per-document status and idempotent eviction,
   the `ALLOWED_ROOTS` filesystem boundary, and the per-turn context tray are

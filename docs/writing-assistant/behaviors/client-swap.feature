@@ -2,7 +2,7 @@
 Feature: Dumb clients
   Clients contain no domain logic; everything is generated from the OpenAPI
   contract and routed to the engine.
-  Normative per ADR-0002, ADR-0013, ADR-0017, ADR-0046.
+  Normative per ADR-0002, ADR-0013, ADR-0017, ADR-0046, ADR-0050.
 
   Scenario: A client is generated, not hand-coded
     Given the OpenAPI spec is updated with a new endpoint
@@ -27,6 +27,12 @@ Feature: Dumb clients
 
   Scenario: The TUI renders via Ratatui
     Given the Ratatui TUI is built
-    When a panel (chat, meter, diff) updates
+    When a panel (chat, reader, meter, diff) updates
     Then it renders from engine-sourced state snapshots through Ratatui widgets
     And the generated Rust client and the hand-written SSE decoder are its only transport
+
+  Scenario: The document reader renders engine-sourced blocks
+    Given a document is open
+    When the reader pane renders
+    Then it renders the canonical markdown joined from GET /documents/{id}/blocks
+    And the client holds no document state of record and never writes

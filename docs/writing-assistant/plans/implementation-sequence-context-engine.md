@@ -7,7 +7,9 @@ v2), [ADR-0047](../adr/0047-auto-write-through-conflicts.md) (auto
 write-through + conflicts), [ADR-0048](../adr/0048-locate-chunk-anchoring.md)
 (`/locate`), and [ADR-0049](../adr/0049-context-management-corpus-tray.md)
 (workspaces, multi-root corpus, context tray, workspace-sharded context
-storage). Track 2 (deployment + Tauri editor) is **landed and frozen**
+storage); the reader pane is added by
+[ADR-0050](../adr/0050-tui-reader-pane.md) (read-only rendered markdown,
+editor-extensible). Track 2 (deployment + Tauri editor) is **landed and frozen**
 ([`implementation-sequence-future.md`](implementation-sequence-future.md));
 nothing here resumes it.
 
@@ -148,22 +150,26 @@ and per-workspace shards — they must not ship against an empty index.
    unknown/invalid; stop at terminal).
 4. **Discovery**: `ENGINE_URL` > `ENGINE_PORT` > `127.0.0.1:9100`; `/health`
    probe and `baseUrl` adoption.
-5. **UI**: chat streaming, preset tabs, meter, RAG/context panel, diff/approve,
-   status line (target file, write-through/conflict state), bracketed paste,
-   `@`-mention picker (engine support exists, ADR-0036), workspace
-   open/resume, corpus tree (multi-root scope, per-document status,
-   index/evict/rebuild, allowed-roots boundary UX), context tray (assembled
-   components with pin/remove, editable retrieval query, auto-RAG toggle,
-   pin-for-session), session list/resume scoped to the workspace, cancel
-   generation, session titles. No editor panel, no manual save.
+5. **UI**: chat streaming, preset tabs, **read-only document reader pane**
+   (canonical markdown joined from `GET /documents/{id}/blocks`, rendered with
+   `tui-markdown`, toggleable beside chat — ADR-0050), meter, RAG/context
+   panel, diff/approve, status line (target file, write-through/conflict
+   state), bracketed paste, `@`-mention picker (engine support exists,
+   ADR-0036), workspace open/resume, corpus tree (multi-root scope,
+   per-document status, index/evict/rebuild, allowed-roots boundary UX),
+   context tray (assembled components with pin/remove, editable retrieval
+   query, auto-RAG toggle, pin-for-session), session list/resume scoped to the
+   workspace, cancel generation, session titles. The reader is built over a
+   `Block[]` view-model with the `PUT /documents/{id}/tree` write path left
+   unwired; **no editor and no manual save** (ADR-0050).
 6. **Fleet orchestration engine-side** (ADR-0040 recorded note) before or with
    the client; the TUI renders `/fleet` only. Fold in the daemon reliability
    fixes the lifecycle verbs depend on (pass `NAME` to `serve.sh`, stop through
    `serve.sh stop`, health-probe state reconciliation, delegate log mapping).
 7. **Build + retirement**: `tools/build-tui-rs.sh` (plain cargo; SSD env
    documented, never auto-set); freeze OpenTUI now, retire it after the parity
-   checklist (chat, tabs, meter, RAG/context, diff/approve, write-through
-   status, fleet render, paste).
+   checklist (chat, reader, tabs, meter, RAG/context, diff/approve,
+   write-through status, fleet render, paste).
 
 Gate: the parity checklist passes against the fixed engine; approving an edit
 shows the written path or a conflict.
