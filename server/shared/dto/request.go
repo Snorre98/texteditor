@@ -15,4 +15,10 @@ type Request struct {
 	Messages        []Message      // the assembled conversation (system + history + rag + user)
 	Tools           []ToolDef      // all registered tools (global; ADR-0045), in splice order
 	EffectiveParams SamplingParams // merged manifest.defaults ← opts.Overrides
+	// Thinking is the desired thinking-channel state (ADR-0051 §3): nil leaves
+	// the runner default; false asks the runner to disable thinking (the
+	// provider maps this per Target.Runner); true asks it to enable thinking
+	// (the `auto` escalation). The provider is still a pure transport — it only
+	// renders the toggle, never decides the policy.
+	Thinking *bool
 }

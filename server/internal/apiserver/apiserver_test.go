@@ -153,12 +153,18 @@ func (stubSessions) TurnContext(string) (json.RawMessage, error) {
 }
 func (stubSessions) SetContextPolicy(string, json.RawMessage) error { return nil }
 func (stubSessions) ContextPolicy(string) (json.RawMessage, error)  { return nil, nil }
+func (stubSessions) CompactHistory(string, string, int) (int64, int64, int, error) {
+	return 0, 0, 0, nil
+}
 
 // stubMeter implements meter.Interface for the /sessions/{id}/meter route.
 type stubMeter struct{}
 
-func (stubMeter) Attribute(context.Context, string, string, string, dto.Breakdown, dto.ProviderCounts) (dto.AttributedBreakdown, error) {
+func (stubMeter) Attribute(context.Context, string, string, string, dto.Breakdown, dto.ProviderCounts, dto.TurnMeasurement) (dto.AttributedBreakdown, error) {
 	return dto.AttributedBreakdown{}, nil
+}
+func (stubMeter) AttributeCompaction(context.Context, string, string, string, dto.ProviderCounts) error {
+	return nil
 }
 func (stubMeter) SessionUsage(context.Context, string) (int, error) { return 5, nil }
 func (stubMeter) SessionBreakdown(_ context.Context, sessionID string) (dto.SessionMeter, error) {

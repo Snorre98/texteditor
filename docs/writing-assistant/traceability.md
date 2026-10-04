@@ -58,7 +58,7 @@ row: ADR-0001/0016 map to it and to §2/§5.2/§8.
 | 0048 | §4, §5.2, §6, §8 | locate-anchor | interface, data-model | Q4, Q6 |
 | 0049 | §4, §5.2, §8 | context-management | interface, data-model (precise contract: §7 `Task.context` + replace-when-present merge, §10 `Session.contextPolicy`/`SetContextPolicy`/`ContextPolicy`, §5 assembler `Pinned` + humanOverride labels, data-model §1.4 `sessions.context_policy`; Phase C4) | Q1, Q6 |
 | 0050 | §3, §7 | client-swap | module-boundaries | — |
-| 0051 | §4, §5.2, §8 | context-budgets | interface, failure-semantics, data-model | Q1, Q6 |
+| 0051 | §4, §5.2, §8 | context-budgets | interface (§2 `Runner`/`Thinking`/`reasoning`, §5 window gate, §6 measurements/compaction, §8c policy fields), failure-semantics (typed `context-window-exceeded`/`session-budget-exceeded`/`thinking-truncated`/`no-outcome` + `thinking-*` labels), data-model (`meter_measurements`, `compaction` component, pipeline fields); Phase C5 | Q1, Q6 |
 
 ## Behavior contract ↔ quality scenario coverage
 

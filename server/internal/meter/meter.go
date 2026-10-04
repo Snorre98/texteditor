@@ -20,9 +20,14 @@ import (
 
 // TokenMeter is the Token metering public API (interface.md §6, amended at A4:
 // Attribute now carries sessionID + model, resolving the data-model.md §1.3
-// requirement that meter_events.session_id and .model are populated).
+// requirement that meter_events.session_id and .model are populated). ADR-0051
+// adds the per-turn measurement record and the separate compaction model row.
 type TokenMeter interface {
-	Attribute(ctx context.Context, turnID, sessionID, model string, b dto.Breakdown, counts dto.ProviderCounts) (dto.AttributedBreakdown, error)
+	Attribute(ctx context.Context, turnID, sessionID, model string, b dto.Breakdown, counts dto.ProviderCounts, m dto.TurnMeasurement) (dto.AttributedBreakdown, error)
+	// AttributeCompaction records the metered summary call of a compaction as
+	// its own model row (component "compaction", ADR-0051 §8). It is a separate
+	// metered model call, not folded into the turn's components.
+	AttributeCompaction(ctx context.Context, turnID, sessionID, model string, counts dto.ProviderCounts) error
 	// SessionUsage returns a session's cumulative token total (prompt + completion
 	// across all its turns). It backs the per-session budget check (ADR-0026 §5) —
 	// the meter owns the cumulative tally, so the loop reads it from here.
@@ -65,8 +70,9 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 }
 
 // Attribute scales the breakdown onto the provider counts, persists one
-// meter_events row per populated component, and emits one meter event.
-func (m *meter) Attribute(ctx context.Context, turnID, sessionID, model string, b dto.Breakdown, counts dto.ProviderCounts) (dto.AttributedBreakdown, error) {
+// meter_events row per populated component plus the turn's measurement, and
+// emits one meter event.
+func (m *meter) Attribute(ctx context.Context, turnID, sessionID, model string, b dto.Breakdown, counts dto.ProviderCounts, measurement dto.TurnMeasurement) (dto.AttributedBreakdown, error) {
 	// Scale the six prompt components onto the provider's prompt_eval_count.
 	scaled := scalePrompt(b, counts.InputTokens)
 
@@ -100,11 +106,49 @@ func (m *meter) Attribute(ctx context.Context, turnID, sessionID, model string, 
 	if err := m.persist(ctx, turnID, sessionID, model, out, completion); err != nil {
 		return out, err
 	}
+	// The measurement is authoritative from the provider's totals; fill any
+	// unset fields from the attributed breakdown so the record is complete.
+	measurement.Model = model
+	if measurement.PromptTokens == 0 {
+		measurement.PromptTokens = counts.InputTokens
+	}
+	if measurement.ThinkingTokens == 0 {
+		measurement.ThinkingTokens = thinking
+	}
+	if measurement.CompletionTokens == 0 {
+		measurement.CompletionTokens = counts.OutputTokens
+	}
+	if err := m.recordMeasurement(ctx, turnID, sessionID, model, measurement); err != nil {
+		return out, err
+	}
 
 	if m.bus != nil {
-		m.bus.Emit(meterEvent(turnID, out, completion))
+		m.bus.Emit(meterEvent(turnID, out, completion, &measurement))
 	}
 	return out, nil
+}
+
+// AttributeCompaction persists the summary call as its own metered row
+// (component "compaction", model = the summarizer) and a measurement row. It
+// emits no meter event: the compaction is part of the enclosing turn's record,
+// not a separate client-visible turn (ADR-0051 §8).
+func (m *meter) AttributeCompaction(ctx context.Context, turnID, sessionID, model string, counts dto.ProviderCounts) error {
+	ts := time.Now().UnixMilli()
+	if counts.InputTokens != 0 || counts.OutputTokens != 0 {
+		if _, err := m.db.ExecContext(ctx,
+			`INSERT INTO meter_events (ts, session_id, turn_id, component, prompt_tokens, completion_tokens, approx, model)
+			 VALUES (?, ?, ?, ?, ?, ?, 0, ?)`,
+			ts, sessionID, turnID, "compaction", counts.InputTokens, counts.OutputTokens, model,
+		); err != nil {
+			return err
+		}
+	}
+	return m.recordMeasurement(ctx, turnID+":compaction", sessionID, model, dto.TurnMeasurement{
+		PromptTokens:     counts.InputTokens,
+		ThinkingTokens:   counts.ThinkingTokens,
+		CompletionTokens: counts.OutputTokens,
+		Model:            model,
+	})
 }
 
 // scalePrompt scales the six components proportionally onto total, with the
@@ -185,7 +229,7 @@ func (m *meter) SessionUsage(ctx context.Context, sessionID string) (int, error)
 
 // meterComponents is the canonical component order for SessionBreakdown, so the
 // response shape is deterministic regardless of row insertion order.
-var meterComponents = []string{"system", "tools", "rag", "history", "mentions", "user", "thinking", "completion"}
+var meterComponents = []string{"system", "tools", "rag", "history", "mentions", "user", "thinking", "completion", "compaction"}
 
 // SessionBreakdown aggregates a session's meter_events by component and returns
 // the cumulative per-component totals plus the overall total (interface.md §6).
@@ -235,9 +279,41 @@ func SessionExceeded(used int, budget *int, nextTokens int) bool {
 	return used+nextTokens > *budget
 }
 
-// meterEvent renders the single meter event emitted per turn.
-func meterEvent(turnID string, a dto.AttributedBreakdown, completion int) dto.Event {
-	data, _ := json.Marshal(map[string]interface{}{
+// SessionBudgetState classifies a session's cumulative usage against its budget
+// (ADR-0051 §7): soft is true when usage has crossed the soft ratio (a labeled
+// warning; the turn proceeds), hard is true when adding nextTokens would cross
+// the budget itself (a typed refusal unless compaction rescues the turn).
+func SessionBudgetState(used int, budget *int, softRatio float64, nextTokens int) (soft, hard bool) {
+	if budget == nil {
+		return false, false
+	}
+	if softRatio > 0 {
+		soft = float64(used) >= float64(*budget)*softRatio
+	}
+	hard = used+nextTokens > *budget
+	return soft, hard
+}
+
+// recordMeasurement persists one turn's measurement row (ADR-0051 §11). The
+// turn_id is the primary key, so a re-run upserts.
+func (m *meter) recordMeasurement(ctx context.Context, turnID, sessionID, model string, meas dto.TurnMeasurement) error {
+	_, err := m.db.ExecContext(ctx,
+		`INSERT INTO meter_measurements (turn_id, session_id, model, prompt_tokens, thinking_tokens, completion_tokens, latency_ms, window_utilization, ts)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(turn_id) DO UPDATE SET
+		   session_id = excluded.session_id, model = excluded.model,
+		   prompt_tokens = excluded.prompt_tokens, thinking_tokens = excluded.thinking_tokens,
+		   completion_tokens = excluded.completion_tokens, latency_ms = excluded.latency_ms,
+		   window_utilization = excluded.window_utilization, ts = excluded.ts`,
+		turnID, sessionID, model, meas.PromptTokens, meas.ThinkingTokens, meas.CompletionTokens, meas.LatencyMs, meas.WindowUtilization, time.Now().UnixMilli(),
+	)
+	return err
+}
+
+// meterEvent renders the single meter event emitted per turn, carrying the
+// per-turn measurement (ADR-0051 §11).
+func meterEvent(turnID string, a dto.AttributedBreakdown, completion int, measurement *dto.TurnMeasurement) dto.Event {
+	payload := map[string]interface{}{
 		"system":         a.SystemPrompt,
 		"tools":          a.Tools,
 		"rag":            a.Rag,
@@ -247,7 +323,11 @@ func meterEvent(turnID string, a dto.AttributedBreakdown, completion int) dto.Ev
 		"thinking":       a.Thinking,
 		"thinkingApprox": a.ThinkingApprox,
 		"completion":     completion,
-	})
+	}
+	if measurement != nil {
+		payload["measurement"] = measurement
+	}
+	data, _ := json.Marshal(payload)
 	return dto.Event{TurnID: turnID, Type: "meter", Data: data}
 }
 

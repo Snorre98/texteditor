@@ -49,8 +49,8 @@ manifest), each with the `daemon`'s host/port/runner and its
 `defaults`/`capabilities`/`modeTags`. The engine maps this to
 `Fleet.ListModels()` and uses `defaults` in `Resolve`'s merge. `runner` and
 `daemon` were added by ADR-0033 §4 so consumers can do runner-specific memory
-management and target `start`/`stop`; the engine client ignores them
-(daemon-owned fields). `fingerprint` is optional: the model's
+management and target `start`/`stop`; the engine also consumes `runner` to map
+the per-runner thinking toggle (ADR-0051 §3). `fingerprint` is optional: the model's
 `source.fingerprint`, projected only when `source.kind == "needle"` (the tool
 routing fine-tune artifact). It feeds the engine's `router-tools-stale` startup
 gate (ADR-0028 §4) and is absent from every other entry. `modelId` is optional:

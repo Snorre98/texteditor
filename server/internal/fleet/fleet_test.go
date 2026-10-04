@@ -38,6 +38,7 @@ func newFakeDaemon(t *testing.T) *fakeDaemon {
 		Name: "gemma4-26b", Host: "127.0.0.1", Port: 8002,
 		Capabilities: dto.Capabilities{ContextLength: 262144},
 		ModeTags:     []string{"editor"},
+		Runner:       "mlx-lm",
 		ModelID:      "mlx-community/gemma-4-26B-A4B-it-OptiQ-4bit",
 	})
 	f.add(daemonEntry{
@@ -283,6 +284,11 @@ func TestListModels(t *testing.T) {
 	}
 	if byName["gemma4-12b"].ModelID != "gemma4-12b" {
 		t.Fatalf("gemma4-12b modelId = %q, want Name fallback", byName["gemma4-12b"].ModelID)
+	}
+	// runner rides through the projection for the provider's thinking mapping
+	// (ADR-0051 §3).
+	if byName["gemma4-26b"].Runner != "mlx-lm" {
+		t.Fatalf("gemma4-26b runner = %q, want mlx-lm", byName["gemma4-26b"].Runner)
 	}
 }
 

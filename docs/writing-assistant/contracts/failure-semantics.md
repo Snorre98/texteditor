@@ -99,6 +99,14 @@ Retries are **bounded (≤3)**; every failure is recorded in `meter_events`/logs
 | mentions over the count cap | `error` SSE event, code `too-many-mentions`, before any streaming (ADR-0036) |
 | mention content over the token budget | labeled overflow line in the breakdown; the turn proceeds without the truncated tail (ADR-0036) |
 | daemon unreachable on the observability read | `GET /fleet` answers **200** with `control: "unreachable"` and the last-known projection, every `liveState` forced to `unknown` (ADR-0040 §3) — a labeled stale read, never a 500 and never mistaken for `provider-unreachable` |
+| fixed + pinned + user context over the model window | `error` SSE event, code `context-window-exceeded`, **before any provider call**; no partial payload (ADR-0051 §6) |
+| session hard budget would be crossed | `error` SSE event, code `session-budget-exceeded`, unless metered compaction succeeds first (ADR-0051 §7) |
+| thinking budget reached before a tool call or answer | snapshot labeled `thinking-truncated`; terminal `error` event, code `thinking-truncated`, never an empty `done` (ADR-0051 §5) |
+| a turn produces neither a tool call nor an answer | terminal `error` event, code `no-outcome` (ADR-0051 §2) |
+| `auto` escalation after a structured failure | retry **once** with thinking-on; snapshot labels `thinking-escalated` with the trigger (`invalid-structure` / `guard-failed` / `no-outcome`); bounded by `maxSteps` (ADR-0051 §2) |
+| resolved runner cannot disable thinking | turn proceeds thinking-on; snapshot labels `thinking-unsupported`, never a silent pretend (ADR-0051 §3) |
+| context-window drop | each drop recorded in `ContextDrop` with reason `context-window`, counted and labeled (ADR-0051 §6) |
+| session soft budget crossed | snapshot labels `session-budget-soft`; the turn proceeds (ADR-0051 §7) |
 
 ## 6. Invariants
 

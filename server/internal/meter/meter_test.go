@@ -44,7 +44,7 @@ func TestAttributeScalesToTotal(t *testing.T) {
 		Thinking:     0,
 	}
 	counts := dto.ProviderCounts{InputTokens: 100, OutputTokens: 50}
-	a, err := m.Attribute(context.Background(), "t1", "s1", "gemma4-12b", b, counts)
+	a, err := m.Attribute(context.Background(), "t1", "s1", "gemma4-12b", b, counts, dto.TurnMeasurement{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,7 +97,7 @@ func TestThinkingExactVsApprox(t *testing.T) {
 	b := dto.Breakdown{SystemPrompt: 10, User: 10, Thinking: 7}
 
 	// Provider reports thinking → exact, not approx.
-	a, err := m.Attribute(context.Background(), "t2", "s1", "m", b, dto.ProviderCounts{InputTokens: 20, OutputTokens: 30, ThinkingTokens: 9})
+	a, err := m.Attribute(context.Background(), "t2", "s1", "m", b, dto.ProviderCounts{InputTokens: 20, OutputTokens: 30, ThinkingTokens: 9}, dto.TurnMeasurement{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,7 +106,7 @@ func TestThinkingExactVsApprox(t *testing.T) {
 	}
 
 	// Provider omits thinking → assembler estimate, labeled approx.
-	a2, err := m.Attribute(context.Background(), "t3", "s1", "m", b, dto.ProviderCounts{InputTokens: 20, OutputTokens: 30})
+	a2, err := m.Attribute(context.Background(), "t3", "s1", "m", b, dto.ProviderCounts{InputTokens: 20, OutputTokens: 30}, dto.TurnMeasurement{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -126,7 +126,7 @@ func TestThinkingExactVsApprox(t *testing.T) {
 
 func TestScaleSumZeroBreakdown(t *testing.T) {
 	m, _, _ := newTestMeter(t)
-	a, err := m.Attribute(context.Background(), "t4", "s1", "m", dto.Breakdown{}, dto.ProviderCounts{})
+	a, err := m.Attribute(context.Background(), "t4", "s1", "m", dto.Breakdown{}, dto.ProviderCounts{}, dto.TurnMeasurement{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -138,13 +138,13 @@ func TestScaleSumZeroBreakdown(t *testing.T) {
 func TestSessionUsage(t *testing.T) {
 	m, _, _ := newTestMeter(t)
 	// Two turns across session s1 (and one in another session to ensure scoping).
-	if _, err := m.Attribute(context.Background(), "t1", "s1", "m", dto.Breakdown{SystemPrompt: 10, User: 10}, dto.ProviderCounts{InputTokens: 20, OutputTokens: 50}); err != nil {
+	if _, err := m.Attribute(context.Background(), "t1", "s1", "m", dto.Breakdown{SystemPrompt: 10, User: 10}, dto.ProviderCounts{InputTokens: 20, OutputTokens: 50}, dto.TurnMeasurement{}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := m.Attribute(context.Background(), "t2", "s1", "m", dto.Breakdown{User: 10}, dto.ProviderCounts{InputTokens: 10, OutputTokens: 10}); err != nil {
+	if _, err := m.Attribute(context.Background(), "t2", "s1", "m", dto.Breakdown{User: 10}, dto.ProviderCounts{InputTokens: 10, OutputTokens: 10}, dto.TurnMeasurement{}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := m.Attribute(context.Background(), "t3", "s2", "m", dto.Breakdown{User: 10}, dto.ProviderCounts{InputTokens: 10, OutputTokens: 1}); err != nil {
+	if _, err := m.Attribute(context.Background(), "t3", "s2", "m", dto.Breakdown{User: 10}, dto.ProviderCounts{InputTokens: 10, OutputTokens: 1}, dto.TurnMeasurement{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -176,16 +176,16 @@ func TestSessionBreakdown(t *testing.T) {
 	// Two turns in s1 with distinct components, plus a row in s2 to prove scoping.
 	if _, err := m.Attribute(context.Background(), "t1", "s1", "m",
 		dto.Breakdown{SystemPrompt: 10, User: 10},
-		dto.ProviderCounts{InputTokens: 20, OutputTokens: 50}); err != nil {
+		dto.ProviderCounts{InputTokens: 20, OutputTokens: 50}, dto.TurnMeasurement{}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := m.Attribute(context.Background(), "t2", "s1", "m",
 		dto.Breakdown{SystemPrompt: 10, History: 10, User: 10, Thinking: 4},
-		dto.ProviderCounts{InputTokens: 30, OutputTokens: 20, ThinkingTokens: 4}); err != nil {
+		dto.ProviderCounts{InputTokens: 30, OutputTokens: 20, ThinkingTokens: 4}, dto.TurnMeasurement{}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := m.Attribute(context.Background(), "t3", "s2", "m",
-		dto.Breakdown{User: 5}, dto.ProviderCounts{InputTokens: 5, OutputTokens: 5}); err != nil {
+		dto.Breakdown{User: 5}, dto.ProviderCounts{InputTokens: 5, OutputTokens: 5}, dto.TurnMeasurement{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -229,5 +229,113 @@ func TestSessionBreakdown(t *testing.T) {
 	}
 	if empty.Total != 0 || len(empty.Components) != 0 {
 		t.Fatalf("unknown session meter = %+v, want zero", empty)
+	}
+}
+
+// TestAttributeRecordsMeasurement: every turn records prompt/thinking/
+// completion tokens, latency, model, and window utilization (ADR-0051 §11), and
+// the meter event carries the measurement.
+func TestAttributeRecordsMeasurement(t *testing.T) {
+	m, bus, db := newTestMeter(t)
+	meas := dto.TurnMeasurement{
+		PromptTokens:      100,
+		ThinkingTokens:    40,
+		CompletionTokens:  60,
+		LatencyMs:         1234,
+		Model:             "gemma4-26b",
+		Quant:             "4bit",
+		WindowUtilization: 0.25,
+	}
+	if _, err := m.Attribute(context.Background(), "t1", "s1", "gemma4-26b",
+		dto.Breakdown{SystemPrompt: 10, User: 10}, dto.ProviderCounts{InputTokens: 100, OutputTokens: 100, ThinkingTokens: 40}, meas); err != nil {
+		t.Fatal(err)
+	}
+
+	var latency int64
+	var thinking int
+	if err := db.QueryRow(`SELECT latency_ms, thinking_tokens FROM meter_measurements WHERE turn_id = 't1'`).Scan(&latency, &thinking); err != nil {
+		t.Fatal(err)
+	}
+	if latency != 1234 || thinking != 40 {
+		t.Fatalf("measurement = latency %d thinking %d, want 1234/40", latency, thinking)
+	}
+	var util float64
+	if err := db.QueryRow(`SELECT window_utilization FROM meter_measurements WHERE turn_id = 't1'`).Scan(&util); err != nil {
+		t.Fatal(err)
+	}
+	if util != 0.25 {
+		t.Fatalf("window utilization = %v, want 0.25", util)
+	}
+
+	if len(bus.events) != 1 {
+		t.Fatalf("bus events = %+v", bus.events)
+	}
+	var evt struct {
+		Measurement *dto.TurnMeasurement `json:"measurement"`
+	}
+	if err := json.Unmarshal(bus.events[0].Data, &evt); err != nil {
+		t.Fatal(err)
+	}
+	if evt.Measurement == nil || evt.Measurement.LatencyMs != 1234 || evt.Measurement.ThinkingTokens != 40 {
+		t.Fatalf("meter event measurement = %+v", evt.Measurement)
+	}
+}
+
+// TestAttributeCompactionSeparateRow: the summary call is its own metered model
+// row with component "compaction" (ADR-0051 §8).
+func TestAttributeCompactionSeparateRow(t *testing.T) {
+	m, _, db := newTestMeter(t)
+	if err := m.AttributeCompaction(context.Background(), "t1", "s1", "summarizer", dto.ProviderCounts{InputTokens: 500, OutputTokens: 80}); err != nil {
+		t.Fatal(err)
+	}
+	var prompt, completion int
+	if err := db.QueryRow(`SELECT prompt_tokens, completion_tokens FROM meter_events WHERE turn_id = 't1' AND component = 'compaction'`).Scan(&prompt, &completion); err != nil {
+		t.Fatal(err)
+	}
+	if prompt != 500 || completion != 80 {
+		t.Fatalf("compaction row = (%d,%d), want (500,80)", prompt, completion)
+	}
+	var model string
+	if err := db.QueryRow(`SELECT model FROM meter_events WHERE turn_id = 't1' AND component = 'compaction'`).Scan(&model); err != nil {
+		t.Fatal(err)
+	}
+	if model != "summarizer" {
+		t.Fatalf("compaction model = %q, want summarizer", model)
+	}
+
+	sb, err := m.SessionBreakdown(context.Background(), "s1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, c := range sb.Components {
+		if c.Component == "compaction" {
+			found = true
+			if c.PromptTokens != 500 || c.CompletionTokens != 80 {
+				t.Fatalf("compaction component = %+v", c)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("compaction component missing from session meter: %+v", sb.Components)
+	}
+}
+
+// TestSessionBudgetState: soft warns and proceeds; hard refuses (ADR-0051 §7).
+func TestSessionBudgetState(t *testing.T) {
+	budget := 100
+	// used 80, next 1, ratio 0.8 → soft (80 >= 80) but not hard.
+	soft, hard := SessionBudgetState(80, &budget, 0.8, 1)
+	if !soft || hard {
+		t.Fatalf("(80,100,0.8,+1) = soft=%v hard=%v, want soft only", soft, hard)
+	}
+	// used 100, next 1 → hard.
+	soft, hard = SessionBudgetState(100, &budget, 0.8, 1)
+	if !hard {
+		t.Fatalf("(100,100,0.8,+1) hard = false, want true")
+	}
+	// nil budget never warns or refuses.
+	if s, h := SessionBudgetState(1000, nil, 0.8, 1); s || h {
+		t.Fatalf("nil budget = soft=%v hard=%v, want false/false", s, h)
 	}
 }

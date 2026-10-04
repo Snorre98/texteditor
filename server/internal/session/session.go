@@ -39,6 +39,12 @@ type SessionStore interface {
 	// ContextPolicy returns a session's persisted context policy JSON, or nil
 	// when none. An unknown session is ErrNotFound.
 	ContextPolicy(sessionID string) (json.RawMessage, error)
+	// CompactHistory replaces the oldest turns with one labeled summary message
+	// (ADR-0051 §8): it keeps the most recent keepRecentTurns turns (a turn
+	// starts at a user message) and returns the summarized timestamp range and
+	// the number of turns summarized. Pins and recent turns survive; the
+	// replacement is a labeled record, never a silent drop.
+	CompactHistory(sessionID, summary string, keepRecentTurns int) (fromTs, toTs int64, turns int, err error)
 }
 
 // Interface is an alias for SessionStore (the contracted name, interface.md §10).
@@ -313,4 +319,89 @@ func (s *store) ContextPolicy(sessionID string) (json.RawMessage, error) {
 		return nil, nil
 	}
 	return json.RawMessage(raw), nil
+}
+
+// CompactHistory replaces the oldest turns with one labeled summary message
+// (ADR-0051 §8). A turn starts at a user message; the most recent
+// keepRecentTurns turns are preserved. The summary is inserted as a labeled
+// user message so the model sees it in order; the summarized range is returned
+// for the snapshot. A no-op (nothing to summarize) returns zero values.
+func (s *store) CompactHistory(sessionID, summary string, keepRecentTurns int) (fromTs, toTs int64, turns int, err error) {
+	rows, err := s.db.Query(`SELECT id, role, ts FROM messages WHERE session_id = ? ORDER BY id ASC`, sessionID)
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	type msgRow struct {
+		id   int64
+		role string
+		ts   int64
+	}
+	var all []msgRow
+	for rows.Next() {
+		var m msgRow
+		if err := rows.Scan(&m.id, &m.role, &m.ts); err != nil {
+			rows.Close()
+			return 0, 0, 0, err
+		}
+		all = append(all, m)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, 0, 0, err
+	}
+
+	// Find the start index of the last keepRecentTurns turns (user-message
+	// boundaries). keepRecentTurns <= 0 summarizes everything.
+	starts := []int{}
+	for i, m := range all {
+		if m.role == "user" {
+			starts = append(starts, i)
+		}
+	}
+	if len(starts) == 0 {
+		return 0, 0, 0, nil
+	}
+	keep := keepRecentTurns
+	if keep < 0 {
+		keep = 0
+	}
+	cutTurn := len(starts) - keep
+	if cutTurn <= 0 {
+		return 0, 0, 0, nil // nothing older than the kept window
+	}
+	boundary := starts[cutTurn] // first message of the oldest kept turn
+	if boundary == 0 {
+		return 0, 0, 0, nil
+	}
+	summarized := all[:boundary]
+	fromTs = summarized[0].ts
+	toTs = summarized[len(summarized)-1].ts
+	for _, m := range summarized {
+		if m.role == "user" {
+			turns++
+		}
+	}
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`DELETE FROM messages WHERE session_id = ? AND id < ?`, sessionID, all[boundary].id); err != nil {
+		return 0, 0, 0, err
+	}
+	// Insert the summary with the lowest freed id so History (ORDER BY id ASC)
+	// yields the summary first, followed by the surviving recent turns.
+	now := time.Now().Unix()
+	if _, err := tx.Exec(`INSERT INTO messages (id, session_id, role, content, ts) VALUES (?, ?, 'user', ?, ?)`,
+		all[0].id, sessionID, "[Summary of earlier conversation]\n"+summary, fromTs); err != nil {
+		return 0, 0, 0, err
+	}
+	if _, err := tx.Exec(`UPDATE sessions SET updated_at = ? WHERE id = ?`, now, sessionID); err != nil {
+		return 0, 0, 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, 0, 0, err
+	}
+	return fromTs, toTs, turns, nil
 }

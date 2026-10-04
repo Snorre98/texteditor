@@ -100,10 +100,11 @@ type ChunkRef struct {
 // list clears), and a nil field inherits. It carries no payload text — the
 // client sends decisions, the engine assembles.
 type ContextPolicy struct {
-	Pinned         []ChunkRef `json:"pinned,omitempty"`
-	Excluded       []ChunkRef `json:"excluded,omitempty"`
-	AutoRag        *bool      `json:"autoRag,omitempty"`
-	RetrievalQuery *string    `json:"retrievalQuery,omitempty"`
+	Pinned         []ChunkRef     `json:"pinned,omitempty"`
+	Excluded       []ChunkRef     `json:"excluded,omitempty"`
+	AutoRag        *bool          `json:"autoRag,omitempty"`
+	RetrievalQuery *string        `json:"retrievalQuery,omitempty"`
+	Thinking       *ThinkingLevel `json:"thinking,omitempty"`
 }
 
 // ContextMessage is one assembled message's component and provenance in a
@@ -140,18 +141,76 @@ type BudgetUsage struct {
 // context (interface.md §5/§7, ADR-0044 §4, ADR-0049 §7). The snapshot itself
 // is the contract: clients render it and never reconstruct provenance, budgets,
 // or drops. Decision (Phase F) and Locate (Phase D) are reserved optional
-// records, unimplemented in C3.
+// records. Thinking/Measurements/Compacted/Window are the ADR-0051 additions.
 type ContextSnapshot struct {
-	TurnID         string           `json:"turnId"`
-	SessionID      string           `json:"sessionId"`
-	WorkspaceID    string           `json:"workspaceId"`
-	RetrievalQuery string           `json:"retrievalQuery"`
-	AutoRag        bool             `json:"autoRag"`
-	Messages       []ContextMessage `json:"messages"`
-	Chunks         []Chunk          `json:"chunks"`
-	Drops          []ContextDrop    `json:"drops"`
-	Budget         []BudgetUsage    `json:"budget"`
-	Decision       json.RawMessage  `json:"decision,omitempty"`
-	Locate         json.RawMessage  `json:"locate,omitempty"`
-	CreatedAt      int64            `json:"createdAt"`
+	TurnID         string            `json:"turnId"`
+	SessionID      string            `json:"sessionId"`
+	WorkspaceID    string            `json:"workspaceId"`
+	RetrievalQuery string            `json:"retrievalQuery"`
+	AutoRag        bool              `json:"autoRag"`
+	Messages       []ContextMessage  `json:"messages"`
+	Chunks         []Chunk           `json:"chunks"`
+	Drops          []ContextDrop     `json:"drops"`
+	Budget         []BudgetUsage     `json:"budget"`
+	Decision       json.RawMessage   `json:"decision,omitempty"`
+	Locate         json.RawMessage   `json:"locate,omitempty"`
+	Thinking       *ThinkingSnapshot `json:"thinking,omitempty"`
+	Measurements   *TurnMeasurement  `json:"measurements,omitempty"`
+	Compacted      *CompactionRecord `json:"compacted,omitempty"`
+	Window         *WindowUsage      `json:"window,omitempty"`
+	SessionBudget  *SessionBudget    `json:"sessionBudget,omitempty"`
+	CreatedAt      int64             `json:"createdAt"`
+}
+
+// SessionBudget is the session budget state for one turn (ADR-0051 §7): the
+// soft warning is a label (the turn proceeds); the hard threshold refuses.
+type SessionBudget struct {
+	Soft   bool `json:"soft,omitempty"`
+	Hard   bool `json:"hard,omitempty"`
+	Used   int  `json:"used"`
+	Budget int  `json:"budget"`
+}
+
+// ThinkingSnapshot is the turn's resolved thinking outcome (ADR-0051 §1–§5):
+// the policy level, the level actually used, and the labeled
+// degradation/escalation/truncation outcome.
+type ThinkingSnapshot struct {
+	Level            ThinkingLevel `json:"level"`
+	Effective        bool          `json:"effective"`
+	Escalated        bool          `json:"escalated,omitempty"`
+	EscalationReason string        `json:"escalationReason,omitempty"`
+	Unsupported      bool          `json:"unsupported,omitempty"`
+	Truncated        bool          `json:"truncated,omitempty"`
+}
+
+// TurnMeasurement is the per-turn measurement record (ADR-0051 §11): token
+// counts, wall-clock latency, model + quant, and window utilization, recorded
+// per model so the hardware map accumulates.
+type TurnMeasurement struct {
+	PromptTokens      int     `json:"promptTokens"`
+	ThinkingTokens    int     `json:"thinkingTokens"`
+	CompletionTokens  int     `json:"completionTokens"`
+	LatencyMs         int64   `json:"latencyMs"`
+	Model             string  `json:"model,omitempty"`
+	Quant             string  `json:"quant,omitempty"`
+	WindowUtilization float64 `json:"windowUtilization,omitempty"`
+}
+
+// CompactionRecord is the summarized history range replaced by one metered
+// summary message (ADR-0051 §8).
+type CompactionRecord struct {
+	FromTs        int64 `json:"fromTs"`
+	ToTs          int64 `json:"toTs"`
+	Turns         int   `json:"turns"`
+	SummaryTokens int   `json:"summaryTokens"`
+	CacheCost     bool  `json:"cacheCost,omitempty"`
+}
+
+// WindowUsage is the per-turn context-window accounting (ADR-0051 §6): the
+// assembled payload plus output reserve against the model's context window.
+type WindowUsage struct {
+	ContextLength int     `json:"contextLength"`
+	Used          int     `json:"used"`
+	Reserve       int     `json:"reserve"`
+	Utilization   float64 `json:"utilization"`
 }

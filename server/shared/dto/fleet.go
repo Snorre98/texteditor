@@ -25,6 +25,11 @@ type Model struct {
 	BaseURL      string // http://host:port/v1
 	Capabilities Capabilities
 	ModeTags     []string
+	// Runner is the serving runner kind (`llama.cpp` | `mlx-lm` | `mlx-vlm` |
+	// `delegate`), projected by the daemon and consumed by the Provider to map
+	// the per-runner thinking toggle (ADR-0051 §3). Internal only — never
+	// projected into the client-facing API (ADR-0016 §1).
+	Runner string
 	// ModelID is the id the serving endpoint accepts in the OpenAI `model`
 	// field, when it differs from Name (e.g. the HF repo id an mlx runner
 	// serves). Absent (empty) means Name is the wire id. Internal only — never
@@ -38,6 +43,9 @@ type Model struct {
 type Target struct {
 	BaseURL      string
 	Capabilities Capabilities
+	// Runner is the serving runner kind, so the Provider can map the thinking
+	// toggle to the runner's mechanism (ADR-0051 §3). Empty = unknown runner.
+	Runner string
 }
 
 // LiveState is the typed serving state of a model (interface.md §1).
@@ -85,15 +93,19 @@ type Completion struct {
 	FinishReason string     // the response's finish_reason (stop | tool_calls | length | tool …)
 	InputTokens  int        // raw prompt_eval_count
 	OutputTokens int        // raw eval_count
+	// ThinkingTokens is the provider-reported reasoning count when the response
+	// carries one (ADR-0024/0051); 0 when omitted.
+	ThinkingTokens int
 }
 
 // RawEvent is an unframed, un-attributed provider event (interface.md §2).
 type RawEvent struct {
-	Type string          // "token" | "tool_call" | "finish" | "done" | "error"
+	Type string          // "token" | "reasoning" | "tool_call" | "finish" | "done" | "error"
 	Data json.RawMessage // payload shapes per ADR-0016 §2 / interface.md §2:
 	//   token     → {"text": "…"}
+	//   reasoning → {"text": "…"}   (raw thinking delta, ADR-0051 §4)
 	//   tool_call → {"id": "…", "name": "…", "arguments": "…"}
 	//   finish    → {"reason": "tool_calls" | "stop" | …}
-	//   done      → {"inputTokens": n, "outputTokens": n}
+	//   done      → {"inputTokens": n, "outputTokens": n, "thinkingTokens": n}
 	//   error     → {"code": "…", "message": "…"}
 }

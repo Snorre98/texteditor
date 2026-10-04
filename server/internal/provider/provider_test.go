@@ -220,7 +220,7 @@ func TestNoRetryOn4xx(t *testing.T) {
 // default, never 0 — strict servers (mlx-lm >=0.32) reject 0, and their own
 // 512 default truncates reasoning models before the tool call.
 func TestRenderBodyDefaultsUnsetMaxTokens(t *testing.T) {
-	body := renderBody(dto.Request{
+	body := renderBody(dto.Target{}, dto.Request{
 		ModelName:       "m",
 		Messages:        []dto.Message{{Role: "user", Content: "hi"}},
 		EffectiveParams: dto.SamplingParams{Temperature: 0.3},
@@ -235,11 +235,128 @@ func TestRenderBodyDefaultsUnsetMaxTokens(t *testing.T) {
 
 // TestRenderBodyIncludesPositiveMaxTokens: a configured budget still rides the wire.
 func TestRenderBodyIncludesPositiveMaxTokens(t *testing.T) {
-	body := renderBody(dto.Request{EffectiveParams: dto.SamplingParams{MaxTokens: 4096}}, false)
+	body := renderBody(dto.Target{}, dto.Request{EffectiveParams: dto.SamplingParams{MaxTokens: 4096}}, false)
 	if body["max_tokens"] != 4096 {
 		t.Fatalf("max_tokens = %v, want 4096", body["max_tokens"])
 	}
 	if _, ok := body["stream"]; ok {
 		t.Fatalf("stream must be omitted for a non-streaming request: %v", body)
+	}
+}
+
+// TestThinkingToggleMapping: the thinking toggle is rendered per runner
+// (ADR-0051 §3) — mlx-lm/llama.cpp use chat_template_kwargs, OpenAI-compatible
+// uses reasoning_effort, and an unsupported runner renders nothing.
+func TestThinkingToggleMapping(t *testing.T) {
+	off := false
+	on := true
+	cases := []struct {
+		runner   string
+		desired  *bool
+		wantKey  string
+		wantVal  interface{}
+		wantNone bool
+	}{
+		{"mlx-lm", &off, "chat_template_kwargs", map[string]interface{}{"enable_thinking": false}, false},
+		{"llama.cpp", &off, "chat_template_kwargs", map[string]interface{}{"enable_thinking": false}, false},
+		{"mlx-vlm", &on, "chat_template_kwargs", map[string]interface{}{"enable_thinking": true}, false},
+		{"openai", &off, "reasoning_effort", "none", false},
+		{"openai-compatible", &on, "reasoning_effort", "medium", false},
+		{"delegate", &off, "", nil, true},
+		{"", &off, "", nil, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.runner, func(t *testing.T) {
+			body := renderBody(dto.Target{Runner: tc.runner}, dto.Request{Thinking: tc.desired}, false)
+			if tc.wantNone {
+				if _, ok := body["chat_template_kwargs"]; ok {
+					t.Fatalf("unsupported runner must not render a toggle: %v", body)
+				}
+				if _, ok := body["reasoning_effort"]; ok {
+					t.Fatalf("unsupported runner must not render a toggle: %v", body)
+				}
+				return
+			}
+			got, ok := body[tc.wantKey]
+			if !ok {
+				t.Fatalf("missing %s in %v", tc.wantKey, body)
+			}
+			if m, ok := tc.wantVal.(map[string]interface{}); ok {
+				gm, _ := got.(map[string]interface{})
+				if gm == nil || gm["enable_thinking"] != m["enable_thinking"] {
+					t.Fatalf("%s = %v, want %v", tc.wantKey, got, tc.wantVal)
+				}
+			} else if got != tc.wantVal {
+				t.Fatalf("%s = %v, want %v", tc.wantKey, got, tc.wantVal)
+			}
+		})
+	}
+}
+
+// TestSupportsThinkingToggle: only runners with a real toggle are supported; an
+// unknown/unsupported runner degrades (ADR-0051 §3).
+func TestSupportsThinkingToggle(t *testing.T) {
+	for _, r := range []string{"mlx-lm", "mlx-vlm", "llama.cpp", "openai"} {
+		if !SupportsThinkingToggle(r) {
+			t.Fatalf("SupportsThinkingToggle(%q) = false, want true", r)
+		}
+	}
+	for _, r := range []string{"delegate", "", "unknown"} {
+		if SupportsThinkingToggle(r) {
+			t.Fatalf("SupportsThinkingToggle(%q) = true, want false", r)
+		}
+	}
+}
+
+// TestStreamReasoningDeltas: the provider surfaces reasoning deltas as raw
+// `reasoning` events and the exact thinking count on `done` (ADR-0051 §4).
+func TestStreamReasoningDeltas(t *testing.T) {
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fl := w.(http.Flusher)
+		w.Write([]byte("data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"think \"}}]}\n\n"))
+		fl.Flush()
+		w.Write([]byte("data: {\"choices\":[{\"delta\":{\"reasoning\":\"more\"}}]}\n\n"))
+		fl.Flush()
+		w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n"))
+		fl.Flush()
+		w.Write([]byte("data: {\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":9,\"completion_tokens_details\":{\"reasoning_tokens\":4}}}\n\n"))
+		fl.Flush()
+		w.Write([]byte("data: [DONE]\n\n"))
+		fl.Flush()
+	}))
+	defer s.Close()
+
+	g := NewWithClient(s.Client())
+	var events []dto.RawEvent
+	err := g.Stream(context.Background(), targetOf(s), dto.Request{ModelName: "local"}, func(ev dto.RawEvent) {
+		events = append(events, ev)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reasoningText string
+	var thinkingTokens int
+	for _, ev := range events {
+		switch ev.Type {
+		case "reasoning":
+			var v struct {
+				Text string `json:"text"`
+			}
+			_ = json.Unmarshal(ev.Data, &v)
+			reasoningText += v.Text
+		case "done":
+			var v struct {
+				ThinkingTokens int `json:"thinkingTokens"`
+			}
+			_ = json.Unmarshal(ev.Data, &v)
+			thinkingTokens = v.ThinkingTokens
+		}
+	}
+	if reasoningText != "think more" {
+		t.Fatalf("reasoning text = %q, want %q", reasoningText, "think more")
+	}
+	if thinkingTokens != 4 {
+		t.Fatalf("thinkingTokens = %d, want 4", thinkingTokens)
 	}
 }

@@ -19,4 +19,20 @@ var meterSchema = []string{
 	)`,
 	`CREATE INDEX meter_turn_idx ON meter_events(turn_id)`,
 	`CREATE INDEX meter_session_idx ON meter_events(session_id)`,
+	// meter_measurements — one per-turn measurement row (ADR-0051 §11): prompt/
+	// thinking/completion tokens, wall-clock latency, model, and window
+	// utilization, so the hardware map accumulates per model/quant. Append-only;
+	// new migrations go at the end.
+	`CREATE TABLE meter_measurements (
+		turn_id            TEXT PRIMARY KEY,
+		session_id         TEXT NOT NULL,
+		model              TEXT NOT NULL,
+		prompt_tokens      INTEGER NOT NULL,
+		thinking_tokens    INTEGER NOT NULL,
+		completion_tokens  INTEGER NOT NULL,
+		latency_ms         INTEGER NOT NULL,
+		window_utilization REAL NOT NULL,
+		ts                 INTEGER NOT NULL
+	)`,
+	`CREATE INDEX meter_measurements_session_idx ON meter_measurements(session_id)`,
 }

@@ -1171,6 +1171,137 @@ func (s *CommitRequest) UnmarshalJSON(data []byte) error {
 }
 
 // Encode implements json.Marshaler.
+func (s *CompactionRecord) Encode(e *jx.Encoder) {
+	e.ObjStart()
+	s.encodeFields(e)
+	e.ObjEnd()
+}
+
+// encodeFields encodes fields.
+func (s *CompactionRecord) encodeFields(e *jx.Encoder) {
+	{
+		if s.FromTs.Set {
+			e.FieldStart("fromTs")
+			s.FromTs.Encode(e)
+		}
+	}
+	{
+		if s.ToTs.Set {
+			e.FieldStart("toTs")
+			s.ToTs.Encode(e)
+		}
+	}
+	{
+		if s.Turns.Set {
+			e.FieldStart("turns")
+			s.Turns.Encode(e)
+		}
+	}
+	{
+		if s.SummaryTokens.Set {
+			e.FieldStart("summaryTokens")
+			s.SummaryTokens.Encode(e)
+		}
+	}
+	{
+		if s.CacheCost.Set {
+			e.FieldStart("cacheCost")
+			s.CacheCost.Encode(e)
+		}
+	}
+}
+
+var jsonFieldsNameOfCompactionRecord = [5]string{
+	0: "fromTs",
+	1: "toTs",
+	2: "turns",
+	3: "summaryTokens",
+	4: "cacheCost",
+}
+
+// Decode decodes CompactionRecord from json.
+func (s *CompactionRecord) Decode(d *jx.Decoder) error {
+	if s == nil {
+		return errors.New("invalid: unable to decode CompactionRecord to nil")
+	}
+
+	if err := d.ObjBytes(func(d *jx.Decoder, k []byte) error {
+		switch string(k) {
+		case "fromTs":
+			if err := func() error {
+				s.FromTs.Reset()
+				if err := s.FromTs.Decode(d); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"fromTs\"")
+			}
+		case "toTs":
+			if err := func() error {
+				s.ToTs.Reset()
+				if err := s.ToTs.Decode(d); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"toTs\"")
+			}
+		case "turns":
+			if err := func() error {
+				s.Turns.Reset()
+				if err := s.Turns.Decode(d); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"turns\"")
+			}
+		case "summaryTokens":
+			if err := func() error {
+				s.SummaryTokens.Reset()
+				if err := s.SummaryTokens.Decode(d); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"summaryTokens\"")
+			}
+		case "cacheCost":
+			if err := func() error {
+				s.CacheCost.Reset()
+				if err := s.CacheCost.Decode(d); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"cacheCost\"")
+			}
+		default:
+			return d.Skip()
+		}
+		return nil
+	}); err != nil {
+		return errors.Wrap(err, "decode CompactionRecord")
+	}
+
+	return nil
+}
+
+// MarshalJSON implements stdjson.Marshaler.
+func (s *CompactionRecord) MarshalJSON() ([]byte, error) {
+	e := jx.Encoder{}
+	s.Encode(&e)
+	return e.Bytes(), nil
+}
+
+// UnmarshalJSON implements stdjson.Unmarshaler.
+func (s *CompactionRecord) UnmarshalJSON(data []byte) error {
+	d := jx.DecodeBytes(data)
+	return s.Decode(d)
+}
+
+// Encode implements json.Marshaler.
 func (s *ContextChunk) Encode(e *jx.Encoder) {
 	e.ObjStart()
 	s.encodeFields(e)
@@ -1898,13 +2029,20 @@ func (s *ContextPolicy) encodeFields(e *jx.Encoder) {
 			s.RetrievalQuery.Encode(e)
 		}
 	}
+	{
+		if s.Thinking.Set {
+			e.FieldStart("thinking")
+			s.Thinking.Encode(e)
+		}
+	}
 }
 
-var jsonFieldsNameOfContextPolicy = [4]string{
+var jsonFieldsNameOfContextPolicy = [5]string{
 	0: "pinned",
 	1: "excluded",
 	2: "autoRag",
 	3: "retrievalQuery",
+	4: "thinking",
 }
 
 // Decode decodes ContextPolicy from json.
@@ -1969,6 +2107,16 @@ func (s *ContextPolicy) Decode(d *jx.Decoder) error {
 			}(); err != nil {
 				return errors.Wrap(err, "decode field \"retrievalQuery\"")
 			}
+		case "thinking":
+			if err := func() error {
+				s.Thinking.Reset()
+				if err := s.Thinking.Decode(d); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"thinking\"")
+			}
 		default:
 			return d.Skip()
 		}
@@ -1989,6 +2137,48 @@ func (s *ContextPolicy) MarshalJSON() ([]byte, error) {
 
 // UnmarshalJSON implements stdjson.Unmarshaler.
 func (s *ContextPolicy) UnmarshalJSON(data []byte) error {
+	d := jx.DecodeBytes(data)
+	return s.Decode(d)
+}
+
+// Encode encodes ContextPolicyThinking as json.
+func (s ContextPolicyThinking) Encode(e *jx.Encoder) {
+	e.Str(string(s))
+}
+
+// Decode decodes ContextPolicyThinking from json.
+func (s *ContextPolicyThinking) Decode(d *jx.Decoder) error {
+	if s == nil {
+		return errors.New("invalid: unable to decode ContextPolicyThinking to nil")
+	}
+	v, err := d.StrBytes()
+	if err != nil {
+		return err
+	}
+	// Try to use constant string.
+	switch ContextPolicyThinking(v) {
+	case ContextPolicyThinkingFalse:
+		*s = ContextPolicyThinkingFalse
+	case ContextPolicyThinkingAuto:
+		*s = ContextPolicyThinkingAuto
+	case ContextPolicyThinkingTrue:
+		*s = ContextPolicyThinkingTrue
+	default:
+		*s = ContextPolicyThinking(v)
+	}
+
+	return nil
+}
+
+// MarshalJSON implements stdjson.Marshaler.
+func (s ContextPolicyThinking) MarshalJSON() ([]byte, error) {
+	e := jx.Encoder{}
+	s.Encode(&e)
+	return e.Bytes(), nil
+}
+
+// UnmarshalJSON implements stdjson.Unmarshaler.
+func (s *ContextPolicyThinking) UnmarshalJSON(data []byte) error {
 	d := jx.DecodeBytes(data)
 	return s.Decode(d)
 }
@@ -2067,12 +2257,42 @@ func (s *ContextSnapshot) encodeFields(e *jx.Encoder) {
 		}
 	}
 	{
+		if s.Thinking.Set {
+			e.FieldStart("thinking")
+			s.Thinking.Encode(e)
+		}
+	}
+	{
+		if s.Measurements.Set {
+			e.FieldStart("measurements")
+			s.Measurements.Encode(e)
+		}
+	}
+	{
+		if s.Compacted.Set {
+			e.FieldStart("compacted")
+			s.Compacted.Encode(e)
+		}
+	}
+	{
+		if s.Window.Set {
+			e.FieldStart("window")
+			s.Window.Encode(e)
+		}
+	}
+	{
+		if s.SessionBudget.Set {
+			e.FieldStart("sessionBudget")
+			s.SessionBudget.Encode(e)
+		}
+	}
+	{
 		e.FieldStart("createdAt")
 		e.Int64(s.CreatedAt)
 	}
 }
 
-var jsonFieldsNameOfContextSnapshot = [12]string{
+var jsonFieldsNameOfContextSnapshot = [17]string{
 	0:  "turnId",
 	1:  "sessionId",
 	2:  "workspaceId",
@@ -2084,7 +2304,12 @@ var jsonFieldsNameOfContextSnapshot = [12]string{
 	8:  "budget",
 	9:  "decision",
 	10: "locate",
-	11: "createdAt",
+	11: "thinking",
+	12: "measurements",
+	13: "compacted",
+	14: "window",
+	15: "sessionBudget",
+	16: "createdAt",
 }
 
 // Decode decodes ContextSnapshot from json.
@@ -2092,7 +2317,7 @@ func (s *ContextSnapshot) Decode(d *jx.Decoder) error {
 	if s == nil {
 		return errors.New("invalid: unable to decode ContextSnapshot to nil")
 	}
-	var requiredBitSet [2]uint8
+	var requiredBitSet [3]uint8
 
 	if err := d.ObjBytes(func(d *jx.Decoder, k []byte) error {
 		switch string(k) {
@@ -2250,8 +2475,58 @@ func (s *ContextSnapshot) Decode(d *jx.Decoder) error {
 			}(); err != nil {
 				return errors.Wrap(err, "decode field \"locate\"")
 			}
+		case "thinking":
+			if err := func() error {
+				s.Thinking.Reset()
+				if err := s.Thinking.Decode(d); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"thinking\"")
+			}
+		case "measurements":
+			if err := func() error {
+				s.Measurements.Reset()
+				if err := s.Measurements.Decode(d); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"measurements\"")
+			}
+		case "compacted":
+			if err := func() error {
+				s.Compacted.Reset()
+				if err := s.Compacted.Decode(d); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"compacted\"")
+			}
+		case "window":
+			if err := func() error {
+				s.Window.Reset()
+				if err := s.Window.Decode(d); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"window\"")
+			}
+		case "sessionBudget":
+			if err := func() error {
+				s.SessionBudget.Reset()
+				if err := s.SessionBudget.Decode(d); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"sessionBudget\"")
+			}
 		case "createdAt":
-			requiredBitSet[1] |= 1 << 3
+			requiredBitSet[2] |= 1 << 0
 			if err := func() error {
 				v, err := d.Int64()
 				s.CreatedAt = int64(v)
@@ -2271,9 +2546,10 @@ func (s *ContextSnapshot) Decode(d *jx.Decoder) error {
 	}
 	// Validate required fields.
 	var failures []validate.FieldError
-	for i, mask := range [2]uint8{
+	for i, mask := range [3]uint8{
 		0b11111111,
-		0b00001001,
+		0b00000001,
+		0b00000001,
 	} {
 		if result := (requiredBitSet[i] & mask) ^ mask; result != 0 {
 			// Mask only required fields and check equality to mask using XOR.
@@ -6709,6 +6985,39 @@ func (s *OptCommitRequest) UnmarshalJSON(data []byte) error {
 	return s.Decode(d)
 }
 
+// Encode encodes CompactionRecord as json.
+func (o OptCompactionRecord) Encode(e *jx.Encoder) {
+	if !o.Set {
+		return
+	}
+	o.Value.Encode(e)
+}
+
+// Decode decodes CompactionRecord from json.
+func (o *OptCompactionRecord) Decode(d *jx.Decoder) error {
+	if o == nil {
+		return errors.New("invalid: unable to decode OptCompactionRecord to nil")
+	}
+	o.Set = true
+	if err := o.Value.Decode(d); err != nil {
+		return err
+	}
+	return nil
+}
+
+// MarshalJSON implements stdjson.Marshaler.
+func (s OptCompactionRecord) MarshalJSON() ([]byte, error) {
+	e := jx.Encoder{}
+	s.Encode(&e)
+	return e.Bytes(), nil
+}
+
+// UnmarshalJSON implements stdjson.Unmarshaler.
+func (s *OptCompactionRecord) UnmarshalJSON(data []byte) error {
+	d := jx.DecodeBytes(data)
+	return s.Decode(d)
+}
+
 // Encode encodes ContextPolicy as json.
 func (o OptContextPolicy) Encode(e *jx.Encoder) {
 	if !o.Set {
@@ -6738,6 +7047,39 @@ func (s OptContextPolicy) MarshalJSON() ([]byte, error) {
 
 // UnmarshalJSON implements stdjson.Unmarshaler.
 func (s *OptContextPolicy) UnmarshalJSON(data []byte) error {
+	d := jx.DecodeBytes(data)
+	return s.Decode(d)
+}
+
+// Encode encodes ContextPolicyThinking as json.
+func (o OptContextPolicyThinking) Encode(e *jx.Encoder) {
+	if !o.Set {
+		return
+	}
+	e.Str(string(o.Value))
+}
+
+// Decode decodes ContextPolicyThinking from json.
+func (o *OptContextPolicyThinking) Decode(d *jx.Decoder) error {
+	if o == nil {
+		return errors.New("invalid: unable to decode OptContextPolicyThinking to nil")
+	}
+	o.Set = true
+	if err := o.Value.Decode(d); err != nil {
+		return err
+	}
+	return nil
+}
+
+// MarshalJSON implements stdjson.Marshaler.
+func (s OptContextPolicyThinking) MarshalJSON() ([]byte, error) {
+	e := jx.Encoder{}
+	s.Encode(&e)
+	return e.Bytes(), nil
+}
+
+// UnmarshalJSON implements stdjson.Unmarshaler.
+func (s *OptContextPolicyThinking) UnmarshalJSON(data []byte) error {
 	d := jx.DecodeBytes(data)
 	return s.Decode(d)
 }
@@ -7012,6 +7354,39 @@ func (s *OptSelection) UnmarshalJSON(data []byte) error {
 	return s.Decode(d)
 }
 
+// Encode encodes SessionBudget as json.
+func (o OptSessionBudget) Encode(e *jx.Encoder) {
+	if !o.Set {
+		return
+	}
+	o.Value.Encode(e)
+}
+
+// Decode decodes SessionBudget from json.
+func (o *OptSessionBudget) Decode(d *jx.Decoder) error {
+	if o == nil {
+		return errors.New("invalid: unable to decode OptSessionBudget to nil")
+	}
+	o.Set = true
+	if err := o.Value.Decode(d); err != nil {
+		return err
+	}
+	return nil
+}
+
+// MarshalJSON implements stdjson.Marshaler.
+func (s OptSessionBudget) MarshalJSON() ([]byte, error) {
+	e := jx.Encoder{}
+	s.Encode(&e)
+	return e.Bytes(), nil
+}
+
+// UnmarshalJSON implements stdjson.Unmarshaler.
+func (s *OptSessionBudget) UnmarshalJSON(data []byte) error {
+	d := jx.DecodeBytes(data)
+	return s.Decode(d)
+}
+
 // Encode encodes string as json.
 func (o OptString) Encode(e *jx.Encoder) {
 	if !o.Set {
@@ -7047,6 +7422,72 @@ func (s *OptString) UnmarshalJSON(data []byte) error {
 	return s.Decode(d)
 }
 
+// Encode encodes ThinkingSnapshot as json.
+func (o OptThinkingSnapshot) Encode(e *jx.Encoder) {
+	if !o.Set {
+		return
+	}
+	o.Value.Encode(e)
+}
+
+// Decode decodes ThinkingSnapshot from json.
+func (o *OptThinkingSnapshot) Decode(d *jx.Decoder) error {
+	if o == nil {
+		return errors.New("invalid: unable to decode OptThinkingSnapshot to nil")
+	}
+	o.Set = true
+	if err := o.Value.Decode(d); err != nil {
+		return err
+	}
+	return nil
+}
+
+// MarshalJSON implements stdjson.Marshaler.
+func (s OptThinkingSnapshot) MarshalJSON() ([]byte, error) {
+	e := jx.Encoder{}
+	s.Encode(&e)
+	return e.Bytes(), nil
+}
+
+// UnmarshalJSON implements stdjson.Unmarshaler.
+func (s *OptThinkingSnapshot) UnmarshalJSON(data []byte) error {
+	d := jx.DecodeBytes(data)
+	return s.Decode(d)
+}
+
+// Encode encodes TurnMeasurement as json.
+func (o OptTurnMeasurement) Encode(e *jx.Encoder) {
+	if !o.Set {
+		return
+	}
+	o.Value.Encode(e)
+}
+
+// Decode decodes TurnMeasurement from json.
+func (o *OptTurnMeasurement) Decode(d *jx.Decoder) error {
+	if o == nil {
+		return errors.New("invalid: unable to decode OptTurnMeasurement to nil")
+	}
+	o.Set = true
+	if err := o.Value.Decode(d); err != nil {
+		return err
+	}
+	return nil
+}
+
+// MarshalJSON implements stdjson.Marshaler.
+func (s OptTurnMeasurement) MarshalJSON() ([]byte, error) {
+	e := jx.Encoder{}
+	s.Encode(&e)
+	return e.Bytes(), nil
+}
+
+// UnmarshalJSON implements stdjson.Unmarshaler.
+func (s *OptTurnMeasurement) UnmarshalJSON(data []byte) error {
+	d := jx.DecodeBytes(data)
+	return s.Decode(d)
+}
+
 // Encode encodes TurnOptions as json.
 func (o OptTurnOptions) Encode(e *jx.Encoder) {
 	if !o.Set {
@@ -7076,6 +7517,39 @@ func (s OptTurnOptions) MarshalJSON() ([]byte, error) {
 
 // UnmarshalJSON implements stdjson.Unmarshaler.
 func (s *OptTurnOptions) UnmarshalJSON(data []byte) error {
+	d := jx.DecodeBytes(data)
+	return s.Decode(d)
+}
+
+// Encode encodes WindowUsage as json.
+func (o OptWindowUsage) Encode(e *jx.Encoder) {
+	if !o.Set {
+		return
+	}
+	o.Value.Encode(e)
+}
+
+// Decode decodes WindowUsage from json.
+func (o *OptWindowUsage) Decode(d *jx.Decoder) error {
+	if o == nil {
+		return errors.New("invalid: unable to decode OptWindowUsage to nil")
+	}
+	o.Set = true
+	if err := o.Value.Decode(d); err != nil {
+		return err
+	}
+	return nil
+}
+
+// MarshalJSON implements stdjson.Marshaler.
+func (s OptWindowUsage) MarshalJSON() ([]byte, error) {
+	e := jx.Encoder{}
+	s.Encode(&e)
+	return e.Bytes(), nil
+}
+
+// UnmarshalJSON implements stdjson.Unmarshaler.
+func (s *OptWindowUsage) UnmarshalJSON(data []byte) error {
 	d := jx.DecodeBytes(data)
 	return s.Decode(d)
 }
@@ -8125,6 +8599,120 @@ func (s *Session) UnmarshalJSON(data []byte) error {
 }
 
 // Encode implements json.Marshaler.
+func (s *SessionBudget) Encode(e *jx.Encoder) {
+	e.ObjStart()
+	s.encodeFields(e)
+	e.ObjEnd()
+}
+
+// encodeFields encodes fields.
+func (s *SessionBudget) encodeFields(e *jx.Encoder) {
+	{
+		if s.Soft.Set {
+			e.FieldStart("soft")
+			s.Soft.Encode(e)
+		}
+	}
+	{
+		if s.Hard.Set {
+			e.FieldStart("hard")
+			s.Hard.Encode(e)
+		}
+	}
+	{
+		if s.Used.Set {
+			e.FieldStart("used")
+			s.Used.Encode(e)
+		}
+	}
+	{
+		if s.Budget.Set {
+			e.FieldStart("budget")
+			s.Budget.Encode(e)
+		}
+	}
+}
+
+var jsonFieldsNameOfSessionBudget = [4]string{
+	0: "soft",
+	1: "hard",
+	2: "used",
+	3: "budget",
+}
+
+// Decode decodes SessionBudget from json.
+func (s *SessionBudget) Decode(d *jx.Decoder) error {
+	if s == nil {
+		return errors.New("invalid: unable to decode SessionBudget to nil")
+	}
+
+	if err := d.ObjBytes(func(d *jx.Decoder, k []byte) error {
+		switch string(k) {
+		case "soft":
+			if err := func() error {
+				s.Soft.Reset()
+				if err := s.Soft.Decode(d); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"soft\"")
+			}
+		case "hard":
+			if err := func() error {
+				s.Hard.Reset()
+				if err := s.Hard.Decode(d); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"hard\"")
+			}
+		case "used":
+			if err := func() error {
+				s.Used.Reset()
+				if err := s.Used.Decode(d); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"used\"")
+			}
+		case "budget":
+			if err := func() error {
+				s.Budget.Reset()
+				if err := s.Budget.Decode(d); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"budget\"")
+			}
+		default:
+			return d.Skip()
+		}
+		return nil
+	}); err != nil {
+		return errors.Wrap(err, "decode SessionBudget")
+	}
+
+	return nil
+}
+
+// MarshalJSON implements stdjson.Marshaler.
+func (s *SessionBudget) MarshalJSON() ([]byte, error) {
+	e := jx.Encoder{}
+	s.Encode(&e)
+	return e.Bytes(), nil
+}
+
+// UnmarshalJSON implements stdjson.Unmarshaler.
+func (s *SessionBudget) UnmarshalJSON(data []byte) error {
+	d := jx.DecodeBytes(data)
+	return s.Decode(d)
+}
+
+// Encode implements json.Marshaler.
 func (s *SessionMeter) Encode(e *jx.Encoder) {
 	e.ObjStart()
 	s.encodeFields(e)
@@ -8441,6 +9029,8 @@ func (s *SessionMeterComponentsItemComponent) Decode(d *jx.Decoder) error {
 		*s = SessionMeterComponentsItemComponentThinking
 	case SessionMeterComponentsItemComponentCompletion:
 		*s = SessionMeterComponentsItemComponentCompletion
+	case SessionMeterComponentsItemComponentCompaction:
+		*s = SessionMeterComponentsItemComponentCompaction
 	default:
 		*s = SessionMeterComponentsItemComponent(v)
 	}
@@ -8706,6 +9296,227 @@ func (s *Task) UnmarshalJSON(data []byte) error {
 }
 
 // Encode implements json.Marshaler.
+func (s *ThinkingSnapshot) Encode(e *jx.Encoder) {
+	e.ObjStart()
+	s.encodeFields(e)
+	e.ObjEnd()
+}
+
+// encodeFields encodes fields.
+func (s *ThinkingSnapshot) encodeFields(e *jx.Encoder) {
+	{
+		e.FieldStart("level")
+		s.Level.Encode(e)
+	}
+	{
+		e.FieldStart("effective")
+		e.Bool(s.Effective)
+	}
+	{
+		if s.Escalated.Set {
+			e.FieldStart("escalated")
+			s.Escalated.Encode(e)
+		}
+	}
+	{
+		if s.EscalationReason.Set {
+			e.FieldStart("escalationReason")
+			s.EscalationReason.Encode(e)
+		}
+	}
+	{
+		if s.Unsupported.Set {
+			e.FieldStart("unsupported")
+			s.Unsupported.Encode(e)
+		}
+	}
+	{
+		if s.Truncated.Set {
+			e.FieldStart("truncated")
+			s.Truncated.Encode(e)
+		}
+	}
+}
+
+var jsonFieldsNameOfThinkingSnapshot = [6]string{
+	0: "level",
+	1: "effective",
+	2: "escalated",
+	3: "escalationReason",
+	4: "unsupported",
+	5: "truncated",
+}
+
+// Decode decodes ThinkingSnapshot from json.
+func (s *ThinkingSnapshot) Decode(d *jx.Decoder) error {
+	if s == nil {
+		return errors.New("invalid: unable to decode ThinkingSnapshot to nil")
+	}
+	var requiredBitSet [1]uint8
+
+	if err := d.ObjBytes(func(d *jx.Decoder, k []byte) error {
+		switch string(k) {
+		case "level":
+			requiredBitSet[0] |= 1 << 0
+			if err := func() error {
+				if err := s.Level.Decode(d); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"level\"")
+			}
+		case "effective":
+			requiredBitSet[0] |= 1 << 1
+			if err := func() error {
+				v, err := d.Bool()
+				s.Effective = bool(v)
+				if err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"effective\"")
+			}
+		case "escalated":
+			if err := func() error {
+				s.Escalated.Reset()
+				if err := s.Escalated.Decode(d); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"escalated\"")
+			}
+		case "escalationReason":
+			if err := func() error {
+				s.EscalationReason.Reset()
+				if err := s.EscalationReason.Decode(d); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"escalationReason\"")
+			}
+		case "unsupported":
+			if err := func() error {
+				s.Unsupported.Reset()
+				if err := s.Unsupported.Decode(d); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"unsupported\"")
+			}
+		case "truncated":
+			if err := func() error {
+				s.Truncated.Reset()
+				if err := s.Truncated.Decode(d); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"truncated\"")
+			}
+		default:
+			return d.Skip()
+		}
+		return nil
+	}); err != nil {
+		return errors.Wrap(err, "decode ThinkingSnapshot")
+	}
+	// Validate required fields.
+	var failures []validate.FieldError
+	for i, mask := range [1]uint8{
+		0b00000011,
+	} {
+		if result := (requiredBitSet[i] & mask) ^ mask; result != 0 {
+			// Mask only required fields and check equality to mask using XOR.
+			//
+			// If XOR result is not zero, result is not equal to expected, so some fields are missed.
+			// Bits of fields which would be set are actually bits of missed fields.
+			missed := bits.OnesCount8(result)
+			for bitN := 0; bitN < missed; bitN++ {
+				bitIdx := bits.TrailingZeros8(result)
+				fieldIdx := i*8 + bitIdx
+				var name string
+				if fieldIdx < len(jsonFieldsNameOfThinkingSnapshot) {
+					name = jsonFieldsNameOfThinkingSnapshot[fieldIdx]
+				} else {
+					name = strconv.Itoa(fieldIdx)
+				}
+				failures = append(failures, validate.FieldError{
+					Name:  name,
+					Error: validate.ErrFieldRequired,
+				})
+				// Reset bit.
+				result &^= 1 << bitIdx
+			}
+		}
+	}
+	if len(failures) > 0 {
+		return &validate.Error{Fields: failures}
+	}
+
+	return nil
+}
+
+// MarshalJSON implements stdjson.Marshaler.
+func (s *ThinkingSnapshot) MarshalJSON() ([]byte, error) {
+	e := jx.Encoder{}
+	s.Encode(&e)
+	return e.Bytes(), nil
+}
+
+// UnmarshalJSON implements stdjson.Unmarshaler.
+func (s *ThinkingSnapshot) UnmarshalJSON(data []byte) error {
+	d := jx.DecodeBytes(data)
+	return s.Decode(d)
+}
+
+// Encode encodes ThinkingSnapshotLevel as json.
+func (s ThinkingSnapshotLevel) Encode(e *jx.Encoder) {
+	e.Str(string(s))
+}
+
+// Decode decodes ThinkingSnapshotLevel from json.
+func (s *ThinkingSnapshotLevel) Decode(d *jx.Decoder) error {
+	if s == nil {
+		return errors.New("invalid: unable to decode ThinkingSnapshotLevel to nil")
+	}
+	v, err := d.StrBytes()
+	if err != nil {
+		return err
+	}
+	// Try to use constant string.
+	switch ThinkingSnapshotLevel(v) {
+	case ThinkingSnapshotLevelFalse:
+		*s = ThinkingSnapshotLevelFalse
+	case ThinkingSnapshotLevelAuto:
+		*s = ThinkingSnapshotLevelAuto
+	case ThinkingSnapshotLevelTrue:
+		*s = ThinkingSnapshotLevelTrue
+	default:
+		*s = ThinkingSnapshotLevel(v)
+	}
+
+	return nil
+}
+
+// MarshalJSON implements stdjson.Marshaler.
+func (s ThinkingSnapshotLevel) MarshalJSON() ([]byte, error) {
+	e := jx.Encoder{}
+	s.Encode(&e)
+	return e.Bytes(), nil
+}
+
+// UnmarshalJSON implements stdjson.Unmarshaler.
+func (s *ThinkingSnapshotLevel) UnmarshalJSON(data []byte) error {
+	d := jx.DecodeBytes(data)
+	return s.Decode(d)
+}
+
+// Encode implements json.Marshaler.
 func (s *ToolDef) Encode(e *jx.Encoder) {
 	e.ObjStart()
 	s.encodeFields(e)
@@ -8882,6 +9693,171 @@ func (s *ToolDefParameters) UnmarshalJSON(data []byte) error {
 }
 
 // Encode implements json.Marshaler.
+func (s *TurnMeasurement) Encode(e *jx.Encoder) {
+	e.ObjStart()
+	s.encodeFields(e)
+	e.ObjEnd()
+}
+
+// encodeFields encodes fields.
+func (s *TurnMeasurement) encodeFields(e *jx.Encoder) {
+	{
+		if s.PromptTokens.Set {
+			e.FieldStart("promptTokens")
+			s.PromptTokens.Encode(e)
+		}
+	}
+	{
+		if s.ThinkingTokens.Set {
+			e.FieldStart("thinkingTokens")
+			s.ThinkingTokens.Encode(e)
+		}
+	}
+	{
+		if s.CompletionTokens.Set {
+			e.FieldStart("completionTokens")
+			s.CompletionTokens.Encode(e)
+		}
+	}
+	{
+		if s.LatencyMs.Set {
+			e.FieldStart("latencyMs")
+			s.LatencyMs.Encode(e)
+		}
+	}
+	{
+		if s.Model.Set {
+			e.FieldStart("model")
+			s.Model.Encode(e)
+		}
+	}
+	{
+		if s.Quant.Set {
+			e.FieldStart("quant")
+			s.Quant.Encode(e)
+		}
+	}
+	{
+		if s.WindowUtilization.Set {
+			e.FieldStart("windowUtilization")
+			s.WindowUtilization.Encode(e)
+		}
+	}
+}
+
+var jsonFieldsNameOfTurnMeasurement = [7]string{
+	0: "promptTokens",
+	1: "thinkingTokens",
+	2: "completionTokens",
+	3: "latencyMs",
+	4: "model",
+	5: "quant",
+	6: "windowUtilization",
+}
+
+// Decode decodes TurnMeasurement from json.
+func (s *TurnMeasurement) Decode(d *jx.Decoder) error {
+	if s == nil {
+		return errors.New("invalid: unable to decode TurnMeasurement to nil")
+	}
+
+	if err := d.ObjBytes(func(d *jx.Decoder, k []byte) error {
+		switch string(k) {
+		case "promptTokens":
+			if err := func() error {
+				s.PromptTokens.Reset()
+				if err := s.PromptTokens.Decode(d); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"promptTokens\"")
+			}
+		case "thinkingTokens":
+			if err := func() error {
+				s.ThinkingTokens.Reset()
+				if err := s.ThinkingTokens.Decode(d); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"thinkingTokens\"")
+			}
+		case "completionTokens":
+			if err := func() error {
+				s.CompletionTokens.Reset()
+				if err := s.CompletionTokens.Decode(d); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"completionTokens\"")
+			}
+		case "latencyMs":
+			if err := func() error {
+				s.LatencyMs.Reset()
+				if err := s.LatencyMs.Decode(d); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"latencyMs\"")
+			}
+		case "model":
+			if err := func() error {
+				s.Model.Reset()
+				if err := s.Model.Decode(d); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"model\"")
+			}
+		case "quant":
+			if err := func() error {
+				s.Quant.Reset()
+				if err := s.Quant.Decode(d); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"quant\"")
+			}
+		case "windowUtilization":
+			if err := func() error {
+				s.WindowUtilization.Reset()
+				if err := s.WindowUtilization.Decode(d); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"windowUtilization\"")
+			}
+		default:
+			return d.Skip()
+		}
+		return nil
+	}); err != nil {
+		return errors.Wrap(err, "decode TurnMeasurement")
+	}
+
+	return nil
+}
+
+// MarshalJSON implements stdjson.Marshaler.
+func (s *TurnMeasurement) MarshalJSON() ([]byte, error) {
+	e := jx.Encoder{}
+	s.Encode(&e)
+	return e.Bytes(), nil
+}
+
+// UnmarshalJSON implements stdjson.Unmarshaler.
+func (s *TurnMeasurement) UnmarshalJSON(data []byte) error {
+	d := jx.DecodeBytes(data)
+	return s.Decode(d)
+}
+
+// Encode implements json.Marshaler.
 func (s *TurnOptions) Encode(e *jx.Encoder) {
 	e.ObjStart()
 	s.encodeFields(e)
@@ -8957,6 +9933,120 @@ func (s *TurnOptions) MarshalJSON() ([]byte, error) {
 
 // UnmarshalJSON implements stdjson.Unmarshaler.
 func (s *TurnOptions) UnmarshalJSON(data []byte) error {
+	d := jx.DecodeBytes(data)
+	return s.Decode(d)
+}
+
+// Encode implements json.Marshaler.
+func (s *WindowUsage) Encode(e *jx.Encoder) {
+	e.ObjStart()
+	s.encodeFields(e)
+	e.ObjEnd()
+}
+
+// encodeFields encodes fields.
+func (s *WindowUsage) encodeFields(e *jx.Encoder) {
+	{
+		if s.ContextLength.Set {
+			e.FieldStart("contextLength")
+			s.ContextLength.Encode(e)
+		}
+	}
+	{
+		if s.Used.Set {
+			e.FieldStart("used")
+			s.Used.Encode(e)
+		}
+	}
+	{
+		if s.Reserve.Set {
+			e.FieldStart("reserve")
+			s.Reserve.Encode(e)
+		}
+	}
+	{
+		if s.Utilization.Set {
+			e.FieldStart("utilization")
+			s.Utilization.Encode(e)
+		}
+	}
+}
+
+var jsonFieldsNameOfWindowUsage = [4]string{
+	0: "contextLength",
+	1: "used",
+	2: "reserve",
+	3: "utilization",
+}
+
+// Decode decodes WindowUsage from json.
+func (s *WindowUsage) Decode(d *jx.Decoder) error {
+	if s == nil {
+		return errors.New("invalid: unable to decode WindowUsage to nil")
+	}
+
+	if err := d.ObjBytes(func(d *jx.Decoder, k []byte) error {
+		switch string(k) {
+		case "contextLength":
+			if err := func() error {
+				s.ContextLength.Reset()
+				if err := s.ContextLength.Decode(d); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"contextLength\"")
+			}
+		case "used":
+			if err := func() error {
+				s.Used.Reset()
+				if err := s.Used.Decode(d); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"used\"")
+			}
+		case "reserve":
+			if err := func() error {
+				s.Reserve.Reset()
+				if err := s.Reserve.Decode(d); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"reserve\"")
+			}
+		case "utilization":
+			if err := func() error {
+				s.Utilization.Reset()
+				if err := s.Utilization.Decode(d); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"utilization\"")
+			}
+		default:
+			return d.Skip()
+		}
+		return nil
+	}); err != nil {
+		return errors.Wrap(err, "decode WindowUsage")
+	}
+
+	return nil
+}
+
+// MarshalJSON implements stdjson.Marshaler.
+func (s *WindowUsage) MarshalJSON() ([]byte, error) {
+	e := jx.Encoder{}
+	s.Encode(&e)
+	return e.Bytes(), nil
+}
+
+// UnmarshalJSON implements stdjson.Unmarshaler.
+func (s *WindowUsage) UnmarshalJSON(data []byte) error {
 	d := jx.DecodeBytes(data)
 	return s.Decode(d)
 }

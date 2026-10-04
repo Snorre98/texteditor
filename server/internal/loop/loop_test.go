@@ -81,6 +81,7 @@ func (stubAssembler) Assemble(_ context.Context, in dto.AssemblerInput) (dto.Pay
 type stubProvider struct {
 	stream func(ctx context.Context, emit func(dto.RawEvent)) error
 	calls  *int
+	reqs   *[]dto.Request
 }
 
 func (s stubProvider) Chat(context.Context, dto.Target, dto.Request) (dto.Completion, error) {
@@ -89,6 +90,9 @@ func (s stubProvider) Chat(context.Context, dto.Target, dto.Request) (dto.Comple
 func (s stubProvider) Stream(ctx context.Context, t dto.Target, r dto.Request, emit func(dto.RawEvent)) error {
 	if s.calls != nil {
 		*s.calls++
+	}
+	if s.reqs != nil {
+		*s.reqs = append(*s.reqs, r)
 	}
 	return s.stream(ctx, emit)
 }
@@ -285,6 +289,42 @@ func (s *stubSessions) TurnContext(turnID string) (json.RawMessage, error) {
 	return nil, session.ErrNotFound
 }
 
+// CompactHistory replaces the oldest turns with one summary message (ADR-0051
+// §8); it mutates the stub history so a compaction test can observe the effect.
+func (s *stubSessions) CompactHistory(sessionID, summary string, keepRecentTurns int) (fromTs, toTs int64, turns int, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	hist := s.hist
+	starts := []int{}
+	for i, m := range hist {
+		if m.Role == "user" {
+			starts = append(starts, i)
+		}
+	}
+	if len(starts) == 0 {
+		return 0, 0, 0, nil
+	}
+	cut := len(starts) - keepRecentTurns
+	if cut <= 0 {
+		return 0, 0, 0, nil
+	}
+	boundary := starts[cut]
+	if boundary == 0 {
+		return 0, 0, 0, nil
+	}
+	summarized := hist[:boundary]
+	fromTs = summarized[0].Timestamp
+	toTs = summarized[len(summarized)-1].Timestamp
+	for _, m := range summarized {
+		if m.Role == "user" {
+			turns++
+		}
+	}
+	kept := append([]dto.Message(nil), hist[boundary:]...)
+	s.hist = append([]dto.Message{{Role: "user", Content: "[Summary]\n" + summary, Timestamp: fromTs}}, kept...)
+	return fromTs, toTs, turns, nil
+}
+
 // stubFilesystem implements filesystem.Interface over an in-memory map keyed by
 // path → (content, error). Used to drive mention resolution and the
 // ALLOWED_ROOTS refusal path.
@@ -360,15 +400,24 @@ func (s stubShards) Services(context.Context, string) (*shard.Lease, error) {
 var _ retriever.Interface = (*stubRetriever)(nil)
 
 type stubMeter struct {
-	mu     sync.Mutex
-	called int
+	mu          sync.Mutex
+	called      int
+	compactions int
+	measurement *dto.TurnMeasurement
 }
 
-func (s *stubMeter) Attribute(context.Context, string, string, string, dto.Breakdown, dto.ProviderCounts) (dto.AttributedBreakdown, error) {
+func (s *stubMeter) Attribute(_ context.Context, _, _, _ string, _ dto.Breakdown, _ dto.ProviderCounts, m dto.TurnMeasurement) (dto.AttributedBreakdown, error) {
 	s.mu.Lock()
 	s.called++
+	s.measurement = &m
 	s.mu.Unlock()
 	return dto.AttributedBreakdown{}, nil
+}
+func (s *stubMeter) AttributeCompaction(context.Context, string, string, string, dto.ProviderCounts) error {
+	s.mu.Lock()
+	s.compactions++
+	s.mu.Unlock()
+	return nil
 }
 func (s *stubMeter) SessionUsage(context.Context, string) (int, error) { return 0, nil }
 func (s *stubMeter) SessionBreakdown(context.Context, string) (dto.SessionMeter, error) {
@@ -701,11 +750,17 @@ func (budgetSessions) TurnContext(string) (json.RawMessage, error) {
 }
 func (budgetSessions) SetContextPolicy(string, json.RawMessage) error { return nil }
 func (budgetSessions) ContextPolicy(string) (json.RawMessage, error)  { return nil, nil }
+func (budgetSessions) CompactHistory(string, string, int) (int64, int64, int, error) {
+	return 0, 0, 0, nil
+}
 
 type budgetMeter struct{ used int }
 
-func (b budgetMeter) Attribute(context.Context, string, string, string, dto.Breakdown, dto.ProviderCounts) (dto.AttributedBreakdown, error) {
+func (b budgetMeter) Attribute(context.Context, string, string, string, dto.Breakdown, dto.ProviderCounts, dto.TurnMeasurement) (dto.AttributedBreakdown, error) {
 	return dto.AttributedBreakdown{}, nil
+}
+func (b budgetMeter) AttributeCompaction(context.Context, string, string, string, dto.ProviderCounts) error {
+	return nil
 }
 func (b budgetMeter) SessionUsage(context.Context, string) (int, error) { return b.used, nil }
 func (b budgetMeter) SessionBreakdown(context.Context, string) (dto.SessionMeter, error) {
@@ -2128,4 +2183,301 @@ func TestLocateProductionResolverWiring(t *testing.T) {
 	if res.Status != dto.LocateStatusResolved || res.BlockID != "b1" {
 		t.Fatalf("locate = %+v, want resolved b1 via the real resolver", res)
 	}
+}
+
+// --------------------- reasoning policy + budgets (ADR-0051) ---------------------
+
+// c5Deps builds happy-path deps with a C5 pipeline policy, runner, and a
+// request-recording provider.
+func c5Deps(bus *stubBus, policy dto.PipelinePolicy, runner string, stream func(context.Context, func(dto.RawEvent)) error, reqs *[]dto.Request) Deps {
+	deps := happyPathDeps(bus)
+	deps.Pipeline = stubPipeline{policy: policy}
+	res := deps.Fleet.(stubFleet).res
+	res.Model.Runner = runner
+	deps.Fleet = stubFleet{res: res}
+	deps.Provider = stubProvider{stream: stream, reqs: reqs}
+	return deps
+}
+
+// TestAutoEscalatesOnceAndLabels: `auto` runs thinking-off, and a structured
+// edit failure triggers exactly one thinking-on retry, labeled with the failure
+// (ADR-0051 §2).
+func TestAutoEscalatesOnceAndLabels(t *testing.T) {
+	bus := &stubBus{done: make(chan struct{})}
+	var reqs []dto.Request
+	round := 0
+	deps := c5Deps(bus, dto.PipelinePolicy{MaxSteps: 6, Thinking: dto.ThinkingAuto}, "mlx-lm", func(_ context.Context, emit func(dto.RawEvent)) error {
+		round++
+		if round == 1 {
+			emit(dto.RawEvent{Type: "tool_call", Data: json.RawMessage(`{"id":"c1","name":"edit_markdown","arguments":"{\"blockId\":\"b1\",\"text\":\"new\"}"}`)})
+			emit(dto.RawEvent{Type: "finish", Data: json.RawMessage(`{"reason":"tool_calls"}`)})
+		} else {
+			emit(dto.RawEvent{Type: "token", Data: json.RawMessage(`{"text":"fixed"}`)})
+			emit(dto.RawEvent{Type: "finish", Data: json.RawMessage(`{"reason":"stop"}`)})
+			emit(dto.RawEvent{Type: "done", Data: json.RawMessage(`{"inputTokens":14,"outputTokens":5}`)})
+		}
+		return nil
+	}, &reqs)
+	deps.Executor = &recordingExecutor{result: json.RawMessage(`{"ok":false,"error":"invalid-structure"}`)}
+
+	events, _, snap := runAndCollect(t, deps, dto.Task{SessionID: "s1", ModeName: "proofreader", DocumentID: "d1", UserInput: "fix"})
+	if len(reqs) != 2 {
+		t.Fatalf("provider calls = %d, want 2 (one escalation)", len(reqs))
+	}
+	if reqs[0].Thinking == nil || *reqs[0].Thinking {
+		t.Fatalf("first attempt thinking = %v, want false", reqs[0].Thinking)
+	}
+	if reqs[1].Thinking == nil || !*reqs[1].Thinking {
+		t.Fatalf("retry thinking = %v, want true", reqs[1].Thinking)
+	}
+	if snap.Thinking == nil || !snap.Thinking.Escalated || snap.Thinking.EscalationReason != "invalid-structure" {
+		t.Fatalf("snapshot thinking = %+v, want escalated invalid-structure", snap.Thinking)
+	}
+	if !hasEvent(events, "done") {
+		t.Fatalf("no done event: %+v", events)
+	}
+}
+
+// TestAutoNoEscalationOnSuccess: a successful tool round does not escalate.
+func TestAutoNoEscalationOnSuccess(t *testing.T) {
+	bus := &stubBus{done: make(chan struct{})}
+	var reqs []dto.Request
+	round := 0
+	deps := c5Deps(bus, dto.PipelinePolicy{MaxSteps: 6, Thinking: dto.ThinkingAuto}, "mlx-lm", func(_ context.Context, emit func(dto.RawEvent)) error {
+		round++
+		if round == 1 {
+			emit(dto.RawEvent{Type: "tool_call", Data: json.RawMessage(`{"id":"c1","name":"edit_markdown","arguments":"{\"blockId\":\"b1\",\"text\":\"new\"}"}`)})
+			emit(dto.RawEvent{Type: "finish", Data: json.RawMessage(`{"reason":"tool_calls"}`)})
+		} else {
+			emit(dto.RawEvent{Type: "token", Data: json.RawMessage(`{"text":"ok"}`)})
+			emit(dto.RawEvent{Type: "finish", Data: json.RawMessage(`{"reason":"stop"}`)})
+		}
+		return nil
+	}, &reqs)
+	deps.Executor = &recordingExecutor{result: json.RawMessage(`{"ok":true,"blockId":"b1"}`)}
+
+	_, _, snap := runAndCollect(t, deps, dto.Task{SessionID: "s1", ModeName: "proofreader", DocumentID: "d1", UserInput: "fix"})
+	if snap.Thinking == nil || snap.Thinking.Escalated {
+		t.Fatalf("snapshot thinking = %+v, want no escalation", snap.Thinking)
+	}
+	for i, r := range reqs {
+		if r.Thinking == nil || *r.Thinking {
+			t.Fatalf("request %d thinking = %v, want false (no escalation)", i, r.Thinking)
+		}
+	}
+}
+
+// TestOffToggleAndUnsupportedDegrade: `off` sends the disable toggle on a
+// supported runner; an unsupported runner degrades to thinking-on with a label
+// (ADR-0051 §1/§3).
+func TestOffToggleAndUnsupportedDegrade(t *testing.T) {
+	stream := func(_ context.Context, emit func(dto.RawEvent)) error {
+		emit(dto.RawEvent{Type: "token", Data: json.RawMessage(`{"text":"done"}`)})
+		emit(dto.RawEvent{Type: "finish", Data: json.RawMessage(`{"reason":"stop"}`)})
+		emit(dto.RawEvent{Type: "done", Data: json.RawMessage(`{"inputTokens":5,"outputTokens":2}`)})
+		return nil
+	}
+	policy := dto.PipelinePolicy{MaxSteps: 6, Thinking: dto.ThinkingOff}
+
+	t.Run("supported", func(t *testing.T) {
+		bus := &stubBus{done: make(chan struct{})}
+		var reqs []dto.Request
+		deps := c5Deps(bus, policy, "mlx-lm", stream, &reqs)
+		_, _, snap := runAndCollect(t, deps, dto.Task{SessionID: "s1", ModeName: "proofreader", DocumentID: "d1", UserInput: "fix"})
+		if len(reqs) != 1 || reqs[0].Thinking == nil || *reqs[0].Thinking {
+			t.Fatalf("request thinking = %+v, want disabled", reqs)
+		}
+		if snap.Thinking == nil || snap.Thinking.Effective || snap.Thinking.Unsupported {
+			t.Fatalf("snapshot thinking = %+v, want effective=false unsupported=false", snap.Thinking)
+		}
+	})
+
+	t.Run("unsupported", func(t *testing.T) {
+		bus := &stubBus{done: make(chan struct{})}
+		var reqs []dto.Request
+		deps := c5Deps(bus, policy, "delegate", stream, &reqs)
+		_, _, snap := runAndCollect(t, deps, dto.Task{SessionID: "s1", ModeName: "proofreader", DocumentID: "d1", UserInput: "fix"})
+		if len(reqs) != 1 || reqs[0].Thinking == nil || !*reqs[0].Thinking {
+			t.Fatalf("request thinking = %+v, want degraded to on", reqs)
+		}
+		if snap.Thinking == nil || !snap.Thinking.Unsupported || !snap.Thinking.Effective {
+			t.Fatalf("snapshot thinking = %+v, want unsupported + effective", snap.Thinking)
+		}
+	})
+}
+
+// TestThinkingEventForwarded: reasoning deltas surface as a `thinking` event and
+// the measurement records the exact thinking count (ADR-0051 §4/§11).
+func TestThinkingEventForwarded(t *testing.T) {
+	bus := &stubBus{done: make(chan struct{})}
+	deps := c5Deps(bus, dto.PipelinePolicy{MaxSteps: 6, Thinking: dto.ThinkingOn}, "mlx-lm", func(_ context.Context, emit func(dto.RawEvent)) error {
+		emit(dto.RawEvent{Type: "reasoning", Data: json.RawMessage(`{"text":"why "}`)})
+		emit(dto.RawEvent{Type: "reasoning", Data: json.RawMessage(`{"text":"not"}`)})
+		emit(dto.RawEvent{Type: "token", Data: json.RawMessage(`{"text":"answer"}`)})
+		emit(dto.RawEvent{Type: "finish", Data: json.RawMessage(`{"reason":"stop"}`)})
+		emit(dto.RawEvent{Type: "done", Data: json.RawMessage(`{"inputTokens":9,"outputTokens":7,"thinkingTokens":4}`)})
+		return nil
+	}, nil)
+
+	events, _, snap := runAndCollect(t, deps, dto.Task{SessionID: "s1", ModeName: "proofreader", DocumentID: "d1", UserInput: "fix"})
+	var thinkingText string
+	for _, ev := range events {
+		if ev.Type == "thinking" {
+			var v struct {
+				Text string `json:"text"`
+			}
+			_ = json.Unmarshal(ev.Data, &v)
+			thinkingText += v.Text
+		}
+	}
+	if thinkingText != "why not" {
+		t.Fatalf("thinking event text = %q, want %q", thinkingText, "why not")
+	}
+	if snap.Measurements == nil || snap.Measurements.ThinkingTokens != 4 {
+		t.Fatalf("measurement = %+v, want thinking 4", snap.Measurements)
+	}
+}
+
+// TestLengthWithoutOutcomeIsError: a `length` turn with neither a tool call nor
+// an answer is a labeled terminal error, never an empty done (ADR-0051 §5).
+func TestLengthWithoutOutcomeIsError(t *testing.T) {
+	bus := &stubBus{done: make(chan struct{})}
+	deps := c5Deps(bus, dto.PipelinePolicy{MaxSteps: 6, Thinking: dto.ThinkingOn}, "mlx-lm", func(_ context.Context, emit func(dto.RawEvent)) error {
+		emit(dto.RawEvent{Type: "finish", Data: json.RawMessage(`{"reason":"length"}`)})
+		return nil
+	}, nil)
+
+	events, _, snap := runAndCollect(t, deps, dto.Task{SessionID: "s1", ModeName: "proofreader", DocumentID: "d1", UserInput: "fix"})
+	last := events[len(events)-1]
+	if last.Type != "error" {
+		t.Fatalf("last event = %s, want error: %+v", last.Type, events)
+	}
+	var ed struct {
+		Code string `json:"code"`
+	}
+	_ = json.Unmarshal(last.Data, &ed)
+	if ed.Code != "thinking-truncated" {
+		t.Fatalf("error code = %q, want thinking-truncated", ed.Code)
+	}
+	if snap.Thinking == nil || !snap.Thinking.Truncated {
+		t.Fatalf("snapshot thinking = %+v, want truncated", snap.Thinking)
+	}
+}
+
+// TestThinkingBudgetTruncationLabeled: exceeding the reasoning cap labels the
+// turn thinking-truncated even when an answer still lands.
+func TestThinkingBudgetTruncationLabeled(t *testing.T) {
+	bus := &stubBus{done: make(chan struct{})}
+	deps := c5Deps(bus, dto.PipelinePolicy{MaxSteps: 6, Thinking: dto.ThinkingOn, MaxThinkingTokens: 2}, "mlx-lm", func(_ context.Context, emit func(dto.RawEvent)) error {
+		emit(dto.RawEvent{Type: "reasoning", Data: json.RawMessage(`{"text":"` + strings.Repeat("x", 40) + `"}`)}) // 10 tokens > cap
+		emit(dto.RawEvent{Type: "token", Data: json.RawMessage(`{"text":"answer"}`)})
+		emit(dto.RawEvent{Type: "finish", Data: json.RawMessage(`{"reason":"stop"}`)})
+		return nil
+	}, nil)
+
+	_, _, snap := runAndCollect(t, deps, dto.Task{SessionID: "s1", ModeName: "proofreader", DocumentID: "d1", UserInput: "fix"})
+	if snap.Thinking == nil || !snap.Thinking.Truncated {
+		t.Fatalf("snapshot thinking = %+v, want truncated", snap.Thinking)
+	}
+}
+
+// TestCompactionReplacesHistoryMetered: history over the trigger is compacted
+// into one metered summary; the snapshot records the range (ADR-0051 §8).
+func TestCompactionReplacesHistoryMetered(t *testing.T) {
+	bus := &stubBus{done: make(chan struct{})}
+	deps := happyPathDeps(bus)
+	sess := newStubSessions()
+	sess.hist = []dto.Message{
+		{Role: "user", Content: strings.Repeat("a", 400), Timestamp: 1},
+		{Role: "assistant", Content: strings.Repeat("b", 400), Timestamp: 2},
+		{Role: "user", Content: strings.Repeat("c", 400), Timestamp: 3},
+		{Role: "assistant", Content: strings.Repeat("d", 400), Timestamp: 4},
+	}
+	svc := shardSvc(deps)
+	svc.Sessions = sess
+	deps.Pipeline = stubPipeline{policy: dto.PipelinePolicy{
+		MaxSteps: 6, MaxHistoryTokens: 100000, MaxRagTokens: 100000, MaxMentionTokens: 100000, AutoRagTopK: 3,
+		Compaction: dto.CompactionPolicy{Enabled: true, TriggerHistoryTokens: 10, KeepRecentTurns: 1},
+	}}
+	round := 0
+	deps.Provider = stubProvider{stream: func(_ context.Context, emit func(dto.RawEvent)) error {
+		round++
+		if round == 1 { // the compaction summary call
+			emit(dto.RawEvent{Type: "token", Data: json.RawMessage(`{"text":"a compact summary"}`)})
+			emit(dto.RawEvent{Type: "done", Data: json.RawMessage(`{"inputTokens":200,"outputTokens":20}`)})
+		} else {
+			emit(dto.RawEvent{Type: "token", Data: json.RawMessage(`{"text":"answer"}`)})
+			emit(dto.RawEvent{Type: "finish", Data: json.RawMessage(`{"reason":"stop"}`)})
+			emit(dto.RawEvent{Type: "done", Data: json.RawMessage(`{"inputTokens":20,"outputTokens":5}`)})
+		}
+		return nil
+	}}
+
+	_, _, snap := runAndCollect(t, deps, dto.Task{SessionID: "s1", ModeName: "proofreader", DocumentID: "d1", UserInput: "fix"})
+	if snap.Compacted == nil {
+		t.Fatalf("snapshot compacted = nil, want a range")
+	}
+	if snap.Compacted.Turns != 1 || !snap.Compacted.CacheCost {
+		t.Fatalf("compacted = %+v, want 1 turn + cache cost", snap.Compacted)
+	}
+	m := svc.Meter.(*stubMeter)
+	m.mu.Lock()
+	compactions := m.compactions
+	m.mu.Unlock()
+	if compactions != 1 {
+		t.Fatalf("compaction meter rows = %d, want 1", compactions)
+	}
+}
+
+// TestSessionBudgetSoftAndHard: the soft threshold warns and proceeds; the hard
+// threshold refuses (ADR-0051 §7).
+func TestSessionBudgetSoftAndHard(t *testing.T) {
+	stream := func(_ context.Context, emit func(dto.RawEvent)) error {
+		emit(dto.RawEvent{Type: "token", Data: json.RawMessage(`{"text":"done"}`)})
+		emit(dto.RawEvent{Type: "finish", Data: json.RawMessage(`{"reason":"stop"}`)})
+		return nil
+	}
+
+	t.Run("soft warns and proceeds", func(t *testing.T) {
+		bus := &stubBus{done: make(chan struct{})}
+		budget := 100
+		deps := happyPathDeps(bus)
+		svc := shardSvc(deps)
+		svc.Sessions = budgetSessions{budget: &budget}
+		svc.Meter = &budgetMeter{used: 85}
+		deps.Pipeline = stubPipeline{policy: dto.PipelinePolicy{MaxSteps: 6, SessionBudgetSoftRatio: 0.8}}
+		deps.Provider = stubProvider{stream: stream}
+
+		events, _, snap := runAndCollect(t, deps, dto.Task{SessionID: "s1", ModeName: "proofreader", DocumentID: "d1", UserInput: "fix"})
+		if snap.SessionBudget == nil || !snap.SessionBudget.Soft || snap.SessionBudget.Hard {
+			t.Fatalf("session budget = %+v, want soft only", snap.SessionBudget)
+		}
+		if !hasEvent(events, "done") {
+			t.Fatalf("soft budget should proceed to done: %+v", events)
+		}
+	})
+
+	t.Run("hard refuses", func(t *testing.T) {
+		bus := &stubBus{done: make(chan struct{})}
+		budget := 99
+		deps := happyPathDeps(bus)
+		svc := shardSvc(deps)
+		svc.Sessions = budgetSessions{budget: &budget}
+		svc.Meter = &budgetMeter{used: 100}
+		deps.Pipeline = stubPipeline{policy: dto.PipelinePolicy{MaxSteps: 6, SessionBudgetSoftRatio: 0.8}}
+		deps.Provider = stubProvider{stream: stream}
+
+		events, _, _ := runAndCollect(t, deps, dto.Task{SessionID: "s1", ModeName: "proofreader", DocumentID: "d1", UserInput: "fix"})
+		last := events[len(events)-1]
+		if last.Type != "error" {
+			t.Fatalf("last event = %s, want error", last.Type)
+		}
+		var ed struct {
+			Code string `json:"code"`
+		}
+		_ = json.Unmarshal(last.Data, &ed)
+		if ed.Code != "session-budget-exceeded" {
+			t.Fatalf("error code = %q, want session-budget-exceeded", ed.Code)
+		}
+	})
 }

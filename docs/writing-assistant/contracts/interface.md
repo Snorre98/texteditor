@@ -185,6 +185,10 @@ Semantics:
 type Target struct {
     BaseURL      string
     Capabilities Capabilities
+    // Runner is the serving runner kind (`llama.cpp` | `mlx-lm` | `mlx-vlm` |
+    // `delegate`), projected by the daemon and consumed by the Provider to map
+    // the per-runner thinking toggle (ADR-0051 §3). Empty = unknown runner.
+    Runner string
 }
 
 type SamplingParams struct {
@@ -198,15 +202,17 @@ type Completion struct {
     FinishReason string     // the response's finish_reason (stop | tool_calls | length | tool …)
     InputTokens  int        // raw prompt_eval_count
     OutputTokens int        // raw eval_count
+    ThinkingTokens int      // provider-reported reasoning count; 0 when omitted (ADR-0051 §4)
 }
 
 type RawEvent struct {           // unframed, un-attributed
-    Type string                  // "token" | "tool_call" | "finish" | "done" | "error"
+    Type string                  // "token" | "reasoning" | "tool_call" | "finish" | "done" | "error"
     Data json.RawMessage         // payload shapes per ADR-0016 §2:
                                  //   token     → {"text": "…"}
+                                 //   reasoning → {"text": "…"}   (raw thinking delta, ADR-0051 §4)
                                  //   tool_call → {"id": "…", "name": "…", "arguments": "…"}
                                  //   finish    → {"reason": "tool_calls" | "stop" | …}
-                                 //   done      → {"inputTokens": n, "outputTokens": n}
+                                 //   done      → {"inputTokens": n, "outputTokens": n, "thinkingTokens": n}
                                  //   error     → {"code": "…", "message": "…"}
 }
 
@@ -242,6 +248,16 @@ and owns nothing upstream.)
 non-streaming response's `finish_reason`, carried so the `ToolDecider` can read
 the router facade's decision signal (ADR-0028 §7). Additive; existing callers
 ignore it.)
+
+(Amended by ADR-0051 §3/§4 (Phase C5): `Target` gains `Runner`, so the Provider
+maps the thinking toggle per runner — mlx-lm / llama.cpp
+`chat_template_kwargs: {"enable_thinking": bool}`, OpenAI-compatible
+`reasoning_effort`; an unsupported runner renders nothing and the loop labels
+`thinking-unsupported`. `RawEvent` gains `reasoning` (a raw thinking delta) and
+`done` carries `thinkingTokens`; `Completion` gains `ThinkingTokens`.
+`dto.Request` gains `Thinking *bool` (nil = runner default, false = disable, true
+= enable for the `auto` escalation). `SupportsThinkingToggle(runner)` is the
+provider's capability predicate.)
 
 ## 3. Retriever (Go interface)
 
@@ -369,6 +385,7 @@ type AssemblerInput struct {
     History     []Message
     Mentions    []MentionContent // ADR-0036; spliced after history, before user input
     UserInput   string
+    ContextLength int           // resolved model window (ADR-0051 §6); 0 = gate disabled
 }
 
 type Breakdown struct { // deterministic approximation, documented unit
@@ -380,6 +397,7 @@ type Request struct {     // the fully-assembled provider request (pure DTO)
     Messages        []Message      // system + history + rag + user, in order
     Tools           []ToolDef      // spliced function definitions
     EffectiveParams SamplingParams // merged defaults ← opts.Overrides
+    Thinking        *bool          // nil = runner default; false/true = disable/enable (ADR-0051 §3)
 }
 
 type Payload struct {
@@ -388,6 +406,7 @@ type Payload struct {
     Provenance []MessageProvenance // component + provenance for every assembled message (ADR-0044 §4)
     Drops      []ContextDrop       // labeled truncation/drop records (never silent)
     Budget     []BudgetUsage       // per-component utilization vs the PipelinePolicy limit
+    Window     WindowUsage         // per-turn context-window accounting (ADR-0051 §6)
 }
 
 // MessageProvenance: one assembled message's component and source. Component ∈
@@ -417,11 +436,18 @@ type ContextPolicy struct {
     Excluded       []ChunkRef
     AutoRag        *bool
     RetrievalQuery *string
+    Thinking       *ThinkingLevel // off | auto | on (ADR-0051 §1); nil inherits
 }
+
+// ThinkingLevel ∈ off | auto | on (ADR-0051 §1).
+type ThinkingLevel string
 
 // ContextSnapshot is the persisted per-turn record (GET /turns/{id}/context and
 // the `context` SSE payload). Decision (Phase F) is a reserved optional record;
-// Locate (Phase D) carries the LocateResult JSON for a `/locate` turn.
+// Locate (Phase D) carries the LocateResult JSON for a `/locate` turn. The
+// Thinking/Measurements/Compacted/Window/SessionBudget fields are the ADR-0051
+// additions: the resolved thinking outcome, the per-turn measurements, the
+// summarized range, the window accounting, and the soft/hard budget state.
 type ContextSnapshot struct {
     TurnID, SessionID, WorkspaceID string
     RetrievalQuery                 string
@@ -431,6 +457,11 @@ type ContextSnapshot struct {
     Drops                          []ContextDrop
     Budget                         []BudgetUsage
     Decision, Locate               json.RawMessage // Decision reserved; Locate = LocateResult
+    Thinking                       *ThinkingSnapshot
+    Measurements                   *TurnMeasurement
+    Compacted                      *CompactionRecord
+    Window                         *WindowUsage
+    SessionBudget                  *SessionBudget
     CreatedAt                      int64
 }
 
@@ -520,7 +551,8 @@ type AttributedBreakdown struct {
 }
 
 type TokenMeter interface {
-    Attribute(ctx context.Context, turnID, sessionID, model string, b Breakdown, counts ProviderCounts) (AttributedBreakdown, error)
+    Attribute(ctx context.Context, turnID, sessionID, model string, b Breakdown, counts ProviderCounts, m TurnMeasurement) (AttributedBreakdown, error)
+    AttributeCompaction(ctx context.Context, turnID, sessionID, model string, counts ProviderCounts) error // own model row (ADR-0051 §8)
     SessionUsage(ctx context.Context, sessionID string) (int, error) // cumulative tokens per session (budget)
     SessionBreakdown(ctx context.Context, sessionID string) (SessionMeter, error) // per-component cumulative meter
 }
@@ -530,7 +562,7 @@ type TokenMeter interface {
 // component in canonical order, plus the cumulative prompt+completion total.
 type SessionMeter struct {
     SessionID  string
-    Components []SessionMeterComponent // system|tools|rag|history|mentions|user|thinking|completion
+    Components []SessionMeterComponent // system|tools|rag|history|mentions|user|thinking|completion|compaction
     Total      int
 }
 type SessionMeterComponent struct {
@@ -539,6 +571,19 @@ type SessionMeterComponent struct {
     CompletionTokens int
     Approx           bool // labeled approximation (thinking, ADR-0024)
 }
+
+// TurnMeasurement is the per-turn measurement record (ADR-0051 §11), persisted
+// in meter_measurements and carried on the meter event.
+type TurnMeasurement struct {
+    PromptTokens, ThinkingTokens, CompletionTokens int
+    LatencyMs                                      int64
+    Model, Quant                                   string
+    WindowUtilization                              float64
+}
+
+// SessionBudgetState classifies cumulative usage against a session budget
+// (ADR-0051 §7): soft (warn, proceed) / hard (refuse unless compaction rescues).
+func SessionBudgetState(used int, budget *int, softRatio float64, nextTokens int) (soft, hard bool)
 ```
 
 `Attribute` scales the assembler's `Breakdown` onto the provider's exact totals,
@@ -789,6 +834,17 @@ type PipelinePolicy struct {
     MaxRagTokens     int // assembler auto-RAG budget (0 drops all)
     MaxMentionTokens int // assembler mention budget (0 truncates all, labeled)
     AutoRagTopK      int // auto-RAG retrieval depth, every turn (≥ 1)
+    Thinking               ThinkingLevel // default thinking policy (ADR-0051 §1)
+    MaxThinkingTokens      int           // reasoning-token cap; hitting it labels thinking-truncated (§5)
+    ReserveOutputTokens    int           // window-gate output reserve (§6)
+    SessionBudgetSoftRatio float64       // soft session-budget threshold ratio (§7)
+    Compaction             CompactionPolicy // {Enabled, TriggerHistoryTokens, KeepRecentTurns} (§8)
+}
+
+type CompactionPolicy struct {
+    Enabled              bool
+    TriggerHistoryTokens int
+    KeepRecentTurns      int
 }
 
 type PipelinePolicyRegistry interface {

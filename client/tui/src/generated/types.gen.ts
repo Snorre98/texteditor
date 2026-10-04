@@ -365,7 +365,7 @@ export type CreateSessionRequest = {
 export type SessionMeter = {
     sessionId: string;
     components: Array<{
-        component: 'system' | 'tools' | 'rag' | 'history' | 'mentions' | 'user' | 'thinking' | 'completion';
+        component: 'system' | 'tools' | 'rag' | 'history' | 'mentions' | 'user' | 'thinking' | 'completion' | 'compaction';
         promptTokens: number;
         completionTokens: number;
         /**
@@ -449,10 +449,18 @@ export type LocateResult = {
  *
  */
 export type Event = {
-    type: 'token' | 'meter' | 'candidate' | 'diff' | 'rag' | 'context' | 'locate' | 'done' | 'error' | 'backpressure';
+    type: 'token' | 'meter' | 'candidate' | 'diff' | 'rag' | 'context' | 'locate' | 'thinking' | 'done' | 'error' | 'backpressure';
 };
 
 export type TokenEvent = {
+    text: string;
+};
+
+/**
+ * A raw reasoning/thinking delta forwarded live from the provider so a client can render a thinking indicator instead of an unexplained pause (ADR-0051 §4). The exact thinking count is reconciled by the meter; this event is progress only. Payload granularity is a text delta.
+ *
+ */
+export type ThinkingEvent = {
     text: string;
 };
 
@@ -470,6 +478,7 @@ export type MeterEvent = {
     thinking: number;
     thinkingApprox?: boolean;
     completion: number;
+    measurement?: TurnMeasurement;
 };
 
 /**
@@ -547,6 +556,11 @@ export type ContextPolicy = {
      *
      */
     retrievalQuery?: string;
+    /**
+     * The turn's thinking policy (ADR-0051 §1). When absent the persisted session policy, else the pipeline default, applies. `off` asks the runner to disable its thinking channel; `auto` runs thinking-off and escalates once after a structured failure; `on` always thinks. Never a preset field (ADR-0045).
+     *
+     */
+    thinking?: 'off' | 'auto' | 'on';
 };
 
 /**
@@ -573,7 +587,98 @@ export type ContextSnapshot = {
         [key: string]: unknown;
     };
     locate?: LocateResult;
+    thinking?: ThinkingSnapshot;
+    measurements?: TurnMeasurement;
+    compacted?: CompactionRecord;
+    window?: WindowUsage;
+    sessionBudget?: SessionBudget;
     createdAt: number;
+};
+
+/**
+ * The session budget state for one turn (ADR-0051 §7). `soft` labels the warning (the turn proceeds); `hard` labels the refusal (unless compaction rescued the turn).
+ *
+ */
+export type SessionBudget = {
+    soft?: boolean;
+    hard?: boolean;
+    used?: number;
+    budget?: number;
+};
+
+/**
+ * The turn's resolved thinking outcome (ADR-0051 §1–§5): the policy level, the level actually used, and the labeled degradation/escalation/ truncation outcome. Every field is engine-owned; clients render it.
+ *
+ */
+export type ThinkingSnapshot = {
+    /**
+     * The resolved policy level (pipeline default ← session ← per-turn).
+     */
+    level: 'off' | 'auto' | 'on';
+    /**
+     * True when the provider request actually enabled the thinking channel.
+     */
+    effective: boolean;
+    /**
+     * True when `auto` retried once with thinking-on after a structured failure.
+     */
+    escalated?: boolean;
+    /**
+     * The structured failure that triggered the escalation (`invalid-structure` | `guard-failed` | `no-outcome`).
+     *
+     */
+    escalationReason?: string;
+    /**
+     * True when the resolved runner cannot disable thinking; labeled `thinking-unsupported`.
+     */
+    unsupported?: boolean;
+    /**
+     * True when the thinking budget was reached before a tool call or answer; labeled `thinking-truncated`.
+     */
+    truncated?: boolean;
+};
+
+/**
+ * Per-turn measurements (ADR-0051 §11): the token counts, wall-clock latency, model + quant, and window utilization recorded per model so the hardware map accumulates. No measurement is approximated without a label (the thinking count carries `thinkingApprox` on the meter).
+ *
+ */
+export type TurnMeasurement = {
+    promptTokens?: number;
+    thinkingTokens?: number;
+    completionTokens?: number;
+    latencyMs?: number;
+    model?: string;
+    quant?: string;
+    /**
+     * promptTokens / model.capabilities.contextLength (0 when unknown).
+     */
+    windowUtilization?: number;
+};
+
+/**
+ * The summarized history range replaced by one metered summary message (ADR-0051 §8). Pins and the most recent turns survive; the prefix-cache reuse traded away is labeled, not silent.
+ *
+ */
+export type CompactionRecord = {
+    fromTs?: number;
+    toTs?: number;
+    turns?: number;
+    summaryTokens?: number;
+    /**
+     * True when compaction (or a tray edit) changed the front-loaded prefix, trading away cache reuse.
+     */
+    cacheCost?: boolean;
+};
+
+/**
+ * The per-turn context-window accounting (ADR-0051 §6): the assembled payload plus output reserve against the model's context window.
+ *
+ */
+export type WindowUsage = {
+    contextLength?: number;
+    used?: number;
+    reserve?: number;
+    utilization?: number;
 };
 
 /**
@@ -620,6 +725,10 @@ export type ContextChunk = {
  */
 export type ContextDrop = {
     component: 'history' | 'rag' | 'mention';
+    /**
+     * The labeled reason: `history-budget` | `rag-budget` | `mention-budget` | `excluded` | `not-found` | `context-window`.
+     *
+     */
     reason: string;
     count: number;
     detail?: string;
@@ -652,6 +761,10 @@ export type DoneEvent = {
 };
 
 export type ErrorEvent = {
+    /**
+     * The typed terminal error code. Budget/window codes added by ADR-0051: `context-window-exceeded` (fixed + pinned + user alone exceed the model window, refused before any provider call) and `session-budget-exceeded` (the hard session budget would be crossed and compaction did not rescue the turn). `thinking-truncated` labels a `length` turn with neither a tool call nor an answer.
+     *
+     */
     code?: string;
     message?: string;
 };

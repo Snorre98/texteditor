@@ -65,20 +65,38 @@ func parse(schemaBytes, data []byte) (dto.PipelinePolicy, error) {
 	}
 
 	var raw struct {
-		MaxSteps         int `json:"maxSteps"`
-		MaxHistoryTokens int `json:"maxHistoryTokens"`
-		MaxRagTokens     int `json:"maxRagTokens"`
-		MaxMentionTokens int `json:"maxMentionTokens"`
-		AutoRagTopK      int `json:"autoRagTopK"`
+		MaxSteps               int     `json:"maxSteps"`
+		MaxHistoryTokens       int     `json:"maxHistoryTokens"`
+		MaxRagTokens           int     `json:"maxRagTokens"`
+		MaxMentionTokens       int     `json:"maxMentionTokens"`
+		AutoRagTopK            int     `json:"autoRagTopK"`
+		Thinking               string  `json:"thinking"`
+		MaxThinkingTokens      int     `json:"maxThinkingTokens"`
+		ReserveOutputTokens    int     `json:"reserveOutputTokens"`
+		SessionBudgetSoftRatio float64 `json:"sessionBudgetSoftRatio"`
+		Compaction             struct {
+			Enabled              bool `json:"enabled"`
+			TriggerHistoryTokens int  `json:"triggerHistoryTokens"`
+			KeepRecentTurns      int  `json:"keepRecentTurns"`
+		} `json:"compaction"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return dto.PipelinePolicy{}, fmt.Errorf("%w: %v", ErrInvalid, err)
 	}
 	return dto.PipelinePolicy{
-		MaxSteps:         raw.MaxSteps,
-		MaxHistoryTokens: raw.MaxHistoryTokens,
-		MaxRagTokens:     raw.MaxRagTokens,
-		MaxMentionTokens: raw.MaxMentionTokens,
-		AutoRagTopK:      raw.AutoRagTopK,
+		MaxSteps:               raw.MaxSteps,
+		MaxHistoryTokens:       raw.MaxHistoryTokens,
+		MaxRagTokens:           raw.MaxRagTokens,
+		MaxMentionTokens:       raw.MaxMentionTokens,
+		AutoRagTopK:            raw.AutoRagTopK,
+		Thinking:               dto.ThinkingLevel(raw.Thinking),
+		MaxThinkingTokens:      raw.MaxThinkingTokens,
+		ReserveOutputTokens:    raw.ReserveOutputTokens,
+		SessionBudgetSoftRatio: raw.SessionBudgetSoftRatio,
+		Compaction: dto.CompactionPolicy{
+			Enabled:              raw.Compaction.Enabled,
+			TriggerHistoryTokens: raw.Compaction.TriggerHistoryTokens,
+			KeepRecentTurns:      raw.Compaction.KeepRecentTurns,
+		},
 	}, nil
 }

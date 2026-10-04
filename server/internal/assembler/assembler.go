@@ -8,6 +8,7 @@ package assembler
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"texteditor/shared/dto"
@@ -20,6 +21,11 @@ type ContextAssembler interface {
 
 // Interface is an alias for ContextAssembler (the contracted name, interface.md §5).
 type Interface = ContextAssembler
+
+// ErrContextWindowExceeded is the typed refusal when the fixed components
+// (system + tools + pinned + user) plus the output reserve alone exceed the
+// model's context window (ADR-0051 §6). It is surfaced before any provider call.
+var ErrContextWindowExceeded = errors.New("context-window-exceeded: fixed + pinned + user context exceeds the model window")
 
 // assembler is the concrete Context assembler (pure leaf).
 type assembler struct{}
@@ -57,6 +63,69 @@ func (assembler) Assemble(_ context.Context, in dto.AssemblerInput) (dto.Payload
 	// Splice mentions after history, before user input (ADR-0036 §3). Truncate
 	// over-budget mentions from the tail, with a labeled overflow line.
 	mentions, mentionsDropped := truncateMentions(in.Mentions, in.Policy.MaxMentionTokens)
+
+	userTokens := estimate(in.UserInput)
+
+	toolsTokens := 0
+	for _, t := range in.Tools {
+		toolsTokens += estimate(string(t.Parameters))
+	}
+
+	// --- Per-turn context-window gate (ADR-0051 §6) -------------------------
+	// Applied before any provider call. The fixed components (system + tools +
+	// pinned + user) plus the output reserve are never dropped; if they alone
+	// exceed the window the turn is refused with a typed error. Otherwise the
+	// lowest-priority components are dropped first: oldest history, then RAG,
+	// then recent history, then mentions. Every drop is a labeled record.
+	windowDrops := []dto.ContextDrop{}
+	if in.ContextLength > 0 {
+		pinnedTokens := 0
+		autoRagTokens := 0
+		for _, it := range keptRag {
+			if it.pinned {
+				pinnedTokens += estimate(it.chunk.Text)
+			} else {
+				autoRagTokens += estimate(it.chunk.Text)
+			}
+		}
+		historyTokens := sumTokens(history)
+		mentionTokens := sumMentionTokens(mentions)
+		reserve := in.Policy.ReserveOutputTokens
+		fixed := systemTokens + toolsTokens + pinnedTokens + userTokens + reserve
+		if fixed > in.ContextLength {
+			return dto.Payload{}, dto.Breakdown{}, ErrContextWindowExceeded
+		}
+		overage := fixed + historyTokens + autoRagTokens + mentionTokens - in.ContextLength
+		if overage > 0 {
+			older, recent := splitHistoryAtLastUser(history)
+			var droppedOlder, droppedRecent int
+			older, droppedOlder = dropOldestUntil(older, &overage)
+			var droppedRag int
+			keptRag, droppedRag = dropRagTailUntil(keptRag, &overage)
+			recent, droppedRecent = dropOldestUntil(recent, &overage)
+			var droppedMentions int
+			mentions, droppedMentions = dropMentionTailUntil(mentions, &overage)
+			history = append(older, recent...)
+			if droppedOlder+droppedRecent > 0 {
+				windowDrops = append(windowDrops, dto.ContextDrop{
+					Component: "history", Reason: "context-window",
+					Count: droppedOlder + droppedRecent, Detail: windowDetail(in.ContextLength),
+				})
+			}
+			if droppedRag > 0 {
+				windowDrops = append(windowDrops, dto.ContextDrop{
+					Component: "rag", Reason: "context-window",
+					Count: droppedRag, Detail: windowDetail(in.ContextLength),
+				})
+			}
+			if droppedMentions > 0 {
+				windowDrops = append(windowDrops, dto.ContextDrop{
+					Component: "mention", Reason: "context-window",
+					Count: droppedMentions, Detail: windowDetail(in.ContextLength),
+				})
+			}
+		}
+	}
 
 	// Build the assembled message list and the per-message provenance
 	// (ADR-0044 §4). The two slices are positionally aligned: provenance[i]
@@ -104,16 +173,8 @@ func (assembler) Assemble(_ context.Context, in dto.AssemblerInput) (dto.Payload
 		messages = append(messages, dto.Message{Role: "user", Content: line})
 		provenance = append(provenance, dto.MessageProvenance{Role: "user", Component: "mention", Source: "<overflow>", Tokens: estimate(line)})
 	}
-	userTokens := estimate(in.UserInput)
 	messages = append(messages, dto.Message{Role: "user", Content: in.UserInput})
 	provenance = append(provenance, dto.MessageProvenance{Role: "user", Component: "user", Tokens: userTokens})
-
-	// Tool schemas spliced as function definitions (their size is metered,
-	// ADR-0011/0019).
-	toolsTokens := 0
-	for _, t := range in.Tools {
-		toolsTokens += estimate(string(t.Parameters))
-	}
 
 	breakdown := dto.Breakdown{
 		SystemPrompt: systemTokens,
@@ -142,6 +203,7 @@ func (assembler) Assemble(_ context.Context, in dto.AssemblerInput) (dto.Payload
 	if mentionsDropped > 0 {
 		drops = append(drops, dto.ContextDrop{Component: "mention", Reason: "mention-budget", Count: mentionsDropped, Detail: budgetDetail("maxMentionTokens", in.Policy.MaxMentionTokens)})
 	}
+	drops = append(drops, windowDrops...)
 
 	// Per-component budget utilization (used vs the PipelinePolicy limit).
 	// system/tools/user/thinking have no policy cap; their Limit stays 0.
@@ -162,7 +224,17 @@ func (assembler) Assemble(_ context.Context, in dto.AssemblerInput) (dto.Payload
 		EffectiveParams: in.Params,
 	}
 
-	return dto.Payload{Messages: messages, Request: req, Provenance: provenance, Drops: drops, Budget: budget}, breakdown, nil
+	used := systemTokens + toolsTokens + ragTokens + historyTokens + mentionTokens + userTokens
+	window := dto.WindowUsage{
+		ContextLength: in.ContextLength,
+		Used:          used,
+		Reserve:       in.Policy.ReserveOutputTokens,
+	}
+	if in.ContextLength > 0 {
+		window.Utilization = float64(used) / float64(in.ContextLength)
+	}
+
+	return dto.Payload{Messages: messages, Request: req, Provenance: provenance, Drops: drops, Budget: budget, Window: window}, breakdown, nil
 }
 
 // truncateHistory returns the newest history messages that fit within maxTokens
@@ -227,6 +299,74 @@ func truncateRagItems(items []ragItem, maxTokens int) (kept []ragItem, droppedPi
 	return kept, droppedPinned, droppedAuto
 }
 
+// splitHistoryAtLastUser splits history into older messages (everything before
+// the most recent user turn) and the recent segment (the last user turn onward).
+// The window gate drops older history before recent history (ADR-0051 §6).
+func splitHistoryAtLastUser(hist []dto.Message) (older, recent []dto.Message) {
+	idx := -1
+	for i := len(hist) - 1; i >= 0; i-- {
+		if hist[i].Role == "user" {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return hist, nil
+	}
+	return hist[:idx], hist[idx:]
+}
+
+// dropOldestUntil drops messages from the front (oldest) until overage is paid
+// down, returning the kept messages and the number dropped.
+func dropOldestUntil(msgs []dto.Message, overage *int) ([]dto.Message, int) {
+	i := 0
+	for i < len(msgs) && *overage > 0 {
+		*overage -= estimate(msgs[i].Content)
+		i++
+	}
+	return msgs[i:], i
+}
+
+// dropRagTailUntil drops auto-retrieved chunks from the tail (lowest priority)
+// until overage is paid down. Pinned chunks are never dropped here: they are in
+// the fixed floor, which is checked first.
+func dropRagTailUntil(items []ragItem, overage *int) ([]ragItem, int) {
+	end := len(items)
+	for end > 0 && *overage > 0 && !items[end-1].pinned {
+		*overage -= estimate(items[end-1].chunk.Text)
+		end--
+	}
+	return items[:end], len(items) - end
+}
+
+// dropMentionTailUntil drops mentions from the tail until overage is paid down.
+func dropMentionTailUntil(mentions []dto.MentionContent, overage *int) ([]dto.MentionContent, int) {
+	end := len(mentions)
+	for end > 0 && *overage > 0 {
+		*overage -= estimate(mentions[end-1].Text)
+		end--
+	}
+	return mentions[:end], len(mentions) - end
+}
+
+// sumTokens returns the bytes/4 estimate sum for a message list.
+func sumTokens(msgs []dto.Message) int {
+	total := 0
+	for _, m := range msgs {
+		total += estimate(m.Content)
+	}
+	return total
+}
+
+// sumMentionTokens returns the bytes/4 estimate sum for a mention list.
+func sumMentionTokens(mentions []dto.MentionContent) int {
+	total := 0
+	for _, m := range mentions {
+		total += estimate(m.Text)
+	}
+	return total
+}
+
 // chunkSource is the provenance marker recorded for a retrieved chunk: the
 // canonical path when present, else the chunk key, else the block id.
 func chunkSource(c dto.Chunk) string {
@@ -242,6 +382,11 @@ func chunkSource(c dto.Chunk) string {
 // budgetDetail renders a labeled drop's budget context.
 func budgetDetail(name string, limit int) string {
 	return fmt.Sprintf("%s=%d", name, limit)
+}
+
+// windowDetail renders a labeled context-window drop's window context.
+func windowDetail(contextLength int) string {
+	return fmt.Sprintf("contextLength=%d", contextLength)
 }
 
 // mentionMarkup wraps a mention in a path marker line so the model can cite it

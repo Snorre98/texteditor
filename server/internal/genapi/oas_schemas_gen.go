@@ -553,6 +553,68 @@ func (s *CommitRequest) SetOverwrite(val OptBool) {
 	s.Overwrite = val
 }
 
+// The summarized history range replaced by one metered summary message (ADR-0051 §8). Pins and the
+// most recent turns survive; the prefix-cache reuse traded away is labeled, not silent.
+// Ref: #/components/schemas/CompactionRecord
+type CompactionRecord struct {
+	FromTs        OptInt64 `json:"fromTs"`
+	ToTs          OptInt64 `json:"toTs"`
+	Turns         OptInt   `json:"turns"`
+	SummaryTokens OptInt   `json:"summaryTokens"`
+	// True when compaction (or a tray edit) changed the front-loaded prefix, trading away cache reuse.
+	CacheCost OptBool `json:"cacheCost"`
+}
+
+// GetFromTs returns the value of FromTs.
+func (s *CompactionRecord) GetFromTs() OptInt64 {
+	return s.FromTs
+}
+
+// GetToTs returns the value of ToTs.
+func (s *CompactionRecord) GetToTs() OptInt64 {
+	return s.ToTs
+}
+
+// GetTurns returns the value of Turns.
+func (s *CompactionRecord) GetTurns() OptInt {
+	return s.Turns
+}
+
+// GetSummaryTokens returns the value of SummaryTokens.
+func (s *CompactionRecord) GetSummaryTokens() OptInt {
+	return s.SummaryTokens
+}
+
+// GetCacheCost returns the value of CacheCost.
+func (s *CompactionRecord) GetCacheCost() OptBool {
+	return s.CacheCost
+}
+
+// SetFromTs sets the value of FromTs.
+func (s *CompactionRecord) SetFromTs(val OptInt64) {
+	s.FromTs = val
+}
+
+// SetToTs sets the value of ToTs.
+func (s *CompactionRecord) SetToTs(val OptInt64) {
+	s.ToTs = val
+}
+
+// SetTurns sets the value of Turns.
+func (s *CompactionRecord) SetTurns(val OptInt) {
+	s.Turns = val
+}
+
+// SetSummaryTokens sets the value of SummaryTokens.
+func (s *CompactionRecord) SetSummaryTokens(val OptInt) {
+	s.SummaryTokens = val
+}
+
+// SetCacheCost sets the value of CacheCost.
+func (s *CompactionRecord) SetCacheCost(val OptBool) {
+	s.CacheCost = val
+}
+
 // One retrieved chunk recorded in the snapshot; the same shape as a RagEvent chunk, with provenance
 // (ADR-0044 §3).
 // Ref: #/components/schemas/ContextChunk
@@ -666,9 +728,11 @@ func (s *ContextChunk) SetHumanOverride(val OptBool) {
 // Ref: #/components/schemas/ContextDrop
 type ContextDrop struct {
 	Component ContextDropComponent `json:"component"`
-	Reason    string               `json:"reason"`
-	Count     int                  `json:"count"`
-	Detail    OptString            `json:"detail"`
+	// The labeled reason: `history-budget` | `rag-budget` | `mention-budget` | `excluded` | `not-found` |
+	// `context-window`.
+	Reason string    `json:"reason"`
+	Count  int       `json:"count"`
+	Detail OptString `json:"detail"`
 	// True when the dropped item was a human override (a pinned chunk dropped by truncation, Phase C4);
 	// labels the override in the snapshot.
 	HumanOverride OptBool `json:"humanOverride"`
@@ -970,6 +1034,11 @@ type ContextPolicy struct {
 	// The query auto-RAG runs. When absent the persisted session policy, else `Task.userInput`, applies.
 	// Affects retrieval only, never the user message.
 	RetrievalQuery OptString `json:"retrievalQuery"`
+	// The turn's thinking policy (ADR-0051 §1). When absent the persisted session policy, else the
+	// pipeline default, applies. `off` asks the runner to disable its thinking channel; `auto` runs
+	// thinking-off and escalates once after a structured failure; `on` always thinks. Never a preset field
+	// (ADR-0045).
+	Thinking OptContextPolicyThinking `json:"thinking"`
 }
 
 // GetPinned returns the value of Pinned.
@@ -992,6 +1061,11 @@ func (s *ContextPolicy) GetRetrievalQuery() OptString {
 	return s.RetrievalQuery
 }
 
+// GetThinking returns the value of Thinking.
+func (s *ContextPolicy) GetThinking() OptContextPolicyThinking {
+	return s.Thinking
+}
+
 // SetPinned sets the value of Pinned.
 func (s *ContextPolicy) SetPinned(val []ChunkRef) {
 	s.Pinned = val
@@ -1012,6 +1086,63 @@ func (s *ContextPolicy) SetRetrievalQuery(val OptString) {
 	s.RetrievalQuery = val
 }
 
+// SetThinking sets the value of Thinking.
+func (s *ContextPolicy) SetThinking(val OptContextPolicyThinking) {
+	s.Thinking = val
+}
+
+// The turn's thinking policy (ADR-0051 §1). When absent the persisted session policy, else the
+// pipeline default, applies. `off` asks the runner to disable its thinking channel; `auto` runs
+// thinking-off and escalates once after a structured failure; `on` always thinks. Never a preset field
+// (ADR-0045).
+type ContextPolicyThinking string
+
+const (
+	ContextPolicyThinkingFalse ContextPolicyThinking = "false"
+	ContextPolicyThinkingAuto  ContextPolicyThinking = "auto"
+	ContextPolicyThinkingTrue  ContextPolicyThinking = "true"
+)
+
+// AllValues returns all ContextPolicyThinking values.
+func (ContextPolicyThinking) AllValues() []ContextPolicyThinking {
+	return []ContextPolicyThinking{
+		ContextPolicyThinkingFalse,
+		ContextPolicyThinkingAuto,
+		ContextPolicyThinkingTrue,
+	}
+}
+
+// MarshalText implements encoding.TextMarshaler.
+func (s ContextPolicyThinking) MarshalText() ([]byte, error) {
+	switch s {
+	case ContextPolicyThinkingFalse:
+		return []byte(s), nil
+	case ContextPolicyThinkingAuto:
+		return []byte(s), nil
+	case ContextPolicyThinkingTrue:
+		return []byte(s), nil
+	default:
+		return nil, errors.Errorf("invalid value: %q", s)
+	}
+}
+
+// UnmarshalText implements encoding.TextUnmarshaler.
+func (s *ContextPolicyThinking) UnmarshalText(data []byte) error {
+	switch ContextPolicyThinking(data) {
+	case ContextPolicyThinkingFalse:
+		*s = ContextPolicyThinkingFalse
+		return nil
+	case ContextPolicyThinkingAuto:
+		*s = ContextPolicyThinkingAuto
+		return nil
+	case ContextPolicyThinkingTrue:
+		*s = ContextPolicyThinkingTrue
+		return nil
+	default:
+		return errors.Errorf("invalid value: %q", data)
+	}
+}
+
 // The engine-owned, persisted record of one turn's assembled context (ADR-0044 §4, ADR-0049 §7):
 // every assembled message with its component and provenance, the retrieved chunks, the labeled drops,
 // and the budget accounting. The snapshot itself is the contract — clients render it and never
@@ -1030,9 +1161,14 @@ type ContextSnapshot struct {
 	Drops          []ContextDrop    `json:"drops"`
 	Budget         []BudgetUsage    `json:"budget"`
 	// Reserved for Phase F decision records; not implemented in Phase C3.
-	Decision  *ContextSnapshotDecision `json:"decision"`
-	Locate    OptLocateResult          `json:"locate"`
-	CreatedAt int64                    `json:"createdAt"`
+	Decision      *ContextSnapshotDecision `json:"decision"`
+	Locate        OptLocateResult          `json:"locate"`
+	Thinking      OptThinkingSnapshot      `json:"thinking"`
+	Measurements  OptTurnMeasurement       `json:"measurements"`
+	Compacted     OptCompactionRecord      `json:"compacted"`
+	Window        OptWindowUsage           `json:"window"`
+	SessionBudget OptSessionBudget         `json:"sessionBudget"`
+	CreatedAt     int64                    `json:"createdAt"`
 }
 
 // GetTurnId returns the value of TurnId.
@@ -1088,6 +1224,31 @@ func (s *ContextSnapshot) GetDecision() *ContextSnapshotDecision {
 // GetLocate returns the value of Locate.
 func (s *ContextSnapshot) GetLocate() OptLocateResult {
 	return s.Locate
+}
+
+// GetThinking returns the value of Thinking.
+func (s *ContextSnapshot) GetThinking() OptThinkingSnapshot {
+	return s.Thinking
+}
+
+// GetMeasurements returns the value of Measurements.
+func (s *ContextSnapshot) GetMeasurements() OptTurnMeasurement {
+	return s.Measurements
+}
+
+// GetCompacted returns the value of Compacted.
+func (s *ContextSnapshot) GetCompacted() OptCompactionRecord {
+	return s.Compacted
+}
+
+// GetWindow returns the value of Window.
+func (s *ContextSnapshot) GetWindow() OptWindowUsage {
+	return s.Window
+}
+
+// GetSessionBudget returns the value of SessionBudget.
+func (s *ContextSnapshot) GetSessionBudget() OptSessionBudget {
+	return s.SessionBudget
 }
 
 // GetCreatedAt returns the value of CreatedAt.
@@ -1148,6 +1309,31 @@ func (s *ContextSnapshot) SetDecision(val *ContextSnapshotDecision) {
 // SetLocate sets the value of Locate.
 func (s *ContextSnapshot) SetLocate(val OptLocateResult) {
 	s.Locate = val
+}
+
+// SetThinking sets the value of Thinking.
+func (s *ContextSnapshot) SetThinking(val OptThinkingSnapshot) {
+	s.Thinking = val
+}
+
+// SetMeasurements sets the value of Measurements.
+func (s *ContextSnapshot) SetMeasurements(val OptTurnMeasurement) {
+	s.Measurements = val
+}
+
+// SetCompacted sets the value of Compacted.
+func (s *ContextSnapshot) SetCompacted(val OptCompactionRecord) {
+	s.Compacted = val
+}
+
+// SetWindow sets the value of Window.
+func (s *ContextSnapshot) SetWindow(val OptWindowUsage) {
+	s.Window = val
+}
+
+// SetSessionBudget sets the value of SessionBudget.
+func (s *ContextSnapshot) SetSessionBudget(val OptSessionBudget) {
+	s.SessionBudget = val
 }
 
 // SetCreatedAt sets the value of CreatedAt.
@@ -1816,6 +2002,7 @@ const (
 	EventTypeRag          EventType = "rag"
 	EventTypeContext      EventType = "context"
 	EventTypeLocate       EventType = "locate"
+	EventTypeThinking     EventType = "thinking"
 	EventTypeDone         EventType = "done"
 	EventTypeError        EventType = "error"
 	EventTypeBackpressure EventType = "backpressure"
@@ -1831,6 +2018,7 @@ func (EventType) AllValues() []EventType {
 		EventTypeRag,
 		EventTypeContext,
 		EventTypeLocate,
+		EventTypeThinking,
 		EventTypeDone,
 		EventTypeError,
 		EventTypeBackpressure,
@@ -1853,6 +2041,8 @@ func (s EventType) MarshalText() ([]byte, error) {
 	case EventTypeContext:
 		return []byte(s), nil
 	case EventTypeLocate:
+		return []byte(s), nil
+	case EventTypeThinking:
 		return []byte(s), nil
 	case EventTypeDone:
 		return []byte(s), nil
@@ -1888,6 +2078,9 @@ func (s *EventType) UnmarshalText(data []byte) error {
 		return nil
 	case EventTypeLocate:
 		*s = EventTypeLocate
+		return nil
+	case EventTypeThinking:
+		*s = EventTypeThinking
 		return nil
 	case EventTypeDone:
 		*s = EventTypeDone
@@ -3309,6 +3502,52 @@ func (o OptCommitRequest) Or(d CommitRequest) CommitRequest {
 	return d
 }
 
+// NewOptCompactionRecord returns new OptCompactionRecord with value set to v.
+func NewOptCompactionRecord(v CompactionRecord) OptCompactionRecord {
+	return OptCompactionRecord{
+		Value: v,
+		Set:   true,
+	}
+}
+
+// OptCompactionRecord is optional CompactionRecord.
+type OptCompactionRecord struct {
+	Value CompactionRecord
+	Set   bool
+}
+
+// IsSet returns true if OptCompactionRecord was set.
+func (o OptCompactionRecord) IsSet() bool { return o.Set }
+
+// Reset unsets value.
+func (o *OptCompactionRecord) Reset() {
+	var v CompactionRecord
+	o.Value = v
+	o.Set = false
+}
+
+// SetTo sets value to v.
+func (o *OptCompactionRecord) SetTo(v CompactionRecord) {
+	o.Set = true
+	o.Value = v
+}
+
+// Get returns value and boolean that denotes whether value was set.
+func (o OptCompactionRecord) Get() (v CompactionRecord, ok bool) {
+	if !o.Set {
+		return v, false
+	}
+	return o.Value, true
+}
+
+// Or returns value if set, or given parameter if does not.
+func (o OptCompactionRecord) Or(d CompactionRecord) CompactionRecord {
+	if v, ok := o.Get(); ok {
+		return v
+	}
+	return d
+}
+
 // NewOptContextPolicy returns new OptContextPolicy with value set to v.
 func NewOptContextPolicy(v ContextPolicy) OptContextPolicy {
 	return OptContextPolicy{
@@ -3349,6 +3588,52 @@ func (o OptContextPolicy) Get() (v ContextPolicy, ok bool) {
 
 // Or returns value if set, or given parameter if does not.
 func (o OptContextPolicy) Or(d ContextPolicy) ContextPolicy {
+	if v, ok := o.Get(); ok {
+		return v
+	}
+	return d
+}
+
+// NewOptContextPolicyThinking returns new OptContextPolicyThinking with value set to v.
+func NewOptContextPolicyThinking(v ContextPolicyThinking) OptContextPolicyThinking {
+	return OptContextPolicyThinking{
+		Value: v,
+		Set:   true,
+	}
+}
+
+// OptContextPolicyThinking is optional ContextPolicyThinking.
+type OptContextPolicyThinking struct {
+	Value ContextPolicyThinking
+	Set   bool
+}
+
+// IsSet returns true if OptContextPolicyThinking was set.
+func (o OptContextPolicyThinking) IsSet() bool { return o.Set }
+
+// Reset unsets value.
+func (o *OptContextPolicyThinking) Reset() {
+	var v ContextPolicyThinking
+	o.Value = v
+	o.Set = false
+}
+
+// SetTo sets value to v.
+func (o *OptContextPolicyThinking) SetTo(v ContextPolicyThinking) {
+	o.Set = true
+	o.Value = v
+}
+
+// Get returns value and boolean that denotes whether value was set.
+func (o OptContextPolicyThinking) Get() (v ContextPolicyThinking, ok bool) {
+	if !o.Set {
+		return v, false
+	}
+	return o.Value, true
+}
+
+// Or returns value if set, or given parameter if does not.
+func (o OptContextPolicyThinking) Or(d ContextPolicyThinking) ContextPolicyThinking {
 	if v, ok := o.Get(); ok {
 		return v
 	}
@@ -3723,6 +4008,52 @@ func (o OptSelection) Or(d Selection) Selection {
 	return d
 }
 
+// NewOptSessionBudget returns new OptSessionBudget with value set to v.
+func NewOptSessionBudget(v SessionBudget) OptSessionBudget {
+	return OptSessionBudget{
+		Value: v,
+		Set:   true,
+	}
+}
+
+// OptSessionBudget is optional SessionBudget.
+type OptSessionBudget struct {
+	Value SessionBudget
+	Set   bool
+}
+
+// IsSet returns true if OptSessionBudget was set.
+func (o OptSessionBudget) IsSet() bool { return o.Set }
+
+// Reset unsets value.
+func (o *OptSessionBudget) Reset() {
+	var v SessionBudget
+	o.Value = v
+	o.Set = false
+}
+
+// SetTo sets value to v.
+func (o *OptSessionBudget) SetTo(v SessionBudget) {
+	o.Set = true
+	o.Value = v
+}
+
+// Get returns value and boolean that denotes whether value was set.
+func (o OptSessionBudget) Get() (v SessionBudget, ok bool) {
+	if !o.Set {
+		return v, false
+	}
+	return o.Value, true
+}
+
+// Or returns value if set, or given parameter if does not.
+func (o OptSessionBudget) Or(d SessionBudget) SessionBudget {
+	if v, ok := o.Get(); ok {
+		return v
+	}
+	return d
+}
+
 // NewOptString returns new OptString with value set to v.
 func NewOptString(v string) OptString {
 	return OptString{
@@ -3769,6 +4100,98 @@ func (o OptString) Or(d string) string {
 	return d
 }
 
+// NewOptThinkingSnapshot returns new OptThinkingSnapshot with value set to v.
+func NewOptThinkingSnapshot(v ThinkingSnapshot) OptThinkingSnapshot {
+	return OptThinkingSnapshot{
+		Value: v,
+		Set:   true,
+	}
+}
+
+// OptThinkingSnapshot is optional ThinkingSnapshot.
+type OptThinkingSnapshot struct {
+	Value ThinkingSnapshot
+	Set   bool
+}
+
+// IsSet returns true if OptThinkingSnapshot was set.
+func (o OptThinkingSnapshot) IsSet() bool { return o.Set }
+
+// Reset unsets value.
+func (o *OptThinkingSnapshot) Reset() {
+	var v ThinkingSnapshot
+	o.Value = v
+	o.Set = false
+}
+
+// SetTo sets value to v.
+func (o *OptThinkingSnapshot) SetTo(v ThinkingSnapshot) {
+	o.Set = true
+	o.Value = v
+}
+
+// Get returns value and boolean that denotes whether value was set.
+func (o OptThinkingSnapshot) Get() (v ThinkingSnapshot, ok bool) {
+	if !o.Set {
+		return v, false
+	}
+	return o.Value, true
+}
+
+// Or returns value if set, or given parameter if does not.
+func (o OptThinkingSnapshot) Or(d ThinkingSnapshot) ThinkingSnapshot {
+	if v, ok := o.Get(); ok {
+		return v
+	}
+	return d
+}
+
+// NewOptTurnMeasurement returns new OptTurnMeasurement with value set to v.
+func NewOptTurnMeasurement(v TurnMeasurement) OptTurnMeasurement {
+	return OptTurnMeasurement{
+		Value: v,
+		Set:   true,
+	}
+}
+
+// OptTurnMeasurement is optional TurnMeasurement.
+type OptTurnMeasurement struct {
+	Value TurnMeasurement
+	Set   bool
+}
+
+// IsSet returns true if OptTurnMeasurement was set.
+func (o OptTurnMeasurement) IsSet() bool { return o.Set }
+
+// Reset unsets value.
+func (o *OptTurnMeasurement) Reset() {
+	var v TurnMeasurement
+	o.Value = v
+	o.Set = false
+}
+
+// SetTo sets value to v.
+func (o *OptTurnMeasurement) SetTo(v TurnMeasurement) {
+	o.Set = true
+	o.Value = v
+}
+
+// Get returns value and boolean that denotes whether value was set.
+func (o OptTurnMeasurement) Get() (v TurnMeasurement, ok bool) {
+	if !o.Set {
+		return v, false
+	}
+	return o.Value, true
+}
+
+// Or returns value if set, or given parameter if does not.
+func (o OptTurnMeasurement) Or(d TurnMeasurement) TurnMeasurement {
+	if v, ok := o.Get(); ok {
+		return v
+	}
+	return d
+}
+
 // NewOptTurnOptions returns new OptTurnOptions with value set to v.
 func NewOptTurnOptions(v TurnOptions) OptTurnOptions {
 	return OptTurnOptions{
@@ -3809,6 +4232,52 @@ func (o OptTurnOptions) Get() (v TurnOptions, ok bool) {
 
 // Or returns value if set, or given parameter if does not.
 func (o OptTurnOptions) Or(d TurnOptions) TurnOptions {
+	if v, ok := o.Get(); ok {
+		return v
+	}
+	return d
+}
+
+// NewOptWindowUsage returns new OptWindowUsage with value set to v.
+func NewOptWindowUsage(v WindowUsage) OptWindowUsage {
+	return OptWindowUsage{
+		Value: v,
+		Set:   true,
+	}
+}
+
+// OptWindowUsage is optional WindowUsage.
+type OptWindowUsage struct {
+	Value WindowUsage
+	Set   bool
+}
+
+// IsSet returns true if OptWindowUsage was set.
+func (o OptWindowUsage) IsSet() bool { return o.Set }
+
+// Reset unsets value.
+func (o *OptWindowUsage) Reset() {
+	var v WindowUsage
+	o.Value = v
+	o.Set = false
+}
+
+// SetTo sets value to v.
+func (o *OptWindowUsage) SetTo(v WindowUsage) {
+	o.Set = true
+	o.Value = v
+}
+
+// Get returns value and boolean that denotes whether value was set.
+func (o OptWindowUsage) Get() (v WindowUsage, ok bool) {
+	if !o.Set {
+		return v, false
+	}
+	return o.Value, true
+}
+
+// Or returns value if set, or given parameter if does not.
+func (o OptWindowUsage) Or(d WindowUsage) WindowUsage {
 	if v, ok := o.Get(); ok {
 		return v
 	}
@@ -4204,6 +4673,56 @@ func (s *Session) SetContextPolicy(val OptContextPolicy) {
 
 func (*Session) putSessionContextRes() {}
 
+// The session budget state for one turn (ADR-0051 §7). `soft` labels the warning (the turn proceeds);
+// `hard` labels the refusal (unless compaction rescued the turn).
+// Ref: #/components/schemas/SessionBudget
+type SessionBudget struct {
+	Soft   OptBool `json:"soft"`
+	Hard   OptBool `json:"hard"`
+	Used   OptInt  `json:"used"`
+	Budget OptInt  `json:"budget"`
+}
+
+// GetSoft returns the value of Soft.
+func (s *SessionBudget) GetSoft() OptBool {
+	return s.Soft
+}
+
+// GetHard returns the value of Hard.
+func (s *SessionBudget) GetHard() OptBool {
+	return s.Hard
+}
+
+// GetUsed returns the value of Used.
+func (s *SessionBudget) GetUsed() OptInt {
+	return s.Used
+}
+
+// GetBudget returns the value of Budget.
+func (s *SessionBudget) GetBudget() OptInt {
+	return s.Budget
+}
+
+// SetSoft sets the value of Soft.
+func (s *SessionBudget) SetSoft(val OptBool) {
+	s.Soft = val
+}
+
+// SetHard sets the value of Hard.
+func (s *SessionBudget) SetHard(val OptBool) {
+	s.Hard = val
+}
+
+// SetUsed sets the value of Used.
+func (s *SessionBudget) SetUsed(val OptInt) {
+	s.Used = val
+}
+
+// SetBudget sets the value of Budget.
+func (s *SessionBudget) SetBudget(val OptInt) {
+	s.Budget = val
+}
+
 // A session's cumulative token meter, aggregated from the workspace shard's meter_events by component
 // (ADR-0026 §5, ADR-0044 §4). Newest session state is workspace-scoped; there is no global meter
 // total (ADR-0049 §5).
@@ -4306,6 +4825,7 @@ const (
 	SessionMeterComponentsItemComponentUser       SessionMeterComponentsItemComponent = "user"
 	SessionMeterComponentsItemComponentThinking   SessionMeterComponentsItemComponent = "thinking"
 	SessionMeterComponentsItemComponentCompletion SessionMeterComponentsItemComponent = "completion"
+	SessionMeterComponentsItemComponentCompaction SessionMeterComponentsItemComponent = "compaction"
 )
 
 // AllValues returns all SessionMeterComponentsItemComponent values.
@@ -4319,6 +4839,7 @@ func (SessionMeterComponentsItemComponent) AllValues() []SessionMeterComponentsI
 		SessionMeterComponentsItemComponentUser,
 		SessionMeterComponentsItemComponentThinking,
 		SessionMeterComponentsItemComponentCompletion,
+		SessionMeterComponentsItemComponentCompaction,
 	}
 }
 
@@ -4340,6 +4861,8 @@ func (s SessionMeterComponentsItemComponent) MarshalText() ([]byte, error) {
 	case SessionMeterComponentsItemComponentThinking:
 		return []byte(s), nil
 	case SessionMeterComponentsItemComponentCompletion:
+		return []byte(s), nil
+	case SessionMeterComponentsItemComponentCompaction:
 		return []byte(s), nil
 	default:
 		return nil, errors.Errorf("invalid value: %q", s)
@@ -4372,6 +4895,9 @@ func (s *SessionMeterComponentsItemComponent) UnmarshalText(data []byte) error {
 		return nil
 	case SessionMeterComponentsItemComponentCompletion:
 		*s = SessionMeterComponentsItemComponentCompletion
+		return nil
+	case SessionMeterComponentsItemComponentCompaction:
+		*s = SessionMeterComponentsItemComponentCompaction
 		return nil
 	default:
 		return errors.Errorf("invalid value: %q", data)
@@ -4501,6 +5027,136 @@ func (s *Task) SetContext(val OptContextPolicy) {
 	s.Context = val
 }
 
+// The turn's resolved thinking outcome (ADR-0051 §1–§5): the policy level, the level actually
+// used, and the labeled degradation/escalation/ truncation outcome. Every field is engine-owned;
+// clients render it.
+// Ref: #/components/schemas/ThinkingSnapshot
+type ThinkingSnapshot struct {
+	// The resolved policy level (pipeline default ← session ← per-turn).
+	Level ThinkingSnapshotLevel `json:"level"`
+	// True when the provider request actually enabled the thinking channel.
+	Effective bool `json:"effective"`
+	// True when `auto` retried once with thinking-on after a structured failure.
+	Escalated OptBool `json:"escalated"`
+	// The structured failure that triggered the escalation (`invalid-structure` | `guard-failed` |
+	// `no-outcome`).
+	EscalationReason OptString `json:"escalationReason"`
+	// True when the resolved runner cannot disable thinking; labeled `thinking-unsupported`.
+	Unsupported OptBool `json:"unsupported"`
+	// True when the thinking budget was reached before a tool call or answer; labeled
+	// `thinking-truncated`.
+	Truncated OptBool `json:"truncated"`
+}
+
+// GetLevel returns the value of Level.
+func (s *ThinkingSnapshot) GetLevel() ThinkingSnapshotLevel {
+	return s.Level
+}
+
+// GetEffective returns the value of Effective.
+func (s *ThinkingSnapshot) GetEffective() bool {
+	return s.Effective
+}
+
+// GetEscalated returns the value of Escalated.
+func (s *ThinkingSnapshot) GetEscalated() OptBool {
+	return s.Escalated
+}
+
+// GetEscalationReason returns the value of EscalationReason.
+func (s *ThinkingSnapshot) GetEscalationReason() OptString {
+	return s.EscalationReason
+}
+
+// GetUnsupported returns the value of Unsupported.
+func (s *ThinkingSnapshot) GetUnsupported() OptBool {
+	return s.Unsupported
+}
+
+// GetTruncated returns the value of Truncated.
+func (s *ThinkingSnapshot) GetTruncated() OptBool {
+	return s.Truncated
+}
+
+// SetLevel sets the value of Level.
+func (s *ThinkingSnapshot) SetLevel(val ThinkingSnapshotLevel) {
+	s.Level = val
+}
+
+// SetEffective sets the value of Effective.
+func (s *ThinkingSnapshot) SetEffective(val bool) {
+	s.Effective = val
+}
+
+// SetEscalated sets the value of Escalated.
+func (s *ThinkingSnapshot) SetEscalated(val OptBool) {
+	s.Escalated = val
+}
+
+// SetEscalationReason sets the value of EscalationReason.
+func (s *ThinkingSnapshot) SetEscalationReason(val OptString) {
+	s.EscalationReason = val
+}
+
+// SetUnsupported sets the value of Unsupported.
+func (s *ThinkingSnapshot) SetUnsupported(val OptBool) {
+	s.Unsupported = val
+}
+
+// SetTruncated sets the value of Truncated.
+func (s *ThinkingSnapshot) SetTruncated(val OptBool) {
+	s.Truncated = val
+}
+
+// The resolved policy level (pipeline default ← session ← per-turn).
+type ThinkingSnapshotLevel string
+
+const (
+	ThinkingSnapshotLevelFalse ThinkingSnapshotLevel = "false"
+	ThinkingSnapshotLevelAuto  ThinkingSnapshotLevel = "auto"
+	ThinkingSnapshotLevelTrue  ThinkingSnapshotLevel = "true"
+)
+
+// AllValues returns all ThinkingSnapshotLevel values.
+func (ThinkingSnapshotLevel) AllValues() []ThinkingSnapshotLevel {
+	return []ThinkingSnapshotLevel{
+		ThinkingSnapshotLevelFalse,
+		ThinkingSnapshotLevelAuto,
+		ThinkingSnapshotLevelTrue,
+	}
+}
+
+// MarshalText implements encoding.TextMarshaler.
+func (s ThinkingSnapshotLevel) MarshalText() ([]byte, error) {
+	switch s {
+	case ThinkingSnapshotLevelFalse:
+		return []byte(s), nil
+	case ThinkingSnapshotLevelAuto:
+		return []byte(s), nil
+	case ThinkingSnapshotLevelTrue:
+		return []byte(s), nil
+	default:
+		return nil, errors.Errorf("invalid value: %q", s)
+	}
+}
+
+// UnmarshalText implements encoding.TextUnmarshaler.
+func (s *ThinkingSnapshotLevel) UnmarshalText(data []byte) error {
+	switch ThinkingSnapshotLevel(data) {
+	case ThinkingSnapshotLevelFalse:
+		*s = ThinkingSnapshotLevelFalse
+		return nil
+	case ThinkingSnapshotLevelAuto:
+		*s = ThinkingSnapshotLevelAuto
+		return nil
+	case ThinkingSnapshotLevelTrue:
+		*s = ThinkingSnapshotLevelTrue
+		return nil
+	default:
+		return errors.Errorf("invalid value: %q", data)
+	}
+}
+
 // Ref: #/components/schemas/ToolDef
 type ToolDef struct {
 	Name        string             `json:"name"`
@@ -4540,6 +5196,91 @@ func (s *ToolDef) SetParameters(val *ToolDefParameters) {
 
 type ToolDefParameters struct{}
 
+// Per-turn measurements (ADR-0051 §11): the token counts, wall-clock latency, model + quant, and
+// window utilization recorded per model so the hardware map accumulates. No measurement is
+// approximated without a label (the thinking count carries `thinkingApprox` on the meter).
+// Ref: #/components/schemas/TurnMeasurement
+type TurnMeasurement struct {
+	PromptTokens     OptInt    `json:"promptTokens"`
+	ThinkingTokens   OptInt    `json:"thinkingTokens"`
+	CompletionTokens OptInt    `json:"completionTokens"`
+	LatencyMs        OptInt64  `json:"latencyMs"`
+	Model            OptString `json:"model"`
+	Quant            OptString `json:"quant"`
+	// PromptTokens / model.capabilities.contextLength (0 when unknown).
+	WindowUtilization OptFloat64 `json:"windowUtilization"`
+}
+
+// GetPromptTokens returns the value of PromptTokens.
+func (s *TurnMeasurement) GetPromptTokens() OptInt {
+	return s.PromptTokens
+}
+
+// GetThinkingTokens returns the value of ThinkingTokens.
+func (s *TurnMeasurement) GetThinkingTokens() OptInt {
+	return s.ThinkingTokens
+}
+
+// GetCompletionTokens returns the value of CompletionTokens.
+func (s *TurnMeasurement) GetCompletionTokens() OptInt {
+	return s.CompletionTokens
+}
+
+// GetLatencyMs returns the value of LatencyMs.
+func (s *TurnMeasurement) GetLatencyMs() OptInt64 {
+	return s.LatencyMs
+}
+
+// GetModel returns the value of Model.
+func (s *TurnMeasurement) GetModel() OptString {
+	return s.Model
+}
+
+// GetQuant returns the value of Quant.
+func (s *TurnMeasurement) GetQuant() OptString {
+	return s.Quant
+}
+
+// GetWindowUtilization returns the value of WindowUtilization.
+func (s *TurnMeasurement) GetWindowUtilization() OptFloat64 {
+	return s.WindowUtilization
+}
+
+// SetPromptTokens sets the value of PromptTokens.
+func (s *TurnMeasurement) SetPromptTokens(val OptInt) {
+	s.PromptTokens = val
+}
+
+// SetThinkingTokens sets the value of ThinkingTokens.
+func (s *TurnMeasurement) SetThinkingTokens(val OptInt) {
+	s.ThinkingTokens = val
+}
+
+// SetCompletionTokens sets the value of CompletionTokens.
+func (s *TurnMeasurement) SetCompletionTokens(val OptInt) {
+	s.CompletionTokens = val
+}
+
+// SetLatencyMs sets the value of LatencyMs.
+func (s *TurnMeasurement) SetLatencyMs(val OptInt64) {
+	s.LatencyMs = val
+}
+
+// SetModel sets the value of Model.
+func (s *TurnMeasurement) SetModel(val OptString) {
+	s.Model = val
+}
+
+// SetQuant sets the value of Quant.
+func (s *TurnMeasurement) SetQuant(val OptString) {
+	s.Quant = val
+}
+
+// SetWindowUtilization sets the value of WindowUtilization.
+func (s *TurnMeasurement) SetWindowUtilization(val OptFloat64) {
+	s.WindowUtilization = val
+}
+
 // Ref: #/components/schemas/TurnOptions
 type TurnOptions struct {
 	Temperature OptFloat64 `json:"temperature"`
@@ -4564,6 +5305,56 @@ func (s *TurnOptions) SetTemperature(val OptFloat64) {
 // SetModel sets the value of Model.
 func (s *TurnOptions) SetModel(val OptString) {
 	s.Model = val
+}
+
+// The per-turn context-window accounting (ADR-0051 §6): the assembled payload plus output reserve
+// against the model's context window.
+// Ref: #/components/schemas/WindowUsage
+type WindowUsage struct {
+	ContextLength OptInt     `json:"contextLength"`
+	Used          OptInt     `json:"used"`
+	Reserve       OptInt     `json:"reserve"`
+	Utilization   OptFloat64 `json:"utilization"`
+}
+
+// GetContextLength returns the value of ContextLength.
+func (s *WindowUsage) GetContextLength() OptInt {
+	return s.ContextLength
+}
+
+// GetUsed returns the value of Used.
+func (s *WindowUsage) GetUsed() OptInt {
+	return s.Used
+}
+
+// GetReserve returns the value of Reserve.
+func (s *WindowUsage) GetReserve() OptInt {
+	return s.Reserve
+}
+
+// GetUtilization returns the value of Utilization.
+func (s *WindowUsage) GetUtilization() OptFloat64 {
+	return s.Utilization
+}
+
+// SetContextLength sets the value of ContextLength.
+func (s *WindowUsage) SetContextLength(val OptInt) {
+	s.ContextLength = val
+}
+
+// SetUsed sets the value of Used.
+func (s *WindowUsage) SetUsed(val OptInt) {
+	s.Used = val
+}
+
+// SetReserve sets the value of Reserve.
+func (s *WindowUsage) SetReserve(val OptInt) {
+	s.Reserve = val
+}
+
+// SetUtilization sets the value of Utilization.
+func (s *WindowUsage) SetUtilization(val OptFloat64) {
+	s.Utilization = val
 }
 
 // Ref: #/components/schemas/WordEdit

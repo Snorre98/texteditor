@@ -5,7 +5,9 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	_ "modernc.org/sqlite"
@@ -308,5 +310,54 @@ func TestContextPolicyUnknownSession(t *testing.T) {
 	}
 	if _, err := s.ContextPolicy("nope"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("ContextPolicy unknown = %v, want ErrNotFound", err)
+	}
+}
+
+// TestCompactHistoryReplacesOldestTurns: the oldest turns are replaced by one
+// labeled summary message; the most recent keepRecentTurns survive (ADR-0051 §8).
+func TestCompactHistoryReplacesOldestTurns(t *testing.T) {
+	s := newTestStore(t)
+	sess, err := s.Create("doc1", nil, "editor")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 4; i++ {
+		if err := s.Append(sess.ID, dto.Message{Role: "user", Content: fmt.Sprintf("q%d", i)}); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.Append(sess.ID, dto.Message{Role: "assistant", Content: fmt.Sprintf("a%d", i)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	from, to, turns, err := s.CompactHistory(sess.ID, "the earlier gist", 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if turns != 2 {
+		t.Fatalf("turns = %d, want 2", turns)
+	}
+	if from == 0 || to == 0 {
+		t.Fatalf("range = (%d,%d), want non-zero", from, to)
+	}
+
+	hist, err := s.History(sess.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// One summary + the two most recent turns (4 messages) = 5.
+	if len(hist) != 5 {
+		t.Fatalf("history length = %d, want 5: %+v", len(hist), hist)
+	}
+	if !strings.Contains(hist[0].Content, "Summary") || !strings.Contains(hist[0].Content, "the earlier gist") {
+		t.Fatalf("first message is not the labeled summary: %q", hist[0].Content)
+	}
+	if hist[1].Content != "q2" {
+		t.Fatalf("kept turn starts at %q, want q2", hist[1].Content)
+	}
+
+	// A second compaction with enough recent turns is a no-op.
+	if _, _, n, err := s.CompactHistory(sess.ID, "again", 10); err != nil || n != 0 {
+		t.Fatalf("no-op compaction = (%d,%v), want (0,nil)", n, err)
 	}
 }

@@ -3,6 +3,7 @@ package assembler
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
@@ -584,5 +585,109 @@ func TestPinnedZeroBudgetDropsAllLabeled(t *testing.T) {
 	}
 	if pinnedDrop == nil || pinnedDrop.Count != 1 || pinnedDrop.Component != "rag" {
 		t.Fatalf("pinned drop = %+v, want labeled rag count 1", pinnedDrop)
+	}
+}
+
+// windowDrop finds a labeled context-window drop for a component.
+func windowDrop(drops []dto.ContextDrop, component string) *dto.ContextDrop {
+	for i := range drops {
+		if drops[i].Reason == "context-window" && drops[i].Component == component {
+			return &drops[i]
+		}
+	}
+	return nil
+}
+
+// TestWindowGateDropsOldestHistoryFirst: over-window assembly drops the oldest
+// history before anything else, labeled with the context-window reason, and the
+// payload plus reserve fits (ADR-0051 §6).
+func TestWindowGateDropsOldestHistoryFirst(t *testing.T) {
+	a := New()
+	hist := []dto.Message{
+		{Role: "user", Content: strings.Repeat("a", 40)},      // 10 tokens
+		{Role: "assistant", Content: strings.Repeat("b", 40)}, // 10 tokens
+		{Role: "user", Content: strings.Repeat("c", 40)},      // 10 tokens
+	}
+	p, b, err := a.Assemble(context.Background(), dto.AssemblerInput{
+		Mode:          dto.Mode{SystemPrompt: ""},
+		Policy:        dto.PipelinePolicy{MaxHistoryTokens: 1000, ReserveOutputTokens: 0},
+		History:       hist,
+		UserInput:     "u",
+		ContextLength: 21,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := windowDrop(p.Drops, "history")
+	if d == nil || d.Count != 1 {
+		t.Fatalf("history window drop = %+v, want count 1", d)
+	}
+	if b.History != 20 {
+		t.Fatalf("history tokens = %d, want 20", b.History)
+	}
+	if p.Window.Used > 21 {
+		t.Fatalf("used = %d, exceeds window 21", p.Window.Used)
+	}
+}
+
+// TestWindowGateDropsRagAfterHistory: once history is exhausted, RAG is dropped
+// next (before the most recent history survives).
+func TestWindowGateDropsRagAfterHistory(t *testing.T) {
+	a := New()
+	p, b, err := a.Assemble(context.Background(), dto.AssemblerInput{
+		Mode:          dto.Mode{SystemPrompt: ""},
+		Policy:        dto.PipelinePolicy{MaxHistoryTokens: 1000, MaxRagTokens: 1000, ReserveOutputTokens: 0},
+		History:       []dto.Message{{Role: "user", Content: "aa"}, {Role: "assistant", Content: "bb"}},
+		RAGChunks:     []dto.Chunk{{BlockID: "b1", Text: strings.Repeat("x", 80)}}, // 20 tokens
+		UserInput:     "u",
+		ContextLength: 5,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d := windowDrop(p.Drops, "rag"); d == nil || d.Count != 1 {
+		t.Fatalf("rag window drop = %+v, want count 1", d)
+	}
+	if b.Rag != 0 {
+		t.Fatalf("rag tokens = %d, want 0", b.Rag)
+	}
+	if p.Window.Used > 5 {
+		t.Fatalf("used = %d, exceeds window 5", p.Window.Used)
+	}
+}
+
+// TestWindowGateRefusesFixedOverflow: when system + tools + pinned + user alone
+// exceed the window, the assembler refuses before any provider call.
+func TestWindowGateRefusesFixedOverflow(t *testing.T) {
+	a := New()
+	_, _, err := a.Assemble(context.Background(), dto.AssemblerInput{
+		Mode:          dto.Mode{SystemPrompt: strings.Repeat("s", 400)}, // 100 tokens
+		Policy:        dto.PipelinePolicy{ReserveOutputTokens: 0},
+		UserInput:     strings.Repeat("u", 40), // 10 tokens
+		ContextLength: 50,
+	})
+	if !errors.Is(err, ErrContextWindowExceeded) {
+		t.Fatalf("err = %v, want ErrContextWindowExceeded", err)
+	}
+}
+
+// TestWindowGateDisabledWhenUnknown: an unknown context length disables the gate
+// (no drops, no refusal).
+func TestWindowGateDisabledWhenUnknown(t *testing.T) {
+	a := New()
+	p, _, err := a.Assemble(context.Background(), dto.AssemblerInput{
+		Mode:      dto.Mode{SystemPrompt: "sys"},
+		Policy:    dto.PipelinePolicy{MaxHistoryTokens: 1000},
+		History:   []dto.Message{{Role: "user", Content: strings.Repeat("x", 4000)}},
+		UserInput: "u",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p.Drops) != 0 {
+		t.Fatalf("drops = %+v, want none", p.Drops)
+	}
+	if p.Window.ContextLength != 0 {
+		t.Fatalf("window context length = %d, want 0", p.Window.ContextLength)
 	}
 }

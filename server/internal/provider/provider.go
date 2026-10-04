@@ -75,7 +75,7 @@ func (g *gateway) queueFor(baseURL string) *sync.Mutex {
 // built upstream by the Context assembler (ADR-0011) and carried intact
 // (interface.md §2/§5; the §2 gap is closed via dto.Request).
 func (g *gateway) Chat(ctx context.Context, target dto.Target, req dto.Request) (dto.Completion, error) {
-	body := renderBody(req, false)
+	body := renderBody(target, req, false)
 	raw, err := g.do(ctx, target, "chat/completions", body, false)
 	if err != nil {
 		return dto.Completion{}, err
@@ -84,9 +84,10 @@ func (g *gateway) Chat(ctx context.Context, target dto.Target, req dto.Request) 
 }
 
 // Stream performs a streaming chat completion, emitting one dto.RawEvent per SSE
-// frame (token/done/error). The emitted events are raw and un-attributed.
+// frame (token/reasoning/tool_call/finish/done/error). The emitted events are
+// raw and un-attributed.
 func (g *gateway) Stream(ctx context.Context, target dto.Target, req dto.Request, emit func(dto.RawEvent)) error {
-	body := renderBody(req, true)
+	body := renderBody(target, req, true)
 	return g.stream(ctx, target, "chat/completions", body, emit)
 }
 
@@ -120,11 +121,48 @@ func (g *gateway) Embed(ctx context.Context, target dto.Target, text string) ([]
 // tool call; 4096 matches the shipped presets' historical budgets.
 const defaultMaxTokens = 4096
 
+// thinkingMechanism classifies how a runner toggles its thinking channel
+// (ADR-0051 §3).
+type thinkingMechanism int
+
+const (
+	// thinkingNone: the runner has no thinking toggle; a thinking-off request
+	// degrades to thinking-on and is labeled thinking-unsupported upstream.
+	thinkingNone thinkingMechanism = iota
+	// thinkingTemplate: chat_template_kwargs {"enable_thinking": bool}
+	// (mlx-lm / mlx-vlm; llama.cpp where jinja templates are enabled).
+	thinkingTemplate
+	// thinkingReasoningEffort: OpenAI-compatible reasoning_effort / vendor field.
+	thinkingReasoningEffort
+)
+
+// thinkingMechanismFor maps a runner kind to its thinking-toggle mechanism. The
+// exact runner mappings are pinned at implementation (ADR-0051 deferred note);
+// unknown runners are treated as unsupported (never a silent pretend).
+func thinkingMechanismFor(runner string) thinkingMechanism {
+	switch strings.ToLower(strings.TrimSpace(runner)) {
+	case "mlx-lm", "mlx-vlm", "llama.cpp", "llamacpp":
+		return thinkingTemplate
+	case "openai", "openai-compatible":
+		return thinkingReasoningEffort
+	default:
+		return thinkingNone
+	}
+}
+
+// SupportsThinkingToggle reports whether the resolved runner can disable its
+// thinking channel (ADR-0051 §3). When false, a thinking-off turn proceeds
+// thinking-on with a labeled thinking-unsupported outcome.
+func SupportsThinkingToggle(runner string) bool {
+	return thinkingMechanismFor(runner) != thinkingNone
+}
+
 // renderBody renders an assembled dto.Request to the OpenAI-compatible request
 // body. The Provider owns only the wire format; the content (messages, tools,
 // serving model, merged params) arrives fully-assembled from the Context
-// assembler upstream (ADR-0011).
-func renderBody(req dto.Request, stream bool) map[string]interface{} {
+// assembler upstream (ADR-0011). The Target carries the runner kind so the
+// thinking toggle is rendered per runner (ADR-0051 §3).
+func renderBody(target dto.Target, req dto.Request, stream bool) map[string]interface{} {
 	maxTokens := req.EffectiveParams.MaxTokens
 	if maxTokens <= 0 {
 		maxTokens = defaultMaxTokens
@@ -138,6 +176,7 @@ func renderBody(req dto.Request, stream bool) map[string]interface{} {
 	if stream {
 		body["stream"] = true
 	}
+	renderThinking(body, target.Runner, req.Thinking)
 	if len(req.Tools) > 0 {
 		tools := make([]map[string]interface{}, 0, len(req.Tools))
 		for _, t := range req.Tools {
@@ -153,6 +192,28 @@ func renderBody(req dto.Request, stream bool) map[string]interface{} {
 		body["tools"] = tools
 	}
 	return body
+}
+
+// renderThinking renders the thinking toggle for the resolved runner. A nil
+// desired state leaves the runner default; an unsupported runner renders
+// nothing (the loop labels the degradation).
+func renderThinking(body map[string]interface{}, runner string, desired *bool) {
+	if desired == nil {
+		return
+	}
+	switch thinkingMechanismFor(runner) {
+	case thinkingTemplate:
+		body["chat_template_kwargs"] = map[string]interface{}{"enable_thinking": *desired}
+	case thinkingReasoningEffort:
+		if *desired {
+			body["reasoning_effort"] = "medium"
+		} else {
+			body["reasoning_effort"] = "none"
+		}
+	case thinkingNone:
+		// No toggle available; the provider cannot disable thinking. The loop
+		// labels thinking-unsupported rather than pretending.
+	}
 }
 
 // toOpenAIMessages maps assembled messages to the wire {role, content} form.
@@ -309,6 +370,12 @@ func (p *frameParser) frame(data string) []dto.RawEvent {
 		Usage *struct {
 			PromptTokens     int `json:"prompt_tokens"`
 			CompletionTokens int `json:"completion_tokens"`
+			// ReasoningTokens is reported top-level by some servers and nested
+			// under completion_tokens_details by others (ADR-0051 §4).
+			ReasoningTokens         int `json:"reasoning_tokens"`
+			CompletionTokensDetails struct {
+				ReasoningTokens int `json:"reasoning_tokens"`
+			} `json:"completion_tokens_details"`
 		} `json:"usage"`
 	}
 	if err := json.Unmarshal([]byte(data), &f); err != nil {
@@ -319,11 +386,15 @@ func (p *frameParser) frame(data string) []dto.RawEvent {
 
 	var out []dto.RawEvent
 
-	// Usage frame → done.
+	// Usage frame → done (with the exact reasoning count when reported).
 	if f.Usage != nil && len(f.Choices) == 0 {
+		thinking := f.Usage.ReasoningTokens
+		if thinking == 0 {
+			thinking = f.Usage.CompletionTokensDetails.ReasoningTokens
+		}
 		out = append(out, dto.RawEvent{
 			Type: "done",
-			Data: json.RawMessage(fmt.Sprintf(`{"inputTokens":%d,"outputTokens":%d}`, f.Usage.PromptTokens, f.Usage.CompletionTokens)),
+			Data: json.RawMessage(fmt.Sprintf(`{"inputTokens":%d,"outputTokens":%d,"thinkingTokens":%d}`, f.Usage.PromptTokens, f.Usage.CompletionTokens, thinking)),
 		})
 		return out
 	}
@@ -338,8 +409,10 @@ func (p *frameParser) frame(data string) []dto.RawEvent {
 		}
 
 		var delta struct {
-			Content   string `json:"content"`
-			ToolCalls []struct {
+			Content          string `json:"content"`
+			ReasoningContent string `json:"reasoning_content"`
+			Reasoning        string `json:"reasoning"`
+			ToolCalls        []struct {
 				Index    int    `json:"index"`
 				ID       string `json:"id"`
 				Function struct {
@@ -352,6 +425,16 @@ func (p *frameParser) frame(data string) []dto.RawEvent {
 			if err := json.Unmarshal(ch.Delta, &delta); err != nil {
 				continue
 			}
+		}
+
+		// Reasoning/thinking delta → raw reasoning event (ADR-0051 §4). Prefer
+		// reasoning_content (vLLM/DeepSeek) over reasoning (mlx-lm).
+		if r := delta.ReasoningContent; r != "" {
+			t, _ := json.Marshal(map[string]string{"text": r})
+			out = append(out, dto.RawEvent{Type: "reasoning", Data: t})
+		} else if r := delta.Reasoning; r != "" {
+			t, _ := json.Marshal(map[string]string{"text": r})
+			out = append(out, dto.RawEvent{Type: "reasoning", Data: t})
 		}
 
 		// Content token.
@@ -451,16 +534,25 @@ func parseCompletion(raw []byte) (dto.Completion, error) {
 			} `json:"message"`
 		} `json:"choices"`
 		Usage struct {
-			PromptTokens     int `json:"prompt_tokens"`
-			CompletionTokens int `json:"completion_tokens"`
+			PromptTokens            int `json:"prompt_tokens"`
+			CompletionTokens        int `json:"completion_tokens"`
+			ReasoningTokens         int `json:"reasoning_tokens"`
+			CompletionTokensDetails struct {
+				ReasoningTokens int `json:"reasoning_tokens"`
+			} `json:"completion_tokens_details"`
 		} `json:"usage"`
 	}
 	if err := json.Unmarshal(raw, &rsp); err != nil {
 		return dto.Completion{}, err
 	}
+	thinking := rsp.Usage.ReasoningTokens
+	if thinking == 0 {
+		thinking = rsp.Usage.CompletionTokensDetails.ReasoningTokens
+	}
 	c := dto.Completion{
-		InputTokens:  rsp.Usage.PromptTokens,
-		OutputTokens: rsp.Usage.CompletionTokens,
+		InputTokens:    rsp.Usage.PromptTokens,
+		OutputTokens:   rsp.Usage.CompletionTokens,
+		ThinkingTokens: thinking,
 	}
 	if len(rsp.Choices) > 0 {
 		c.Text = rsp.Choices[0].Message.Content

@@ -1363,7 +1363,7 @@ components:
             properties:
               component:
                 type: string
-                enum: [system, tools, rag, history, mentions, user, thinking, completion]
+                enum: [system, tools, rag, history, mentions, user, thinking, completion, compaction]
               promptTokens:
                 type: integer
               completionTokens:
@@ -1501,10 +1501,22 @@ components:
       properties:
         type:
           type: string
-          enum: [token, meter, candidate, diff, rag, context, locate, done, error, backpressure]
+          enum: [token, meter, candidate, diff, rag, context, locate, thinking, done, error, backpressure]
 
     TokenEvent:
       type: object
+      required: [text]
+      properties:
+        text:
+          type: string
+
+    ThinkingEvent:
+      type: object
+      description: >
+        A raw reasoning/thinking delta forwarded live from the provider so a
+        client can render a thinking indicator instead of an unexplained pause
+        (ADR-0051 §4). The exact thinking count is reconciled by the meter; this
+        event is progress only. Payload granularity is a text delta.
       required: [text]
       properties:
         text:
@@ -1537,6 +1549,8 @@ components:
           type: boolean
         completion:
           type: integer
+        measurement:
+          $ref: '#/components/schemas/TurnMeasurement'
 
     CandidateEvent:
       type: object
@@ -1669,6 +1683,15 @@ components:
             The query auto-RAG runs. When absent the persisted session policy,
             else `Task.userInput`, applies. Affects retrieval only, never the
             user message.
+        thinking:
+          type: string
+          enum: [off, auto, on]
+          description: >
+            The turn's thinking policy (ADR-0051 §1). When absent the persisted
+            session policy, else the pipeline default, applies. `off` asks the
+            runner to disable its thinking channel; `auto` runs thinking-off and
+            escalates once after a structured failure; `on` always thinks. Never
+            a preset field (ADR-0045).
 
     ContextSnapshot:
       type: object
@@ -1714,9 +1737,126 @@ components:
           description: Reserved for Phase F decision records; not implemented in Phase C3.
         locate:
           $ref: '#/components/schemas/LocateResult'
+        thinking:
+          $ref: '#/components/schemas/ThinkingSnapshot'
+        measurements:
+          $ref: '#/components/schemas/TurnMeasurement'
+        compacted:
+          $ref: '#/components/schemas/CompactionRecord'
+        window:
+          $ref: '#/components/schemas/WindowUsage'
+        sessionBudget:
+          $ref: '#/components/schemas/SessionBudget'
         createdAt:
           type: integer
           format: int64
+
+    SessionBudget:
+      type: object
+      description: >
+        The session budget state for one turn (ADR-0051 §7). `soft` labels the
+        warning (the turn proceeds); `hard` labels the refusal (unless
+        compaction rescued the turn).
+      properties:
+        soft:
+          type: boolean
+        hard:
+          type: boolean
+        used:
+          type: integer
+        budget:
+          type: integer
+
+    ThinkingSnapshot:
+      type: object
+      description: >
+        The turn's resolved thinking outcome (ADR-0051 §1–§5): the policy level,
+        the level actually used, and the labeled degradation/escalation/
+        truncation outcome. Every field is engine-owned; clients render it.
+      required: [level, effective]
+      properties:
+        level:
+          type: string
+          enum: [off, auto, on]
+          description: The resolved policy level (pipeline default ← session ← per-turn).
+        effective:
+          type: boolean
+          description: True when the provider request actually enabled the thinking channel.
+        escalated:
+          type: boolean
+          description: True when `auto` retried once with thinking-on after a structured failure.
+        escalationReason:
+          type: string
+          description: >
+            The structured failure that triggered the escalation
+            (`invalid-structure` | `guard-failed` | `no-outcome`).
+        unsupported:
+          type: boolean
+          description: True when the resolved runner cannot disable thinking; labeled `thinking-unsupported`.
+        truncated:
+          type: boolean
+          description: True when the thinking budget was reached before a tool call or answer; labeled `thinking-truncated`.
+
+    TurnMeasurement:
+      type: object
+      description: >
+        Per-turn measurements (ADR-0051 §11): the token counts, wall-clock
+        latency, model + quant, and window utilization recorded per model so the
+        hardware map accumulates. No measurement is approximated without a label
+        (the thinking count carries `thinkingApprox` on the meter).
+      properties:
+        promptTokens:
+          type: integer
+        thinkingTokens:
+          type: integer
+        completionTokens:
+          type: integer
+        latencyMs:
+          type: integer
+          format: int64
+        model:
+          type: string
+        quant:
+          type: string
+        windowUtilization:
+          type: number
+          description: promptTokens / model.capabilities.contextLength (0 when unknown).
+
+    CompactionRecord:
+      type: object
+      description: >
+        The summarized history range replaced by one metered summary message
+        (ADR-0051 §8). Pins and the most recent turns survive; the prefix-cache
+        reuse traded away is labeled, not silent.
+      properties:
+        fromTs:
+          type: integer
+          format: int64
+        toTs:
+          type: integer
+          format: int64
+        turns:
+          type: integer
+        summaryTokens:
+          type: integer
+        cacheCost:
+          type: boolean
+          description: True when compaction (or a tray edit) changed the front-loaded prefix, trading away cache reuse.
+
+    WindowUsage:
+      type: object
+      description: >
+        The per-turn context-window accounting (ADR-0051 §6): the assembled
+        payload plus output reserve against the model's context window.
+      properties:
+        contextLength:
+          type: integer
+        used:
+          type: integer
+        reserve:
+          type: integer
+        utilization:
+          type: number
 
     ContextMessage:
       type: object
@@ -1781,6 +1921,9 @@ components:
           enum: [history, rag, mention]
         reason:
           type: string
+          description: >
+            The labeled reason: `history-budget` | `rag-budget` |
+            `mention-budget` | `excluded` | `not-found` | `context-window`.
         count:
           type: integer
         detail:
@@ -1827,6 +1970,13 @@ components:
       properties:
         code:
           type: string
+          description: >
+            The typed terminal error code. Budget/window codes added by ADR-0051:
+            `context-window-exceeded` (fixed + pinned + user alone exceed the
+            model window, refused before any provider call) and
+            `session-budget-exceeded` (the hard session budget would be crossed
+            and compaction did not rescue the turn). `thinking-truncated` labels
+            a `length` turn with neither a tool call nor an answer.
         message:
           type: string
 

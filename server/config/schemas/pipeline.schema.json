@@ -2,9 +2,9 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://texteditor.local/schemas/pipeline.schema.json",
   "title": "PipelinePolicy",
-  "description": "The one global turn pipeline policy (ADR-0045 §3): step cap + context budgets + auto-RAG top-k.",
+  "description": "The one global turn pipeline policy (ADR-0045 §3, ADR-0051): step cap + context budgets + auto-RAG top-k + thinking/window/session-budget/compaction policy.",
   "type": "object",
-  "required": ["maxSteps", "maxHistoryTokens", "maxRagTokens", "maxMentionTokens", "autoRagTopK"],
+  "required": ["maxSteps", "maxHistoryTokens", "maxRagTokens", "maxMentionTokens", "autoRagTopK", "thinking", "maxThinkingTokens", "reserveOutputTokens", "sessionBudgetSoftRatio", "compaction"],
   "additionalProperties": false,
   "properties": {
     "maxSteps": {
@@ -31,6 +31,49 @@
       "type": "integer",
       "minimum": 1,
       "description": "Auto-RAG retrieval depth, every turn."
+    },
+    "thinking": {
+      "type": "string",
+      "enum": ["off", "auto", "on"],
+      "description": "Default thinking policy level (ADR-0051 §1); a session policy or per-turn override may replace it."
+    },
+    "maxThinkingTokens": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Reasoning-token cap (ADR-0051 §5); hitting it labels thinking-truncated. Generous enough not to truncate before a tool call."
+    },
+    "reserveOutputTokens": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Window-gate output reserve (ADR-0051 §6): max_tokens plus a safety margin held back from the context window."
+    },
+    "sessionBudgetSoftRatio": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1,
+      "description": "Soft session-budget threshold as a ratio of Session.tokenBudget (ADR-0051 §7)."
+    },
+    "compaction": {
+      "type": "object",
+      "description": "Metered history-compaction policy (ADR-0051 §8).",
+      "required": ["enabled", "triggerHistoryTokens", "keepRecentTurns"],
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Whether metered compaction may run when history exceeds the trigger."
+        },
+        "triggerHistoryTokens": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "History-token trigger above which compaction runs."
+        },
+        "keepRecentTurns": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Number of most-recent turns that survive compaction."
+        }
+      }
     }
   }
 }

@@ -16,6 +16,8 @@ import (
 	"encoding/json"
 	"errors"
 	"path/filepath"
+	"regexp"
+	"strings"
 	"sync"
 	"time"
 
@@ -90,6 +92,13 @@ var (
 	// errWorkspaceUnresolved is the typed turn-start failure when neither
 	// Task.workspaceId nor a document path yields a workspace (ADR-0049 §2/§5).
 	errWorkspaceUnresolved = errors.New("workspace-unresolved: could not resolve the turn's workspace")
+	// errThinkingTruncated is the labeled terminal error when the thinking
+	// budget is reached before a tool call or answer (ADR-0051 §5) — never an
+	// empty done.
+	errThinkingTruncated = errors.New("thinking-truncated: the thinking budget was reached before a tool call or answer")
+	// errNoOutcome is the labeled terminal error when a turn produces neither a
+	// tool call nor an answer (ADR-0051 §2).
+	errNoOutcome = errors.New("no-outcome: the turn produced neither a tool call nor an answer")
 )
 
 // loop is the concrete Agent loop.
@@ -277,6 +286,7 @@ func (l *loop) runTurn(ctx context.Context, turnID string, task dto.Task) {
 	}
 
 	// planning: read session history + retrieved chunks.
+	startedAt := time.Now()
 	history, _ := svc.Sessions.History(task.SessionID)
 
 	// Append the user's turn input to the session so the conversation is durable
@@ -286,15 +296,9 @@ func (l *loop) runTurn(ctx context.Context, turnID string, task dto.Task) {
 		return
 	}
 
-	// Per-session budget gate (ADR-0026 §5) — checked before any model call.
+	// Per-session budget state (ADR-0026 §5, ADR-0051 §7) — resolved here and
+	// enforced after assembly so it uses the real payload size.
 	sess, _ := svc.Sessions.Resume(task.SessionID)
-	if sess.TokenBudget != nil {
-		used, err := svc.Meter.SessionUsage(ctx, task.SessionID)
-		if err == nil && meter.SessionExceeded(used, sess.TokenBudget, 1) {
-			l.emit(turnID, dto.Event{Type: "error", Data: errorData(meter.ErrSessionBudgetExceeded)})
-			return
-		}
-	}
 
 	// One fixed pipeline (ADR-0045 §2): auto-RAG runs under the effective policy
 	// (unless autoRag is off); all registered tools are advertised.
@@ -303,6 +307,17 @@ func (l *loop) runTurn(ctx context.Context, turnID string, task dto.Task) {
 	// Merge the persisted session policy with the per-turn Task.context override
 	// (ADR-0049 §8): replace-when-present per field, override never persisted.
 	eff := mergeContextPolicy(sess.ContextPolicy, task.Context, task.UserInput)
+
+	// Metered compaction (ADR-0051 §8): when history exceeds the trigger, the
+	// oldest turns are replaced by one labeled summary before assembly. The
+	// summary call is its own metered model row; pins and recent turns survive.
+	var compacted *dto.CompactionRecord
+	if policy.Compaction.Enabled && estimateHistoryTokens(history) > policy.Compaction.TriggerHistoryTokens {
+		if rec, err := l.compact(ctx, turnID, task, res, svc, history, policy); err == nil && rec != nil {
+			compacted = rec
+			history, _ = svc.Sessions.History(task.SessionID)
+		}
+	}
 
 	// auto-RAG retrieval — skipped when the effective autoRag flag is off; pins
 	// still apply below.
@@ -348,21 +363,33 @@ func (l *loop) runTurn(ctx context.Context, turnID string, task dto.Task) {
 	}
 
 	payload, breakdown, err := l.d.Assembler.Assemble(ctx, dto.AssemblerInput{
-		Mode:      m,
-		ModelName: res.Model.ModelID, // the id the provider accepts (may differ from the manifest name)
-		Params:    res.EffectiveParams,
-		Tools:     tools,
-		Policy:    policy,
-		Pinned:    pinnedChunks,
-		RAGChunks: autoChunks,
-		History:   history,
-		Mentions:  mentions,
-		UserInput: assemblyInput,
+		Mode:          m,
+		ModelName:     res.Model.ModelID, // the id the provider accepts (may differ from the manifest name)
+		Params:        res.EffectiveParams,
+		Tools:         tools,
+		Policy:        policy,
+		Pinned:        pinnedChunks,
+		RAGChunks:     autoChunks,
+		History:       history,
+		Mentions:      mentions,
+		UserInput:     assemblyInput,
+		ContextLength: res.Model.Capabilities.ContextLength,
 	})
 	if err != nil {
+		// A typed context-window refusal happens before any provider call
+		// (ADR-0051 §6); every other assembler error is generic.
 		l.emit(turnID, dto.Event{Type: "error", Data: errorData(err)})
 		return
 	}
+
+	// Resolve the thinking policy (ADR-0051 §1): pipeline default ← session
+	// policy ← per-turn override, then the runner mapping (§3). An unsupported
+	// runner degrades to thinking-on with a labeled thinking-unsupported outcome.
+	thinkLevel := policy.Thinking
+	if eff.Thinking != "" {
+		thinkLevel = eff.Thinking
+	}
+	st := resolveThinking(thinkLevel, res.Model.Runner)
 
 	// Build, persist, and emit the turn's context snapshot (ADR-0044 §4). The
 	// snapshot is engine-owned data: the loop wraps the assembler's provenance/
@@ -371,33 +398,77 @@ func (l *loop) runTurn(ctx context.Context, turnID string, task dto.Task) {
 	// sessions or workspaces.
 	loopDrops := append(excludedDrops, notFoundDrops...)
 	snapshot := buildSnapshot(turnID, task, wsID, eff.Query, eff.AutoRag, autoChunks, pinnedChunks, loopDrops, locateRaw, payload)
-	rawSnapshot, err := json.Marshal(snapshot)
-	if err != nil {
-		l.emit(turnID, dto.Event{Type: "error", Data: errorData(err)})
-		return
-	}
-	if err := svc.Sessions.SaveContext(turnID, task.SessionID, rawSnapshot); err != nil {
-		l.emit(turnID, dto.Event{Type: "error", Data: errorData(err)})
-		return
-	}
-	l.emit(turnID, dto.Event{Type: "context", Data: rawSnapshot})
+	snapshot.Compacted = compacted
+	snapshot.Thinking = st.snapshot()
 
-	target := dto.Target{BaseURL: res.Model.BaseURL, Capabilities: res.Model.Capabilities}
+	// Session budget gate (ADR-0051 §7) — after assembly (real payload size),
+	// before any provider call. Soft = labeled warning (proceed); hard = typed
+	// refusal unless metered compaction rescues the turn.
+	if sess.TokenBudget != nil {
+		used, _ := svc.Meter.SessionUsage(ctx, task.SessionID)
+		soft, hard := meter.SessionBudgetState(used, sess.TokenBudget, policy.SessionBudgetSoftRatio, payload.Window.Used)
+		snapshot.SessionBudget = &dto.SessionBudget{Soft: soft, Hard: hard, Used: used, Budget: *sess.TokenBudget}
+		if hard && compacted == nil && policy.Compaction.Enabled && len(history) > 0 {
+			if rec, err := l.compact(ctx, turnID, task, res, svc, history, policy); err == nil && rec != nil {
+				compacted = rec
+				snapshot.Compacted = rec
+				snapshot.SessionBudget.Hard = false
+			}
+		}
+		if snapshot.SessionBudget.Hard {
+			l.persistAndEmitContext(turnID, task, svc, snapshot)
+			l.emit(turnID, dto.Event{Type: "error", Data: errorData(meter.ErrSessionBudgetExceeded)})
+			return
+		}
+	}
+
+	l.persistAndEmitContext(turnID, task, svc, snapshot)
+
+	target := dto.Target{BaseURL: res.Model.BaseURL, Capabilities: res.Model.Capabilities, Runner: res.Model.Runner}
 
 	// The turn state machine (state-machine.md §1): planning → (dispatching →
 	// observing)* → answering. policy.MaxSteps is the one global bound.
-	result, err := l.runSteps(ctx, turnID, task, target, payload, tools, anchor, policy.MaxSteps)
+	result, err := l.runSteps(ctx, turnID, task, target, payload, tools, anchor, policy, &st)
 	if err != nil {
+		// Label the terminal outcome (thinking-truncated / no-outcome) in the
+		// snapshot before the error event terminates the stream.
+		snapshot.Thinking = st.snapshot()
+		l.persistAndEmitContext(turnID, task, svc, snapshot)
 		l.emit(turnID, dto.Event{Type: "error", Data: errorData(err)})
 		return
 	}
 
 	// answering: the final stream already forwarded tokens; now meter + persist.
-	if result.counts.InputTokens+result.counts.OutputTokens > 0 {
-		if _, err := svc.Meter.Attribute(ctx, turnID, task.SessionID, res.UsedName, breakdown, result.counts); err != nil {
+	meterBreakdown := breakdown
+	if result.counts.ThinkingTokens == 0 && result.reasoningTokens > 0 {
+		// The provider streamed reasoning but omitted the count: use the
+		// engine's estimate so the meter labels it as an approximation
+		// (ADR-0024/ADR-0051 §4).
+		meterBreakdown.Thinking = result.reasoningTokens
+	}
+	measurement := dto.TurnMeasurement{
+		PromptTokens:      result.counts.InputTokens,
+		ThinkingTokens:    result.counts.ThinkingTokens,
+		CompletionTokens:  result.counts.OutputTokens,
+		LatencyMs:         time.Since(startedAt).Milliseconds(),
+		Model:             res.UsedName,
+		Quant:             quantOf(res.UsedName),
+		WindowUtilization: payload.Window.Utilization,
+	}
+	if measurement.ThinkingTokens == 0 {
+		measurement.ThinkingTokens = result.reasoningTokens
+	}
+	if result.counts.InputTokens+result.counts.OutputTokens > 0 || result.reasoningTokens > 0 {
+		if _, err := svc.Meter.Attribute(ctx, turnID, task.SessionID, res.UsedName, meterBreakdown, result.counts, measurement); err != nil {
 			l.emit(turnID, dto.Event{Type: "error", Data: errorData(err)})
 		}
 	}
+
+	// Re-persist and re-emit the snapshot with the post-turn labels
+	// (escalation/truncation, measurements) so live clients see them before done.
+	snapshot.Thinking = st.snapshot()
+	snapshot.Measurements = &measurement
+	l.persistAndEmitContext(turnID, task, svc, snapshot)
 
 	// Persist the assistant's final answer (ADR-0026 §3).
 	if result.text != "" {
@@ -407,36 +478,209 @@ func (l *loop) runTurn(ctx context.Context, turnID string, task dto.Task) {
 	l.emitFinal(turnID, res, result)
 }
 
+// persistAndEmitContext marshals, persists, and emits one context snapshot. It
+// is called twice per turn: once before the provider call (assembly known) and
+// once after (post-turn labels known). SaveContext upserts by turn id.
+func (l *loop) persistAndEmitContext(turnID string, task dto.Task, svc *shard.Services, snapshot dto.ContextSnapshot) {
+	raw, err := json.Marshal(snapshot)
+	if err != nil {
+		l.emit(turnID, dto.Event{Type: "error", Data: errorData(err)})
+		return
+	}
+	if err := svc.Sessions.SaveContext(turnID, task.SessionID, raw); err != nil {
+		l.emit(turnID, dto.Event{Type: "error", Data: errorData(err)})
+		return
+	}
+	l.emit(turnID, dto.Event{Type: "context", Data: raw})
+}
+
+// thinkingState is the loop's per-turn thinking outcome (ADR-0051 §1–§5).
+type thinkingState struct {
+	level            dto.ThinkingLevel
+	effective        bool
+	escalated        bool
+	escalationReason string
+	unsupported      bool
+	truncated        bool
+	reasoningTokens  int
+}
+
+// resolveThinking maps the resolved policy level and the runner to the initial
+// thinking state (ADR-0051 §1/§3). A runner that cannot disable thinking
+// degrades a thinking-off turn to thinking-on, labeled thinking-unsupported.
+func resolveThinking(level dto.ThinkingLevel, runner string) thinkingState {
+	st := thinkingState{level: level}
+	switch level {
+	case dto.ThinkingOn:
+		st.effective = true
+	case dto.ThinkingOff:
+		if provider.SupportsThinkingToggle(runner) {
+			st.effective = false
+		} else {
+			st.effective = true
+			st.unsupported = true
+		}
+	case dto.ThinkingAuto:
+		if provider.SupportsThinkingToggle(runner) {
+			st.effective = false
+		} else {
+			st.effective = true
+			st.unsupported = true
+		}
+	default:
+		st.level = dto.ThinkingOn
+		st.effective = true
+	}
+	return st
+}
+
+// escalate flips the turn to thinking-on once (ADR-0051 §2), recording the
+// structured failure that triggered it.
+func (st *thinkingState) escalate(reason string) {
+	if st.escalated {
+		return
+	}
+	st.escalated = true
+	st.escalationReason = reason
+	st.effective = true
+}
+
+// snapshot renders the wire form of the thinking outcome.
+func (st *thinkingState) snapshot() *dto.ThinkingSnapshot {
+	return &dto.ThinkingSnapshot{
+		Level:            st.level,
+		Effective:        st.effective,
+		Escalated:        st.escalated,
+		EscalationReason: st.escalationReason,
+		Unsupported:      st.unsupported,
+		Truncated:        st.truncated,
+	}
+}
+
+// estimateHistoryTokens is the bytes/4 history-token estimate used by the
+// compaction trigger (ADR-0051 §8).
+func estimateHistoryTokens(history []dto.Message) int {
+	total := 0
+	for _, m := range history {
+		total += (len(m.Content) + 3) / 4
+	}
+	return total
+}
+
+// estimateReasoning is the bytes/4 reasoning-token estimate used for the
+// thinking budget when the provider omits an exact count (ADR-0024/0051 §4).
+func estimateReasoning(text string) int {
+	if text == "" {
+		return 0
+	}
+	return (len(text) + 3) / 4
+}
+
+// summaryMaxTokens bounds the compaction summary call (ADR-0051 §8).
+const summaryMaxTokens = 1024
+
+// compact runs the metered compaction call (ADR-0051 §8): one provider call
+// with thinking off summarizes the oldest turns, the summary replaces them via
+// the Session store, and the call is metered as its own model row. It returns
+// the summarized range for the snapshot, or nil when there is nothing to do.
+func (l *loop) compact(ctx context.Context, turnID string, task dto.Task, res dto.Resolution, svc *shard.Services, history []dto.Message, policy dto.PipelinePolicy) (*dto.CompactionRecord, error) {
+	if len(history) == 0 {
+		return nil, nil
+	}
+	var b strings.Builder
+	for _, m := range history {
+		b.WriteString(m.Role)
+		b.WriteString(": ")
+		b.WriteString(m.Content)
+		b.WriteString("\n")
+	}
+	off := false
+	req := dto.Request{
+		ModelName: res.Model.ModelID,
+		Messages: []dto.Message{
+			{Role: "system", Content: "Summarize the following conversation excerpt concisely, preserving facts, decisions, and open questions. Output only the summary."},
+			{Role: "user", Content: b.String()},
+		},
+		EffectiveParams: dto.SamplingParams{Temperature: 0, MaxTokens: summaryMaxTokens},
+		Thinking:        &off,
+	}
+	target := dto.Target{BaseURL: res.Model.BaseURL, Capabilities: res.Model.Capabilities, Runner: res.Model.Runner}
+	var summary string
+	var counts dto.ProviderCounts
+	emit := func(raw dto.RawEvent) {
+		switch raw.Type {
+		case "token":
+			summary += tokenText(raw)
+		case "done":
+			parseDone(raw, &counts)
+		}
+	}
+	if err := l.d.Provider.Stream(ctx, target, req, emit); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(summary) == "" {
+		return nil, nil
+	}
+	fromTs, toTs, turns, err := svc.Sessions.CompactHistory(task.SessionID, summary, policy.Compaction.KeepRecentTurns)
+	if err != nil {
+		return nil, err
+	}
+	if turns == 0 {
+		return nil, nil
+	}
+	if err := svc.Meter.AttributeCompaction(ctx, turnID, task.SessionID, res.UsedName, counts); err != nil {
+		return nil, err
+	}
+	return &dto.CompactionRecord{
+		FromTs:        fromTs,
+		ToTs:          toTs,
+		Turns:         turns,
+		SummaryTokens: estimateReasoning(summary),
+		CacheCost:     true,
+	}, nil
+}
+
 // streamResult is the loop's view of one provider stream round: the accumulated
-// answer text, any tool calls, the finish reason, and the final usage counts.
+// answer text, any tool calls, the finish reason, the final usage counts, and
+// the accumulated reasoning-token estimate (ADR-0051 §4).
 type streamResult struct {
-	text      string
-	toolCalls []dto.ToolCall
-	finish    string
-	counts    dto.ProviderCounts
+	text            string
+	toolCalls       []dto.ToolCall
+	finish          string
+	counts          dto.ProviderCounts
+	reasoningTokens int
 }
 
 // runSteps drives the one tool-calling loop (ADR-0045 §2). It mutates `msgs`
 // (the assembled message list) across round-trips, threading assistant
 // tool_calls and tool results. It returns the final stream result (the answering
-// round), bounded by the global pipeline maxSteps.
-func (l *loop) runSteps(ctx context.Context, turnID string, task dto.Task, target dto.Target, payload dto.Payload, tools []dto.ToolDef, anchor *anchor, maxSteps int) (streamResult, error) {
+// round), bounded by the global pipeline maxSteps. `auto` thinking escalates
+// once after a structured failure (ADR-0051 §2); a `length` turn with neither a
+// tool call nor an answer is a labeled error, never an empty done (§5).
+func (l *loop) runSteps(ctx context.Context, turnID string, task dto.Task, target dto.Target, payload dto.Payload, tools []dto.ToolDef, anchor *anchor, policy dto.PipelinePolicy, st *thinkingState) (streamResult, error) {
 	msgs := payload.Messages
 
 	steps := 0
 	for {
+		thinking := st.effective
 		req := dto.Request{
 			ModelName:       payload.Request.ModelName,
 			Messages:        msgs,
 			Tools:           tools,
 			EffectiveParams: payload.Request.EffectiveParams,
+			Thinking:        &thinking,
 		}
 
 		var res streamResult
+		var reasoning strings.Builder
 		emit := func(raw dto.RawEvent) {
 			switch raw.Type {
 			case "token":
 				res.text += tokenText(raw)
+			case "reasoning":
+				t := reasoningText(raw)
+				reasoning.WriteString(t)
+				l.emitThinking(turnID, t)
 			case "tool_call":
 				tc := parseToolCall(raw)
 				if tc.Name != "" {
@@ -453,15 +697,37 @@ func (l *loop) runSteps(ctx context.Context, turnID string, task dto.Task, targe
 			return streamResult{}, err
 		}
 
+		// Exact thinking accounting (ADR-0051 §4): the provider's count when
+		// reported, else the engine's accumulated estimate (labeled by the
+		// meter). The reasoning cap (§5) labels a truncated pass.
+		st.reasoningTokens += estimateReasoning(reasoning.String())
+		res.reasoningTokens = st.reasoningTokens
+		if policy.MaxThinkingTokens > 0 && st.reasoningTokens >= policy.MaxThinkingTokens {
+			st.truncated = true
+		}
+
 		// No tool calls (or the model stopped) → answering round.
 		if len(res.toolCalls) == 0 || res.finish == "stop" {
+			// A round with neither a tool call nor an answer is a structured
+			// failure (ADR-0051 §2): `auto` retries once with thinking-on.
+			if len(res.toolCalls) == 0 && strings.TrimSpace(res.text) == "" {
+				if st.level == dto.ThinkingAuto && !st.escalated {
+					st.escalate("no-outcome")
+					continue
+				}
+				if res.finish == "length" {
+					st.truncated = true
+					return streamResult{}, errThinkingTruncated
+				}
+				return streamResult{}, errNoOutcome
+			}
 			l.emitToken(turnID, res.text)
 			return res, nil
 		}
 
 		// Bound reached without an explicit stop: treat the accumulated text as
 		// the answer (bounded loop, never unbounded — ADR-0045).
-		if steps >= maxSteps {
+		if steps >= policy.MaxSteps {
 			l.emitToken(turnID, res.text)
 			return res, nil
 		}
@@ -470,6 +736,7 @@ func (l *loop) runSteps(ctx context.Context, turnID string, task dto.Task, targe
 		// invoke each tool and append its result (state-machine.md §1.2).
 		msgs = append(msgs, dto.Message{Role: "assistant", Content: res.text, Timestamp: nowUnix()})
 
+		retryReason := ""
 		for _, tc := range res.toolCalls {
 			rawArgs := json.RawMessage(tc.Arguments)
 			if len(rawArgs) == 0 {
@@ -487,6 +754,9 @@ func (l *loop) runSteps(ctx context.Context, turnID string, task dto.Task, targe
 
 			// Observe structured edit results for events + retry signals.
 			handled := l.observeTool(turnID, task, tc, out, toolErr)
+			if r, ok := retryableEditFailure(handled); ok && retryReason == "" {
+				retryReason = r
+			}
 
 			var resultContent string
 			switch {
@@ -500,8 +770,43 @@ func (l *loop) runSteps(ctx context.Context, turnID string, task dto.Task, targe
 			msgs = append(msgs, dto.Message{Role: "tool", Content: resultContent, Timestamp: nowUnix()})
 		}
 
+		// A structured edit failure triggers one `auto` escalation: the retry
+		// round runs thinking-on (ADR-0051 §2), labeled with the failure.
+		if retryReason != "" && st.level == dto.ThinkingAuto && !st.escalated {
+			st.escalate(retryReason)
+		}
+
 		steps++
 	}
+}
+
+// reasoningText extracts the text from a raw reasoning event.
+func reasoningText(raw dto.RawEvent) string {
+	var v struct {
+		Text string `json:"text"`
+	}
+	_ = json.Unmarshal(raw.Data, &v)
+	return v.Text
+}
+
+// retryableEditFailure reports whether a structured edit result is a retryable
+// failure (`invalid-structure` | `guard-failed`, ADR-0051 §2).
+func retryableEditFailure(handled json.RawMessage) (string, bool) {
+	if len(handled) == 0 {
+		return "", false
+	}
+	var res struct {
+		Ok    bool   `json:"ok"`
+		Error string `json:"error"`
+	}
+	if json.Unmarshal(handled, &res) != nil || res.Ok {
+		return "", false
+	}
+	switch res.Error {
+	case "invalid-structure", "guard-failed":
+		return res.Error, true
+	}
+	return "", false
 }
 
 // injectDocumentID adds task.DocumentID to the args of document-scoped tools
@@ -642,7 +947,7 @@ func buildSnapshot(turnID string, task dto.Task, workspaceID, retrievalQuery str
 	if budget == nil {
 		budget = []dto.BudgetUsage{}
 	}
-	return dto.ContextSnapshot{
+	snap := dto.ContextSnapshot{
 		TurnID:         turnID,
 		SessionID:      task.SessionID,
 		WorkspaceID:    workspaceID,
@@ -655,6 +960,11 @@ func buildSnapshot(turnID string, task dto.Task, workspaceID, retrievalQuery str
 		Locate:         locateRaw,
 		CreatedAt:      time.Now().Unix(),
 	}
+	if payload.Window.ContextLength > 0 {
+		w := payload.Window
+		snap.Window = &w
+	}
+	return snap
 }
 
 // effectiveContext is the resolved per-turn context policy: the persisted
@@ -665,6 +975,7 @@ type effectiveContext struct {
 	Excluded []dto.ChunkRef
 	AutoRag  bool
 	Query    string
+	Thinking dto.ThinkingLevel
 }
 
 // mergeContextPolicy resolves the effective policy (ADR-0049 §8). The persisted
@@ -696,6 +1007,9 @@ func mergeContextPolicy(sessionRaw json.RawMessage, override *dto.ContextPolicy,
 		}
 		if p.RetrievalQuery != nil {
 			eff.Query = *p.RetrievalQuery
+		}
+		if p.Thinking != nil {
+			eff.Thinking = *p.Thinking
 		}
 	}
 	apply(session)
@@ -810,6 +1124,28 @@ func (l *loop) emitToken(turnID, text string) {
 	l.emit(turnID, dto.Event{Type: "token", Data: data})
 }
 
+// emitThinking forwards one raw reasoning delta as a `thinking` event so clients
+// can render a thinking indicator (ADR-0051 §4).
+func (l *loop) emitThinking(turnID, text string) {
+	if text == "" {
+		return
+	}
+	data, _ := json.Marshal(map[string]string{"text": text})
+	l.emit(turnID, dto.Event{Type: "thinking", Data: data})
+}
+
+// quantPattern extracts a quantization marker (e.g. "4bit") from a model name.
+var quantPattern = regexp.MustCompile(`(?i)(\d+)\s*bit`)
+
+// quantOf is a best-effort quantization label for the measurement record
+// (ADR-0051 §11); empty when the model name carries none.
+func quantOf(model string) string {
+	if m := quantPattern.FindString(model); m != "" {
+		return strings.ToLower(m)
+	}
+	return ""
+}
+
 // toolsFor returns all registered tools (global since ADR-0045 §2), in the
 // registry's stable name order so the payload order matches the meter.
 func toolsFor(reg tool.Registry) []dto.ToolDef {
@@ -846,14 +1182,16 @@ func reasonOf(raw dto.RawEvent) string {
 
 func parseDone(raw dto.RawEvent, counts *dto.ProviderCounts) {
 	var v struct {
-		InputTokens  int `json:"inputTokens"`
-		OutputTokens int `json:"outputTokens"`
+		InputTokens    int `json:"inputTokens"`
+		OutputTokens   int `json:"outputTokens"`
+		ThinkingTokens int `json:"thinkingTokens"`
 	}
 	if err := json.Unmarshal(raw.Data, &v); err != nil {
 		return
 	}
 	counts.InputTokens = v.InputTokens
 	counts.OutputTokens = v.OutputTokens
+	counts.ThinkingTokens = v.ThinkingTokens
 }
 
 func toolErrorMessage(name string, err error) string {
@@ -896,6 +1234,12 @@ func codeFor(err error) string {
 		return "provider-unreachable"
 	case errors.Is(err, meter.ErrSessionBudgetExceeded):
 		return "session-budget-exceeded"
+	case errors.Is(err, assembler.ErrContextWindowExceeded):
+		return "context-window-exceeded"
+	case errors.Is(err, errThinkingTruncated):
+		return "thinking-truncated"
+	case errors.Is(err, errNoOutcome):
+		return "no-outcome"
 	default:
 		return "error"
 	}

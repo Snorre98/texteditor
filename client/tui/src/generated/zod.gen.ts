@@ -354,7 +354,12 @@ export const zTask = z.object({
             hash: z.string().optional()
         })).optional(),
         autoRag: z.boolean().optional(),
-        retrievalQuery: z.string().optional()
+        retrievalQuery: z.string().optional(),
+        thinking: z.enum([
+            'off',
+            'auto',
+            'on'
+        ]).optional()
     }).optional()
 });
 
@@ -390,7 +395,12 @@ export const zSession = z.object({
             hash: z.string().optional()
         })).optional(),
         autoRag: z.boolean().optional(),
-        retrievalQuery: z.string().optional()
+        retrievalQuery: z.string().optional(),
+        thinking: z.enum([
+            'off',
+            'auto',
+            'on'
+        ]).optional()
     }).optional()
 });
 
@@ -412,7 +422,8 @@ export const zSessionMeter = z.object({
             'mentions',
             'user',
             'thinking',
-            'completion'
+            'completion',
+            'compaction'
         ]),
         promptTokens: z.number().int(),
         completionTokens: z.number().int(),
@@ -485,6 +496,7 @@ export const zEvent = z.object({
         'rag',
         'context',
         'locate',
+        'thinking',
         'done',
         'error',
         'backpressure'
@@ -492,6 +504,10 @@ export const zEvent = z.object({
 });
 
 export const zTokenEvent = z.object({
+    text: z.string()
+});
+
+export const zThinkingEvent = z.object({
     text: z.string()
 });
 
@@ -504,7 +520,16 @@ export const zMeterEvent = z.object({
     user: z.number().int(),
     thinking: z.number().int(),
     thinkingApprox: z.boolean().optional(),
-    completion: z.number().int()
+    completion: z.number().int(),
+    measurement: z.object({
+        promptTokens: z.number().int().optional(),
+        thinkingTokens: z.number().int().optional(),
+        completionTokens: z.number().int().optional(),
+        latencyMs: z.coerce.bigint().optional(),
+        model: z.string().optional(),
+        quant: z.string().optional(),
+        windowUtilization: z.number().optional()
+    }).optional()
 });
 
 export const zCandidateEvent = z.object({
@@ -550,7 +575,12 @@ export const zContextPolicy = z.object({
     pinned: z.array(zChunkRef).optional(),
     excluded: z.array(zChunkRef).optional(),
     autoRag: z.boolean().optional(),
-    retrievalQuery: z.string().optional()
+    retrievalQuery: z.string().optional(),
+    thinking: z.enum([
+        'off',
+        'auto',
+        'on'
+    ]).optional()
 });
 
 export const zContextSnapshot = z.object({
@@ -614,7 +644,92 @@ export const zContextSnapshot = z.object({
     })),
     decision: z.object({}).optional(),
     locate: zLocateResult.optional(),
+    thinking: z.object({
+        level: z.enum([
+            'off',
+            'auto',
+            'on'
+        ]),
+        effective: z.boolean(),
+        escalated: z.boolean().optional(),
+        escalationReason: z.string().optional(),
+        unsupported: z.boolean().optional(),
+        truncated: z.boolean().optional()
+    }).optional(),
+    measurements: z.object({
+        promptTokens: z.number().int().optional(),
+        thinkingTokens: z.number().int().optional(),
+        completionTokens: z.number().int().optional(),
+        latencyMs: z.coerce.bigint().optional(),
+        model: z.string().optional(),
+        quant: z.string().optional(),
+        windowUtilization: z.number().optional()
+    }).optional(),
+    compacted: z.object({
+        fromTs: z.coerce.bigint().optional(),
+        toTs: z.coerce.bigint().optional(),
+        turns: z.number().int().optional(),
+        summaryTokens: z.number().int().optional(),
+        cacheCost: z.boolean().optional()
+    }).optional(),
+    window: z.object({
+        contextLength: z.number().int().optional(),
+        used: z.number().int().optional(),
+        reserve: z.number().int().optional(),
+        utilization: z.number().optional()
+    }).optional(),
+    sessionBudget: z.object({
+        soft: z.boolean().optional(),
+        hard: z.boolean().optional(),
+        used: z.number().int().optional(),
+        budget: z.number().int().optional()
+    }).optional(),
     createdAt: z.coerce.bigint()
+});
+
+export const zSessionBudget = z.object({
+    soft: z.boolean().optional(),
+    hard: z.boolean().optional(),
+    used: z.number().int().optional(),
+    budget: z.number().int().optional()
+});
+
+export const zThinkingSnapshot = z.object({
+    level: z.enum([
+        'off',
+        'auto',
+        'on'
+    ]),
+    effective: z.boolean(),
+    escalated: z.boolean().optional(),
+    escalationReason: z.string().optional(),
+    unsupported: z.boolean().optional(),
+    truncated: z.boolean().optional()
+});
+
+export const zTurnMeasurement = z.object({
+    promptTokens: z.number().int().optional(),
+    thinkingTokens: z.number().int().optional(),
+    completionTokens: z.number().int().optional(),
+    latencyMs: z.coerce.bigint().optional(),
+    model: z.string().optional(),
+    quant: z.string().optional(),
+    windowUtilization: z.number().optional()
+});
+
+export const zCompactionRecord = z.object({
+    fromTs: z.coerce.bigint().optional(),
+    toTs: z.coerce.bigint().optional(),
+    turns: z.number().int().optional(),
+    summaryTokens: z.number().int().optional(),
+    cacheCost: z.boolean().optional()
+});
+
+export const zWindowUsage = z.object({
+    contextLength: z.number().int().optional(),
+    used: z.number().int().optional(),
+    reserve: z.number().int().optional(),
+    utilization: z.number().optional()
 });
 
 export const zContextMessage = z.object({

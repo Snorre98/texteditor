@@ -65,6 +65,7 @@ type daemonEntry struct {
 		MaxTokens   int     `json:"maxTokens"`
 	} `json:"defaults"`
 	ModeTags    []string `json:"modeTags"`
+	Runner      string   `json:"runner,omitempty"`      // serving runner kind (ADR-0033 §4); consumed by the provider for the thinking toggle (ADR-0051 §3)
 	Fingerprint string   `json:"fingerprint,omitempty"` // source.fingerprint; needle entries only (ADR-0028 §4)
 	ModelID     string   `json:"modelId,omitempty"`     // id the runner serves under (the OpenAI `model` field); absent = the manifest name
 
@@ -87,6 +88,7 @@ func (e daemonEntry) toModel() dto.Model {
 		BaseURL:      e.baseURL(),
 		Capabilities: e.Capabilities,
 		ModeTags:     e.ModeTags,
+		Runner:       e.Runner,
 		ModelID:      modelID,
 	}
 }

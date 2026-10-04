@@ -1056,6 +1056,10 @@ func contextPolicyFromGen(p *genapi.ContextPolicy) *dto.ContextPolicy {
 	if v, ok := p.RetrievalQuery.Get(); ok {
 		out.RetrievalQuery = &v
 	}
+	if v, ok := p.Thinking.Get(); ok {
+		lvl := dto.ThinkingLevel(v)
+		out.Thinking = &lvl
+	}
 	return out
 }
 

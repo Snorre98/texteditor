@@ -3,5 +3,14 @@
   "maxHistoryTokens": 32000,
   "maxRagTokens": 16000,
   "maxMentionTokens": 16000,
-  "autoRagTopK": 3
+  "autoRagTopK": 3,
+  "thinking": "auto",
+  "maxThinkingTokens": 4096,
+  "reserveOutputTokens": 4096,
+  "sessionBudgetSoftRatio": 0.8,
+  "compaction": {
+    "enabled": true,
+    "triggerHistoryTokens": 24000,
+    "keepRecentTurns": 4
+  }
 }

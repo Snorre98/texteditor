@@ -22,6 +22,9 @@ type AssemblerInput struct {
 	History   []Message
 	Mentions  []MentionContent // spliced after history, before user input (ADR-0036)
 	UserInput string
+	// ContextLength is the resolved model's context window (ADR-0051 §6), used
+	// by the per-turn window gate. 0 = unknown (gate disabled).
+	ContextLength int
 }
 
 // Breakdown is the deterministic per-component token approximation, in a
@@ -41,6 +44,9 @@ type Payload struct {
 	Provenance []MessageProvenance // component + provenance for every assembled message
 	Drops      []ContextDrop       // labeled truncation/drop records (never silent)
 	Budget     []BudgetUsage       // per-component utilization vs the PipelinePolicy limit
+	// Window is the per-turn context-window accounting (ADR-0051 §6). Zero
+	// when the gate was disabled (unknown context length).
+	Window WindowUsage
 }
 
 // MessageProvenance is one assembled message's component and provenance

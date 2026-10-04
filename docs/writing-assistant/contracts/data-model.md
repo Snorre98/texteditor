@@ -146,11 +146,30 @@ Lives at `<data>/workspaces/<workspaceID>/meter.db`; no global meter total
 | `ts` | INTEGER | unix epoch ms |
 | `session_id` | TEXT | → `sessions.id` (the owning session) |
 | `turn_id` | TEXT | groups events into one turn |
-| `component` | TEXT | `system` \| `tools` \| `rag` \| `history` \| `mentions` \| `user` \| `thinking` \| `completion` |
+| `component` | TEXT | `system` \| `tools` \| `rag` \| `history` \| `mentions` \| `user` \| `thinking` \| `completion` \| `compaction` |
 | `prompt_tokens` | INTEGER | attributed prompt tokens |
 | `completion_tokens` | INTEGER | attributed completion tokens |
 | `approx` | INTEGER | 1 when the component is a labeled approximation (thinking, ADR-0024) |
 | `model` | TEXT | logical model name actually used (`usedName`) |
+
+#### `meter_measurements` — per-turn measurements (ADR-0051 §11)
+
+One row per turn (the `compaction` summary call uses `<turnID>:compaction`):
+prompt/thinking/completion tokens, wall-clock latency, model + quant, and window
+utilization, so the hardware map accumulates per model/quant. Upserted by
+`turn_id`.
+
+| Column | Type | Notes |
+|---|---|---|
+| `turn_id` | TEXT PK | the turn (or `<turnID>:compaction`) |
+| `session_id` | TEXT | → `sessions.id` |
+| `model` | TEXT | logical model name actually used |
+| `prompt_tokens` | INTEGER | provider-reported prompt tokens |
+| `thinking_tokens` | INTEGER | exact reasoning count (or the labeled estimate) |
+| `completion_tokens` | INTEGER | provider-reported output tokens |
+| `latency_ms` | INTEGER | wall-clock turn latency |
+| `window_utilization` | REAL | `promptTokens / model.contextLength` |
+| `ts` | INTEGER | unix epoch ms |
 
 ### 1.4 `sessions.db` — Session store (per workspace shard)
 
@@ -373,6 +392,11 @@ startup). One policy for every preset.
 | `maxRagTokens` | integer ≥ 0 | yes | auto-RAG budget; 0 drops all |
 | `maxMentionTokens` | integer ≥ 0 | yes | mention budget; 0 truncates all (labeled) |
 | `autoRagTopK` | integer ≥ 1 | yes | auto-RAG retrieval depth, every turn |
+| `thinking` | enum `off`\|`auto`\|`on` | yes | default thinking policy (ADR-0051 §1) |
+| `maxThinkingTokens` | integer ≥ 0 | yes | reasoning-token cap; hitting it labels `thinking-truncated` (§5) |
+| `reserveOutputTokens` | integer ≥ 0 | yes | window-gate output reserve (§6) |
+| `sessionBudgetSoftRatio` | number 0–1 | yes | soft session-budget threshold ratio (§7) |
+| `compaction` | object | yes | `{enabled, triggerHistoryTokens, keepRecentTurns}` (§8) |
 
 Startup validation failures (typed errors): `mode-refs-unknown-model`,
 `mode-unreachable-no-tag`, `tool-has-no-handler`, `schema-invalid` (ADR-0019),
