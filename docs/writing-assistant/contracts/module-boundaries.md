@@ -19,8 +19,9 @@ ADR-0025 (control daemon), ADR-0026 (sessions), ADR-0035 (Workspace).
 | **Fleet gateway** | model discovery, resolution (merge + gates + fallback), lifecycle | `ListModels()`, `Resolve(name, opts) → Resolution`, `Status(name) → LiveState`, `ListStatus() → []ModelState` (batch `status/all`, ADR-0040), `Start(name)` (blocking), `Stop(name)`, `Provision(ctx, name) → provisionID`, `Fingerprint(name) → string` | daemon HTTP client (ADR-0025), verb mapping, fallback ladder |
 | **Provider gateway** (leaf) | OpenAI-compatible REST/SSE calls | `Chat(ctx, target, req)`, `Stream(ctx, target, req, emit)`, `Embed(ctx, target, text)` | retry/backoff, per-server `-np 1` serialization, framing |
 | **Agent loop** | the turn loop: task → plan → tools → observe → answer | `Run(ctx, task) → (turnID, err)` (async) | turn state machine, dispatch/observe, truncation |
-| **Mode registry** (leaf) | declarative modes (persona/model/tools/budget) | `List()`, `Get(name)` | mode file loading (go:embed), validation |
-| **Tool registry** (leaf) | tool definitions + JSON schemas | `Register(tool)`, `List()`, `AllowlistFor(mode)` | schema validation, name-keyed binding metadata |
+| **Mode registry** (leaf) | prompt presets (name/systemPrompt/defaultModel) | `List()`, `Get(name)` | mode file loading (go:embed), validation |
+| **Pipeline policy** (leaf) | the one global turn policy (step cap + budgets + auto-RAG top-k) | `Policy() → PipelinePolicy` | `config/pipeline.json` loading, schema validation |
+| **Tool registry** (leaf) | tool definitions + JSON schemas (global) | `Register(tool)`, `List()` | schema validation, name-keyed binding metadata |
 | **Tool executor** | tool execution | `Invoke(name, args) → result` | private `map[name]→handler func` |
 | **Tool decider** (optional) | tool-intent resolution ("which tool, what args") from a writer's `request_tool` intent | `SignalTool()`, `Decide(ctx, intent, c) → (RouterResult, error)` | prompt layout, Provider.Chat, confidence threshold τ, `.cact` fingerprint |
 | **Context assembler** (leaf) | the exact token payload + per-component attribution | `Assemble(ctx, in) → (Payload, Breakdown)` | prompt layout, budget truncation, attribution accounting |
@@ -69,6 +70,7 @@ flowchart LR
         Loop[Agent loop]
         Assembler[Context assembler]
         Mode[Mode registry]
+        Pipeline[Pipeline policy]
         ToolReg[Tool registry]
         ToolExec[Tool executor]
         Decider[Tool decider]
@@ -97,6 +99,7 @@ flowchart LR
     API --> Fleet
     API --> Sess
     Loop --> Mode
+    Loop --> Pipeline
     Loop --> ToolReg
     Loop --> ToolExec
     Loop --> Assembler
@@ -105,7 +108,6 @@ flowchart LR
     Loop --> Doc
     Loop --> Retriever
     Loop --> Sess
-    Loop --> Decider
     Decider --> Fleet
     Decider --> Prov
     Assembler --> Mode
@@ -128,13 +130,15 @@ flowchart LR
 - Every edge targets a module's **public API**, never its internals.
 - The graph is **acyclic**; direction is inward (clients → engine → serving-data).
 - Leaf modules (no out-edges) hold pure/deterministic logic: `Mode registry`,
-  `Tool registry`, `Context assembler`, `Chunker`, `TextFormatter`, `Session store`,
-  `Workspace`, `Provider gateway`, and the `Fleet manifest`.
+  `Pipeline policy`, `Tool registry`, `Context assembler`, `Chunker`,
+  `TextFormatter`, `Session store`, `Workspace`, `Provider gateway`, and the
+  `Fleet manifest`.
 - The `Retriever` is **not** a leaf (depends on Fleet + Provider for the embed call
   and on the Chunker) — a deliberate consequence of ADR-0016.
 - The `Tool decider` is **not** a leaf (depends on Fleet + Provider to serve the
-  router call) — a Retriever-style consequence, wired only when a mode sets
-  `toolCalling: "router"` (ADR-0028).
+  router call) — a Retriever-style consequence. It is **parked/unwired** by
+  ADR-0045: no mode enables it; the loop no longer depends on it (its edges below
+  are dormant).
 - The `Document store` is **not** a leaf (depends on `TextFormatter` to normalize on
   `ApplyEdit` and format on `Commit`/`Save`) — a deliberate consequence of
   ADR-0029.

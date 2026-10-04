@@ -2,8 +2,8 @@
 
 **Target:** `/Users/snorresaether/Documents/Studies/Masters/obsidian-studies/H26/Game IT3021/deliverables/1-deliverable.md`
 
-Covers all four modes — `drafter`, `editor`, `proofreader`, `grammar` — though the
-deliverable task is line-editing, not drafting.
+Covers all four presets — `drafter`, `editor`, `proofreader`, `grammar` — though
+the deliverable task is line-editing, not drafting.
 
 ## 0. Verify prerequisites
 
@@ -69,7 +69,7 @@ OptiQ sensitivity-aware mixed 4-bit (246 layers @8-bit, 79 @4-bit); beats unifor
   **one** big model at a time — don't load it alongside `qwen-27b`/`qwen-35b-moe`.
 - **Tool-calling:** fixed upstream in Google's 2026-07-15 silent refresh; this
   quant (re-published 2026-07-20) ships the fixed canonical chat template. No
-  known blocker for the agentic `editor` mode.
+  known blocker for the `editor` preset.
 - **mlx-lm support:** verified — loads with stock `mlx-lm` 0.31.3 (no git build
   needed); the MoE text tower is in the PyPI release.
 - **Context:** 131072 declared (256K native); raise only if memory allows.

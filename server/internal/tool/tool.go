@@ -8,11 +8,12 @@ import (
 	"texteditor/shared/dto"
 )
 
-// Registry is the Tool registry public API (interface.md §8).
+// Registry is the Tool registry public API (interface.md §8). Since ADR-0045
+// tools are global: the loop advertises List() on every turn; there is no
+// per-mode allowlist.
 type Registry interface {
 	Register(tool dto.ToolDef) error
 	List() []dto.ToolDef
-	AllowlistFor(mode dto.Mode) []dto.ToolDef
 }
 
 // Executor is the Tool executor public API (interface.md §8).

@@ -33,25 +33,19 @@ func New() ContextAssembler { return assembler{} }
 // for budgeting; authoritative counts are the provider's prompt_eval_count/
 // eval_count, applied by the meter.
 func (assembler) Assemble(_ context.Context, in dto.AssemblerInput) (dto.Payload, dto.Breakdown, error) {
-	var systemBuilder []string
-	systemTokenParts := 0
-	if in.Mode.Preamble != "" {
-		systemBuilder = append(systemBuilder, in.Mode.Preamble)
-		systemTokenParts += estimate(in.Mode.Preamble)
-	}
-	systemBuilder = append(systemBuilder, in.Mode.SystemPrompt)
-	systemTokenParts += estimate(in.Mode.SystemPrompt)
-	system := joinPara(systemBuilder)
+	system := in.Mode.SystemPrompt
+	systemTokenParts := estimate(system)
 
-	// Truncate history to the mode's budget, dropping oldest first (ADR-0015).
-	history := truncateHistory(in.History, in.Mode.ContextBudget.MaxHistoryTokens)
+	// Truncate history to the pipeline policy budget, dropping oldest first
+	// (ADR-0015; one global policy since ADR-0045).
+	history := truncateHistory(in.History, in.Policy.MaxHistoryTokens)
 
-	// Truncate RAG chunks to the mode's RAG budget.
-	rag := truncateRag(in.RAGChunks, in.Mode.ContextBudget.MaxRagTokens)
+	// Truncate RAG chunks to the policy's RAG budget.
+	rag := truncateRag(in.RAGChunks, in.Policy.MaxRagTokens)
 
 	// Splice mentions after history, before user input (ADR-0036 §3). Truncate
 	// over-budget mentions from the tail, with a labeled overflow line.
-	mentions, mentionOverflow := truncateMentions(in.Mentions, in.Mode.ContextBudget.MaxMentionTokens)
+	mentions, mentionOverflow := truncateMentions(in.Mentions, in.Policy.MaxMentionTokens)
 
 	// Build the assembled message list.
 	messages := []dto.Message{{Role: "system", Content: system}}
@@ -96,22 +90,10 @@ func (assembler) Assemble(_ context.Context, in dto.AssemblerInput) (dto.Payload
 		ModelName:       in.ModelName,
 		Messages:        messages,
 		Tools:           in.Tools,
-		EffectiveParams: effectiveParams(in.Mode, in.Params),
+		EffectiveParams: in.Params,
 	}
 
 	return dto.Payload{Messages: messages, Request: req}, breakdown, nil
-}
-
-// effectiveParams reflects the merged sampling params the Provider must render.
-// The Fleet gateway already merged manifest defaults ← mode.params ← overrides
-// into the Resolution; the caller passes that merged result via in.Params. When
-// empty (e.g. a stub test path), fall back to the mode's params so the request is
-// never parameter-less.
-func effectiveParams(m dto.Mode, merged dto.SamplingParams) dto.SamplingParams {
-	if merged.Temperature != 0 || merged.MaxTokens != 0 {
-		return merged
-	}
-	return m.Params
 }
 
 // truncateHistory returns the newest history messages that fit within maxTokens.
@@ -166,7 +148,7 @@ func mentionMarkup(mc dto.MentionContent) string {
 }
 
 // overflowLine is the labeled overflow line emitted when mentioned-file content
-// exceeds the mode's MaxMentionTokens and is truncated from the tail
+// exceeds the policy's MaxMentionTokens and is truncated from the tail
 // (failure-semantics §4: overflow is labeled, never folded silently).
 func overflowLine() string {
 	return "Source: <overflow>: some mentioned-file content was truncated to fit the mention token budget"
@@ -200,15 +182,4 @@ func estimate(s string) int {
 		return 0
 	}
 	return (len(s) + 3) / 4
-}
-
-func joinPara(parts []string) string {
-	out := ""
-	for i, p := range parts {
-		if i > 0 {
-			out += "\n\n"
-		}
-		out += p
-	}
-	return out
 }

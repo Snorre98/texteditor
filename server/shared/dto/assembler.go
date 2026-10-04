@@ -4,7 +4,7 @@ package dto
 // ADR-0036 §3).
 type MentionContent struct {
 	Path string
-	Text string // raw content, truncated by Mode.ContextBudget.MaxMentionTokens
+	Text string // raw content, truncated by PipelinePolicy.MaxMentionTokens
 }
 
 // AssemblerInput is the input to ContextAssembler.Assemble (interface.md §5).
@@ -12,7 +12,8 @@ type AssemblerInput struct {
 	Mode      Mode
 	ModelName string         // the actually-resolved serving model (usedName)
 	Params    SamplingParams // merged effective params (impact the rendered request)
-	Tools     []ToolDef      // the mode's allowlisted tools, in splices order
+	Tools     []ToolDef      // all registered tools (global; ADR-0045 §2), in splice order
+	Policy    PipelinePolicy // the one global pipeline policy (budgets; ADR-0045 §3)
 	RAGChunks []Chunk
 	History   []Message
 	Mentions  []MentionContent // spliced after history, before user input (ADR-0036)

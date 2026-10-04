@@ -8,7 +8,7 @@ import (
 	"texteditor/config"
 )
 
-// validInput matches the embedded config data (4 modes, 3 models, 4 tools).
+// validInput matches the embedded config data (4 presets, 3 models).
 func validInput() ValidationInput {
 	return ValidationInput{
 		Models: []string{"gemma4-26b-moe", "mistral-24b", "llama3.1-8b"},
@@ -17,7 +17,6 @@ func validInput() ValidationInput {
 			"mistral-24b":    {"drafter"},
 			"llama3.1-8b":    {"grammar"},
 		},
-		Tools: []string{"edit_markdown", "retrieve", "read_note", "diff"},
 	}
 }
 
@@ -30,10 +29,10 @@ func TestNewLoadsAllModes(t *testing.T) {
 	if len(list) != 4 {
 		t.Fatalf("modes = %d, want 4", len(list))
 	}
-	// toolCalling defaults to native (ADR-0028 §3; ADR-0019 §4).
+	// ADR-0045: a preset is exactly name + systemPrompt + defaultModel.
 	for _, m := range list {
-		if m.ToolCalling != "native" {
-			t.Fatalf("mode %s toolCalling = %q, want native", m.Name, m.ToolCalling)
+		if m.Name == "" || m.SystemPrompt == "" || m.DefaultModel == "" {
+			t.Fatalf("preset %+v has an empty required field", m)
 		}
 	}
 	// Get returns a mode.
@@ -43,9 +42,6 @@ func TestNewLoadsAllModes(t *testing.T) {
 	}
 	if m.DefaultModel != "gemma4-26b-moe" {
 		t.Fatalf("defaultModel = %q", m.DefaultModel)
-	}
-	if len(m.ToolAllowlist) == 0 {
-		t.Fatal("allowlist empty")
 	}
 }
 
@@ -78,15 +74,6 @@ func TestUnreachableNoTagFails(t *testing.T) {
 	}
 }
 
-func TestUnknownToolFails(t *testing.T) {
-	in := validInput()
-	in.Tools = []string{"edit_markdown"} // drop retrieve/read_note/diff
-	_, err := New(in)
-	if !errors.Is(err, ErrUnknownTool) {
-		t.Fatalf("want ErrUnknownTool, got %v", err)
-	}
-}
-
 func TestSchemaInvalid(t *testing.T) {
 	// Compile the committed schema and reject a mode missing required fields.
 	s, err := loadSchema(config.ModeSchema)
@@ -99,5 +86,34 @@ func TestSchemaInvalid(t *testing.T) {
 	}
 	if err := s.Validate(v); err == nil {
 		t.Fatal("expected schema validation to fail for a mode missing systemPrompt/defaultModel")
+	}
+}
+
+// TestBehavioralFieldsRejected is the ADR-0045 gate: removed behavioral fields
+// (agentic, maxSteps, toolAllowlist, toolCalling, contextBudget, params,
+// preamble, kind) are not part of the schema and fail validation.
+func TestBehavioralFieldsRejected(t *testing.T) {
+	s, err := loadSchema(config.ModeSchema)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []string{
+		`"toolAllowlist":["edit_markdown"]`,
+		`"params":{"temperature":0.3}`,
+		`"contextBudget":{"maxRagTokens":1}`,
+		`"maxSteps":4`,
+		`"agentic":true`,
+		`"kind":"model"`,
+		`"preamble":"x"`,
+		`"toolCalling":"native"`,
+	} {
+		raw := `{"name":"x","systemPrompt":"p","defaultModel":"m",` + field + `}`
+		var v interface{}
+		if err := json.Unmarshal([]byte(raw), &v); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.Validate(v); err == nil {
+			t.Fatalf("expected schema to reject behavioral field %s", field)
+		}
 	}
 }

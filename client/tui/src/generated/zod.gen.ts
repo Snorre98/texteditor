@@ -89,18 +89,8 @@ export const zProvisionResponse = z.object({
 
 export const zMode = z.object({
     name: z.string(),
-    systemPrompt: z.string().optional(),
-    defaultModel: z.string().optional(),
-    toolAllowlist: z.array(z.string()).optional(),
-    params: zSamplingParams.optional(),
-    maxSteps: z.number().int().optional(),
-    agentic: z.boolean().optional(),
-    kind: z.string().optional(),
-    preamble: z.string().optional(),
-    toolCalling: z.enum([
-        'native',
-        'router'
-    ]).optional()
+    systemPrompt: z.string(),
+    defaultModel: z.string()
 });
 
 export const zToolDef = z.object({

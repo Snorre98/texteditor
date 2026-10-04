@@ -1,7 +1,8 @@
-// Package config embeds the versioned mode/tool data files and their JSON
-// Schemas (ADR-0019 §1). The registries load-and-validate these at startup; the
-// data lives in config/modes/*.json and config/tools/*.json, with schemas in
-// config/schemas/*.json, all go:embed'd into the static binary (ADR-0003).
+// Package config embeds the versioned mode/tool/pipeline data files and their
+// JSON Schemas (ADR-0019 §1, ADR-0045 §3). The registries load-and-validate
+// these at startup; the data lives in config/modes/*.json, config/tools/*.json,
+// and config/pipeline.json, with schemas in config/schemas/*.json, all
+// go:embed'd into the static binary (ADR-0003).
 package config
 
 import (
@@ -35,6 +36,16 @@ var ModeSchema []byte
 //
 //go:embed schemas/tool.schema.json
 var ToolSchema []byte
+
+// Pipeline is the committed pipeline policy data file (ADR-0045 §3).
+//
+//go:embed pipeline.json
+var Pipeline []byte
+
+// PipelineSchema is the committed pipeline policy JSON Schema.
+//
+//go:embed schemas/pipeline.schema.json
+var PipelineSchema []byte
 
 // Modes returns the embedded mode definitions, sorted by filename.
 func Modes() ([]ModeFile, error) {

@@ -13,7 +13,7 @@ type Decision struct {
 // RouterContext is the argument-binding context the loop re-bundles for Decide
 // (interface.md §8b).
 type RouterContext struct {
-	ToolDefs  []ToolDef  // the mode's allowlisted tools (candidate set)
+	ToolDefs  []ToolDef  // the tool candidate set (all registered tools while the seam is parked)
 	Chunks    []Chunk    // retrieved chunks (citation/note provenance for args)
 	Selection *Selection // the anchored block, when the session is block-scoped
 	History   []Message  // recent conversation (arg context)

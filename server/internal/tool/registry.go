@@ -50,15 +50,3 @@ func (r *registry) List() []dto.ToolDef {
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out
 }
-
-// AllowlistFor returns the definitions in mode.ToolAllowlist, preserving the
-// allowlist order (the order spliced into the payload).
-func (r *registry) AllowlistFor(mode dto.Mode) []dto.ToolDef {
-	var out []dto.ToolDef
-	for _, name := range mode.ToolAllowlist {
-		if d, ok := r.defs[name]; ok {
-			out = append(out, d)
-		}
-	}
-	return out
-}

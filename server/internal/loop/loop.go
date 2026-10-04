@@ -3,13 +3,12 @@
 // leaves; the loop wires them together, is session-scoped (ADR-0026 §3), and
 // forwards events to the bus tagged with a `turnID`.
 //
-// The turn: planning → (dispatching → observing)* → answering → done | error.
-// The dispatch/observe cycle is bounded by mode.maxSteps and is entered only for
-// agentic modes (maxSteps > 0); a non-agentic mode (maxSteps 0) is a single-shot
-// pass (state-machine.md §1.3). Native tool-calling (ADR-0028 default) drives
-// tool dispatch from the model's own tool_calls; edit-integrity results
-// (guard-failed / invalid-structure, ADR-0029) re-enter dispatching with a
-// re-read or the issue list, both counting against maxSteps.
+// One fixed pipeline for every preset (ADR-0045 §2): planning → auto-RAG →
+// (dispatching → observing)* → answering → done | error. All registered tools
+// are advertised on every turn; retrieval always runs (top-k from the pipeline
+// policy); the dispatch/observe cycle is bounded by the global policy.maxSteps.
+// Edit-integrity results (guard-failed / invalid-structure, ADR-0029) re-enter
+// dispatching with a re-read or the issue list, both counting against maxSteps.
 package loop
 
 import (
@@ -25,6 +24,7 @@ import (
 	"texteditor/internal/fleet"
 	"texteditor/internal/meter"
 	"texteditor/internal/mode"
+	"texteditor/internal/pipeline"
 	"texteditor/internal/provider"
 	"texteditor/internal/retriever"
 	"texteditor/internal/session"
@@ -47,14 +47,6 @@ type Emitter interface {
 	Emit(ev dto.Event)
 }
 
-// Decider is the sealed subset of the ToolDecider the loop consumes in router
-// mode (interface.md §8b). nil when no mode opts into the router — the native
-// baseline wires no ToolDecider (ADR-0028 §3).
-type Decider interface {
-	SignalTool() dto.ToolDef
-	Decide(ctx context.Context, intent string, c dto.RouterContext) (dto.RouterResult, error)
-}
-
 // Deps holds the loop's injected dependencies (the composition root wires these).
 type Deps struct {
 	Modes     mode.Interface
@@ -68,27 +60,15 @@ type Deps struct {
 	Sessions  session.Interface
 	Meter     meter.Interface
 	Bus       Emitter
-	Decider   Decider // optional: wired only when a mode sets toolCalling "router"
+	Pipeline  pipeline.Interface // the one global turn policy (ADR-0045 §3)
 	Workspace workspace.Interface
 }
-
-// The router-mode protocol constants (ADR-0028 §2/§7). The writer's synthetic
-// tool name, and the router serving model name (the meter row's model column).
-const (
-	requestToolName = "request_tool"
-	routerModelName = "needle-router"
-)
 
 // Mention caps (ADR-0036 §2) — constants in the loop package, not mode data.
 const (
 	maxMentions    = 8
 	mentionReadCap = 256 * 1024 // 256 KiB per mentioned file
 )
-
-// errRouterUnwired is the defensive guard for a composition-root wiring bug:
-// a mode requests the router but no Decider was wired. The startup gates
-// (routergate.Check) make this unreachable.
-var errRouterUnwired = errors.New("router-unavailable: mode requests router tool-calling but no ToolDecider is wired")
 
 // Mention failure sentinels (ADR-0036 §2) — mapped to the mention SSE codes by
 // codeFor. too-many-mentions is synthesized when the count cap is exceeded.
@@ -219,36 +199,19 @@ func (l *loop) runTurn(ctx context.Context, turnID string, task dto.Task) {
 		}
 	}
 
-	var chunks []dto.Chunk
-	if m.Agentic {
-		chunks, _ = l.d.Retriever.Query(ctx, task.UserInput, 3)
-	}
+	// One fixed pipeline (ADR-0045 §2): auto-RAG always runs, with the policy's
+	// top-k; all registered tools are advertised.
+	policy := l.d.Pipeline.Policy()
+	chunks, _ := l.d.Retriever.Query(ctx, task.UserInput, policy.AutoRagTopK)
 
-	tools := toolsFor(l.d.Tools, m)
-
-	// Router toggle (ADR-0028 §3): when the mode opts in, the writer sees only
-	// the synthetic request_tool; the real allowlist rides along as the
-	// Decide candidate set. Native modes never consult the decider.
-	var r *route
-	if m.ToolCalling == "router" {
-		if l.d.Decider == nil {
-			l.emit(turnID, dto.Event{Type: "error", Data: errorData(errRouterUnwired)})
-			return
-		}
-		r = &route{
-			decider:   l.d.Decider,
-			allowlist: tools,
-			chunks:    chunks,
-			history:   history,
-		}
-		tools = []dto.ToolDef{l.d.Decider.SignalTool()}
-	}
+	tools := toolsFor(l.d.Tools)
 
 	payload, breakdown, err := l.d.Assembler.Assemble(ctx, dto.AssemblerInput{
 		Mode:      m,
 		ModelName: res.Model.ModelID, // the id the provider accepts (may differ from the manifest name)
 		Params:    res.EffectiveParams,
 		Tools:     tools,
+		Policy:    policy,
 		RAGChunks: chunks,
 		History:   history,
 		Mentions:  mentions,
@@ -262,14 +225,8 @@ func (l *loop) runTurn(ctx context.Context, turnID string, task dto.Task) {
 	target := dto.Target{BaseURL: res.Model.BaseURL, Capabilities: res.Model.Capabilities}
 
 	// The turn state machine (state-machine.md §1): planning → (dispatching →
-	// observing)* → answering. maxSteps bounds the tool loop; a non-agentic mode
-	// (maxSteps 0) is a single answering pass with no dispatch.
-	maxSteps := m.MaxSteps
-	if !m.Agentic {
-		maxSteps = 0
-	}
-
-	result, err := l.runSteps(ctx, turnID, task, target, payload, tools, maxSteps, r)
+	// observing)* → answering. policy.MaxSteps is the one global bound.
+	result, err := l.runSteps(ctx, turnID, task, target, payload, tools, policy.MaxSteps)
 	if err != nil {
 		l.emit(turnID, dto.Event{Type: "error", Data: errorData(err)})
 		return
@@ -299,22 +256,11 @@ type streamResult struct {
 	counts    dto.ProviderCounts
 }
 
-// route is the router-mode context threaded through runSteps. nil when the
-// mode is native — the native path is byte-identical to the accepted baseline.
-type route struct {
-	decider   Decider
-	allowlist []dto.ToolDef // the mode's real allowlist (the Decide candidate set)
-	chunks    []dto.Chunk
-	history   []dto.Message
-}
-
-// runSteps drives the tool-calling loop. It mutates `msgs` (the assembled
-// message list) across round-trips, threading assistant tool_calls and tool
-// results. It returns the final stream result (the answering round). In router
-// mode (r != nil) the writer's request_tool calls are intercepted and resolved
-// through the decider (state-machine §1.2: planning → deciding → dispatch |
-// answering); native tool-calling is unchanged.
-func (l *loop) runSteps(ctx context.Context, turnID string, task dto.Task, target dto.Target, payload dto.Payload, tools []dto.ToolDef, maxSteps int, r *route) (streamResult, error) {
+// runSteps drives the one tool-calling loop (ADR-0045 §2). It mutates `msgs`
+// (the assembled message list) across round-trips, threading assistant
+// tool_calls and tool results. It returns the final stream result (the answering
+// round), bounded by the global pipeline maxSteps.
+func (l *loop) runSteps(ctx context.Context, turnID string, task dto.Task, target dto.Target, payload dto.Payload, tools []dto.ToolDef, maxSteps int) (streamResult, error) {
 	msgs := payload.Messages
 
 	steps := 0
@@ -343,20 +289,6 @@ func (l *loop) runSteps(ctx context.Context, turnID string, task dto.Task, targe
 			}
 		}
 
-		if steps == 0 && maxSteps == 0 {
-			// Single-shot (non-agentic): forward tokens live (the POC happy path).
-			err := l.d.Provider.Stream(ctx, target, req, func(raw dto.RawEvent) {
-				emit(raw)
-				if raw.Type == "token" {
-					l.emit(turnID, dto.Event{Type: "token", Data: raw.Data})
-				}
-			})
-			if err != nil {
-				return streamResult{}, err
-			}
-			return res, nil
-		}
-
 		if err := l.d.Provider.Stream(ctx, target, req, emit); err != nil {
 			return streamResult{}, err
 		}
@@ -368,7 +300,7 @@ func (l *loop) runSteps(ctx context.Context, turnID string, task dto.Task, targe
 		}
 
 		// Bound reached without an explicit stop: treat the accumulated text as
-		// the answer (bounded loop, never unbounded — ADR-0019).
+		// the answer (bounded loop, never unbounded — ADR-0045).
 		if steps >= maxSteps {
 			l.emitToken(turnID, res.text)
 			return res, nil
@@ -379,16 +311,6 @@ func (l *loop) runSteps(ctx context.Context, turnID string, task dto.Task, targe
 		msgs = append(msgs, dto.Message{Role: "assistant", Content: res.text, Timestamp: nowUnix()})
 
 		for _, tc := range res.toolCalls {
-			// Router mode: the writer's single tool is the synthetic
-			// request_tool; the loop resolves it through the decider
-			// (state-machine §1.2: planning → deciding). Confident → dispatch
-			// the resolved tool; refusal / router error → a "no tool" result
-			// that drives one more bounded writer round (the answering phase).
-			if r != nil && tc.Name == requestToolName {
-				msgs = append(msgs, dto.Message{Role: "tool", Content: l.routeTool(ctx, turnID, task, tc, r), Timestamp: nowUnix()})
-				continue
-			}
-
 			rawArgs := json.RawMessage(tc.Arguments)
 			if len(rawArgs) == 0 {
 				rawArgs = json.RawMessage(`{}`)
@@ -487,87 +409,6 @@ func (l *loop) observeEdit(turnID string, task dto.Task, out json.RawMessage, to
 	return out
 }
 
-// routeTool implements the deciding phase (state-machine §1.2, router mode):
-// one writer request_tool → Decide → confident dispatch through the exact
-// native machinery, or a "no tool" tool result that drives one more bounded
-// writer round. The router call is metered as its own row (D4, ADR-0028 §5)
-// whether confident or refused; a Decide error emits a labeled
-// router-unreachable event and degrades to answering (failure-semantics §3 —
-// no retry loop).
-func (l *loop) routeTool(ctx context.Context, turnID string, task dto.Task, tc dto.ToolCall, r *route) string {
-	result, err := r.decider.Decide(ctx, intentOf(tc.Arguments), dto.RouterContext{
-		ToolDefs:  r.allowlist,
-		Chunks:    r.chunks,
-		Selection: task.Selection,
-		History:   r.history,
-		UserInput: task.UserInput,
-	})
-	if err != nil {
-		l.emit(turnID, dto.Event{Type: "error", Data: errorDataWithCode("router-unreachable", err)})
-		return noToolResult(err.Error())
-	}
-
-	// Second meter row (ADR-0028 §5): model=needle-router, turn-scoped, before
-	// the outcome is known — the router call already happened.
-	if result.Usage.Counts.InputTokens+result.Usage.Counts.OutputTokens > 0 {
-		if _, err := l.d.Meter.Attribute(ctx, turnID, task.SessionID, routerModelName, result.Usage.Breakdown, result.Usage.Counts); err != nil {
-			l.emit(turnID, dto.Event{Type: "error", Data: errorData(err)})
-		}
-	}
-
-	// Refusal / below τ: the decider returned the zero Decision (τ is private
-	// to it, interface.md §8b). The writer answers directly next round.
-	if result.Decision.Name == "" {
-		return noToolResult("")
-	}
-
-	// Confident: dispatch the resolved tool exactly like a native call.
-	args := injectDocumentID(result.Decision.Name, task, result.Decision.Args)
-	out, toolErr := l.d.Executor.Invoke(result.Decision.Name, args)
-	handled := l.observeTool(turnID, task, dto.ToolCall{ID: tc.ID, Name: result.Decision.Name, Arguments: string(args)}, out, toolErr)
-	switch {
-	case toolErr != nil:
-		return toolErrorMessage(result.Decision.Name, toolErr)
-	case handled != nil:
-		return string(handled)
-	default:
-		return string(outOrEmpty(out))
-	}
-}
-
-// intentOf extracts the writer's free-text intent from request_tool arguments;
-// malformed arguments fall back to the raw JSON string.
-func intentOf(arguments string) string {
-	var v struct {
-		Intent string `json:"intent"`
-	}
-	if err := json.Unmarshal([]byte(arguments), &v); err == nil && v.Intent != "" {
-		return v.Intent
-	}
-	return arguments
-}
-
-// noToolResult renders the request_tool tool result that drives the writer to
-// answer directly (interface.md §8b recorded amendment: refusal/error → one
-// bounded writer round, no extra router call). reason=="" is the graceful
-// refusal; otherwise it is the router-unreachable labeled failure.
-func noToolResult(reason string) string {
-	if reason == "" {
-		b, _ := json.Marshal(map[string]interface{}{
-			"ok":      true,
-			"tool":    nil,
-			"message": "no tool required; answer the user directly",
-		})
-		return string(b)
-	}
-	b, _ := json.Marshal(map[string]interface{}{
-		"ok":      false,
-		"error":   "router-unreachable",
-		"message": reason,
-	})
-	return string(b)
-}
-
 // emitFinal emits the terminal done event with degrade/usedModel labeling
 // (failure-semantics §3: a substitution is always labeled).
 func (l *loop) emitFinal(turnID string, res dto.Resolution, r streamResult) {
@@ -596,10 +437,10 @@ func (l *loop) emitToken(turnID, text string) {
 	l.emit(turnID, dto.Event{Type: "token", Data: data})
 }
 
-// toolsFor returns the mode's allowlisted tools (in allowlist order, so the
-// payload order matches the meter).
-func toolsFor(reg tool.Registry, m mode.Mode) []dto.ToolDef {
-	return reg.AllowlistFor(m)
+// toolsFor returns all registered tools (global since ADR-0045 §2), in the
+// registry's stable name order so the payload order matches the meter.
+func toolsFor(reg tool.Registry) []dto.ToolDef {
+	return reg.List()
 }
 
 // tokenText extracts the text from a raw token event.
@@ -660,13 +501,6 @@ func nowUnix() int64 {
 
 func errorData(err error) json.RawMessage {
 	b, _ := json.Marshal(map[string]string{"code": codeFor(err), "message": err.Error()})
-	return b
-}
-
-// errorDataWithCode renders an error event with an explicit code (used for the
-// router's labeled mid-turn failure, failure-semantics §5).
-func errorDataWithCode(code string, err error) json.RawMessage {
-	b, _ := json.Marshal(map[string]string{"code": code, "message": err.Error()})
 	return b
 }
 

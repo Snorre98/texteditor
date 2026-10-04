@@ -58,22 +58,20 @@ func TestToolSetHashSchemaFormatInsensitive(t *testing.T) {
 }
 
 func TestCheck(t *testing.T) {
-	routerMode := dto.Mode{Name: "editor", ToolCalling: "router"}
-	nativeMode := dto.Mode{Name: "proofreader", ToolCalling: "native"}
 	hash := ToolSetHash([]dto.ToolDef{toolDef("retrieve")})
 
-	t.Run("no router mode is a no-op", func(t *testing.T) {
-		err := Check([]dto.Mode{nativeMode},
+	t.Run("disabled is a no-op", func(t *testing.T) {
+		err := Check(false,
 			func(string) bool { return false },
 			func(string) (string, error) { return "", nil },
 			"whatever")
 		if err != nil {
-			t.Fatalf("want nil for an all-native fleet, got %v", err)
+			t.Fatalf("want nil when the seam is parked/disabled, got %v", err)
 		}
 	})
 
-	t.Run("router mode without needle-router", func(t *testing.T) {
-		err := Check([]dto.Mode{routerMode},
+	t.Run("enabled without needle-router", func(t *testing.T) {
+		err := Check(true,
 			func(string) bool { return false },
 			func(string) (string, error) { return "", nil },
 			hash)
@@ -83,7 +81,7 @@ func TestCheck(t *testing.T) {
 	})
 
 	t.Run("matching fingerprint passes", func(t *testing.T) {
-		err := Check([]dto.Mode{routerMode},
+		err := Check(true,
 			func(name string) bool { return name == RouterModelName },
 			func(name string) (string, error) { return hash, nil },
 			hash)
@@ -93,7 +91,7 @@ func TestCheck(t *testing.T) {
 	})
 
 	t.Run("mismatched fingerprint", func(t *testing.T) {
-		err := Check([]dto.Mode{routerMode},
+		err := Check(true,
 			func(name string) bool { return name == RouterModelName },
 			func(name string) (string, error) { return "sha256:other", nil },
 			hash)
@@ -103,7 +101,7 @@ func TestCheck(t *testing.T) {
 	})
 
 	t.Run("missing fingerprint is stale", func(t *testing.T) {
-		err := Check([]dto.Mode{routerMode},
+		err := Check(true,
 			func(name string) bool { return name == RouterModelName },
 			func(name string) (string, error) { return "", nil },
 			hash)
@@ -113,7 +111,7 @@ func TestCheck(t *testing.T) {
 	})
 
 	t.Run("fingerprint read failure is router-unavailable", func(t *testing.T) {
-		err := Check([]dto.Mode{routerMode},
+		err := Check(true,
 			func(name string) bool { return name == RouterModelName },
 			func(name string) (string, error) { return "", errors.New("daemon down") },
 			hash)

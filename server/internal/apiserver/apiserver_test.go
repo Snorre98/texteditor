@@ -88,9 +88,8 @@ func (s stubModes) Get(name string) (dto.Mode, error) {
 
 type stubTools struct{}
 
-func (stubTools) Register(dto.ToolDef) error          { return nil }
-func (stubTools) List() []dto.ToolDef                 { return nil }
-func (stubTools) AllowlistFor(dto.Mode) []dto.ToolDef { return nil }
+func (stubTools) Register(dto.ToolDef) error { return nil }
+func (stubTools) List() []dto.ToolDef        { return nil }
 
 type stubDoc struct{}
 

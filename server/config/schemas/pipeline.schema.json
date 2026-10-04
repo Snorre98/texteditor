@@ -1,0 +1,36 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://texteditor.local/schemas/pipeline.schema.json",
+  "title": "PipelinePolicy",
+  "description": "The one global turn pipeline policy (ADR-0045 §3): step cap + context budgets + auto-RAG top-k.",
+  "type": "object",
+  "required": ["maxSteps", "maxHistoryTokens", "maxRagTokens", "maxMentionTokens", "autoRagTopK"],
+  "additionalProperties": false,
+  "properties": {
+    "maxSteps": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Global dispatch/observe bound (one pipeline for every preset)."
+    },
+    "maxHistoryTokens": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "History budget; 0 drops all history."
+    },
+    "maxRagTokens": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Auto-RAG budget; 0 drops all retrieved chunks."
+    },
+    "maxMentionTokens": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Mention budget; 0 truncates all mention content (labeled)."
+    },
+    "autoRagTopK": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Auto-RAG retrieval depth, every turn."
+    }
+  }
+}

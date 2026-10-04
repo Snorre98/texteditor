@@ -2,11 +2,11 @@
 // §4). It loads the go:embed'd config/modes/*.json, validates them against the
 // committed mode JSON Schema, and fail-fasts at startup on broken references.
 //
+// Since ADR-0045 a mode is a prompt preset: name + systemPrompt + defaultModel.
 // The registry stays a leaf by accepting the external facts it needs (the fleet's
-// model names + their modeTags, and the registered tool names) at construction,
-// rather than reaching into Fleet or the Tool registry (ADR-0019 §2's validation;
-// ADR-0028's two router gates run at the composition root — see
-// implementation-sequence.md "Sequencing note").
+// model names + their modeTags) at construction, rather than reaching into Fleet
+// (ADR-0019 §2's validation). The router gates run at the composition root — see
+// implementation-sequence.md "Sequencing note".
 package mode
 
 import (
@@ -15,7 +15,6 @@ import (
 	"errors"
 	"fmt"
 	"sort"
-	"strings"
 
 	"github.com/santhosh-tekuri/jsonschema/v5"
 
@@ -32,7 +31,7 @@ type ModeRegistry interface {
 // Interface is an alias for ModeRegistry (the contracted name, interface.md §8).
 type Interface = ModeRegistry
 
-// Mode is the resolved, validated mode (mode.go DTO plus resolved defaults).
+// Mode is the resolved, validated mode (the pure DTO, ADR-0045).
 type Mode = dto.Mode
 
 // ValidationInput supplies the external facts the registry cross-checks against,
@@ -41,7 +40,6 @@ type Mode = dto.Mode
 type ValidationInput struct {
 	Models    []string            // fleet manifest model names
 	ModelTags map[string][]string // model name -> modeTags advertising it
-	Tools     []string            // registered tool names
 }
 
 // Typed validation errors (ADR-0019 §2).
@@ -49,7 +47,6 @@ var (
 	ErrSchemaInvalid    = errors.New("schema-invalid: a mode file failed its JSON Schema")
 	ErrUnknownModel     = errors.New("mode-refs-unknown-model: defaultModel not in the fleet manifest")
 	ErrUnreachableNoTag = errors.New("mode-unreachable-no-tag: mode name appears in no model's modeTags")
-	ErrUnknownTool      = errors.New("mode-refs-unknown-tool: toolAllowlist entry is not a registered tool")
 	ErrNotFound         = errors.New("mode not found")
 )
 
@@ -88,11 +85,7 @@ func New(in ValidationInput) (ModeRegistry, error) {
 	for _, m := range in.Models {
 		models[m] = true
 	}
-	tools := map[string]bool{}
-	for _, t := range in.Tools {
-		tools[t] = true
-	}
-	// modeTagsFor[model] = set of modes that select it (fleet policy, ADR-0015).
+	// modesByTag[model] = set of modes that select it (fleet policy, ADR-0015).
 	modesByTag := map[string]bool{}
 	for _, tags := range in.ModelTags {
 		for _, tag := range tags {
@@ -115,12 +108,6 @@ func New(in ValidationInput) (ModeRegistry, error) {
 		// The mode's name must appear in at least one model's modeTags.
 		if !reachable[m.Name] {
 			return nil, &ValidationError{Err: ErrUnreachableNoTag, File: f.Name, Mode: m.Name}
-		}
-		// Every allowlist entry must be a registered tool.
-		for _, t := range m.ToolAllowlist {
-			if !tools[t] {
-				return nil, &ValidationError{Err: ErrUnknownTool, File: f.Name, Mode: m.Name}
-			}
 		}
 
 		reg.modes[m.Name] = m
@@ -174,8 +161,9 @@ func stripSchemaKeyword(data []byte) []byte {
 	return out
 }
 
-// parseAndValidate unmarshals one mode file and validates it against the schema,
-// applying ADR-0019 §4 documented defaults (toolCalling -> "native").
+// parseAndValidate unmarshals one mode file and validates it against the schema.
+// ADR-0045 removed the behavioral fields (and their defaults): the mode is
+// exactly name + systemPrompt + defaultModel.
 func parseAndValidate(schema *jsonschema.Schema, f config.ModeFile) (Mode, error) {
 	data := stripSchemaKeyword(f.Data)
 
@@ -188,58 +176,16 @@ func parseAndValidate(schema *jsonschema.Schema, f config.ModeFile) (Mode, error
 	}
 
 	var raw struct {
-		Name          string   `json:"name"`
-		SystemPrompt  string   `json:"systemPrompt"`
-		DefaultModel  string   `json:"defaultModel"`
-		ToolAllowlist []string `json:"toolAllowlist"`
-		Params        *struct {
-			Temperature float64 `json:"temperature"`
-			MaxTokens   int     `json:"maxTokens"`
-		} `json:"params"`
-		ContextBudget *struct {
-			MaxHistoryTokens int `json:"maxHistoryTokens"`
-			MaxRagTokens     int `json:"maxRagTokens"`
-			MaxMentionTokens int `json:"maxMentionTokens"`
-		} `json:"contextBudget"`
-		MaxSteps    *int    `json:"maxSteps"`
-		Agentic     bool    `json:"agentic"`
-		Kind        string  `json:"kind"`
-		Preamble    string  `json:"preamble"`
-		ToolCalling *string `json:"toolCalling"`
+		Name         string `json:"name"`
+		SystemPrompt string `json:"systemPrompt"`
+		DefaultModel string `json:"defaultModel"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return Mode{}, &ValidationError{Err: ErrSchemaInvalid, File: f.Name, Mode: raw.Name}
 	}
-
-	m := Mode{
-		Name:          raw.Name,
-		SystemPrompt:  raw.SystemPrompt,
-		DefaultModel:  raw.DefaultModel,
-		ToolAllowlist: raw.ToolAllowlist,
-		Agentic:       raw.Agentic,
-		Kind:          raw.Kind,
-		Preamble:      raw.Preamble,
-	}
-	if m.Kind == "" {
-		m.Kind = "model"
-	}
-	if m.ToolCalling == "" {
-		m.ToolCalling = "native"
-	}
-	if raw.ToolCalling != nil {
-		m.ToolCalling = strings.ToLower(*raw.ToolCalling)
-	}
-	if raw.Params != nil {
-		m.Params.Temperature = raw.Params.Temperature
-		m.Params.MaxTokens = raw.Params.MaxTokens
-	}
-	if raw.ContextBudget != nil {
-		m.ContextBudget.MaxHistoryTokens = raw.ContextBudget.MaxHistoryTokens
-		m.ContextBudget.MaxRagTokens = raw.ContextBudget.MaxRagTokens
-		m.ContextBudget.MaxMentionTokens = raw.ContextBudget.MaxMentionTokens
-	}
-	if raw.MaxSteps != nil {
-		m.MaxSteps = *raw.MaxSteps
-	}
-	return m, nil
+	return Mode{
+		Name:         raw.Name,
+		SystemPrompt: raw.SystemPrompt,
+		DefaultModel: raw.DefaultModel,
+	}, nil
 }

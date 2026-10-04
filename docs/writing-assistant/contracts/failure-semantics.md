@@ -28,10 +28,14 @@ Retries are **bounded (≤3)**; every failure is recorded in `meter_events`/logs
   no process is spawned.
 - **Lanes conflict** — manifest load fails with `lanes-conflict` naming both entries
   (ADR-0018); this is a startup error, not a runtime one.
-- **Router validation** — a `toolCalling: "router"` mode with no resolvable
-  `needle-router` model fails startup with `mode-refs-router-unavailable`; a
-  `needle-router` whose manifest `source.fingerprint` differs from the engine's
-  tool-set hash fails startup with `router-tools-stale` (ADR-0028).
+- **Router validation** (parked by ADR-0045 — the gates are unwired and the
+  errors cannot fire while no mode can enable the router; retained for a future
+  unpark) — a `toolCalling: "router"` mode with no resolvable `needle-router`
+  model fails startup with `mode-refs-router-unavailable`; a `needle-router`
+  whose manifest `source.fingerprint` differs from the engine's tool-set hash
+  fails startup with `router-tools-stale` (ADR-0028).
+- **Pipeline policy validation** — a `config/pipeline.json` that fails its JSON
+  Schema fails startup with `pipeline-invalid` (ADR-0045 §3).
 
 ## 3. Degrade-to-partial
 
@@ -44,15 +48,18 @@ Retries are **bounded (≤3)**; every failure is recorded in `meter_events`/logs
   proceeds without RAG and records `rag: 0` tokens.
 - **Tool failure** — a failed tool call returns a structured error to the agent
   loop (not a crash); the loop may retry once or continue without the tool.
-- **Tool routing (router mode)** — `Decide` resolves the writer's `request_tool`
-  intent. Confident (`Confidence ≥ τ`) → dispatch. Low-confidence / refusal /
-  empty-call → proceed to `answering` (graceful, not an error). Transport failure →
-  labeled `error` (`router-unreachable`) then `answering` (no retry).
+- **Tool routing (router mode — parked by ADR-0045)** — `Decide` resolves the
+  writer's `request_tool` intent. Confident (`Confidence ≥ τ`) → dispatch.
+  Low-confidence / refusal / empty-call → proceed to `answering` (graceful, not an
+  error). Transport failure → labeled `error` (`router-unreachable`) then
+  `answering` (no retry). The loop no longer reads `toolCalling`; this row is
+  retained for a future unpark.
 - **Edit verification (ADR-0029)** — `ApplyEdit` returns a structured, retryable
   outcome, never a silent write. `guard-failed` (a guarded sibling's canonical
   content no longer matches the echoed hash) → the loop re-reads the block and the
   model re-attempts. `invalid-structure` (a table/fence/list fails `TextFormatter.Validate`)
-  → the model retries with the specific issue list. Both are bounded by `maxSteps`.
+  → the model retries with the specific issue list. Both are bounded by the global
+  `PipelinePolicy.MaxSteps` (ADR-0045).
 
 ## 4. Attribution and the thinking-token approximation
 

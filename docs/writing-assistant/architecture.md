@@ -203,10 +203,11 @@ flowchart TB
 | Fleet gateway | model discovery, resolution (merge + gates + fallback), lifecycle | `ListModels`, `Resolve(name, opts) → Resolution`, `Status`, `Start` (blocking), `Stop`, `Provision` (async), `Fingerprint` (router sync gate) | daemon HTTP client, fallback ladder |
 | Provider gateway | OpenAI-compatible REST/SSE calls | `Chat(ctx, target, params)`, `Stream(ctx, target, params, emit)`, `Embed(ctx, target, text)` | retry/backoff, `-np 1` serialization |
 | Agent loop | turn loop (thin orchestrator, session-scoped) | `Run(ctx, task) → (turnID, err)` (async) | turn state machine, dispatch/observe |
-| Mode registry | modes as data | `List`, `Get` | validation, file loading |
-| Tool registry | tool definitions + schemas | `Register`, `List`, `AllowlistFor` | schema validation |
+| Mode registry | prompt presets as data (name + system prompt + default model) | `List`, `Get` | validation, file loading |
+| Pipeline policy | one global turn policy: step cap, context budgets, auto-RAG top-k (ADR-0045) | `Policy` | schema validation, `config/pipeline.json` |
+| Tool registry | tool definitions + schemas (all tools global) | `Register`, `List` | schema validation |
 | Tool executor | tool execution | `Invoke(name, args)` | name-keyed handler map |
-| Tool decider (optional) | tool-intent resolution ("which tool, what args") from a writer's `request_tool` intent | `SignalTool`, `Decide(ctx, intent, c)` | prompt layout, Provider.Chat, τ threshold, `.cact` fingerprint |
+| Tool decider (optional) | tool-intent resolution ("which tool, what args") from a writer's `request_tool` intent — **parked/unwired** (ADR-0045) | `SignalTool`, `Decide(ctx, intent, c)` | prompt layout, Provider.Chat, τ threshold, `.cact` fingerprint |
 | Context assembler | payload + attribution (pure) | `Assemble(ctx, in) → (Payload, Breakdown)` | layout, truncation, accounting |
 | Token metering | counts + attribution + persistence | `Attribute(ctx, turnID, breakdown, counts)` | scale-to-total, `meter.db` |
 | Retriever | retrieval | `Query(ctx, text, topK)`, `Index(ctx, docID)` | embedding, sqlite-vec KNN, FTS5 |

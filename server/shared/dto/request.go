@@ -13,6 +13,6 @@ package dto
 type Request struct {
 	ModelName       string         // the actually-resolved serving model (usedName)
 	Messages        []Message      // the assembled conversation (system + history + rag + user)
-	Tools           []ToolDef      // the mode's allowlisted tools, in splices order
-	EffectiveParams SamplingParams // merged manifest.defaults ← mode.params ← overrides
+	Tools           []ToolDef      // all registered tools (global; ADR-0045), in splice order
+	EffectiveParams SamplingParams // merged manifest.defaults ← opts.Overrides
 }

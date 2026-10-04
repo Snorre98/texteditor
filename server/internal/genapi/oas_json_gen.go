@@ -2660,76 +2660,19 @@ func (s *Mode) encodeFields(e *jx.Encoder) {
 		e.Str(s.Name)
 	}
 	{
-		if s.SystemPrompt.Set {
-			e.FieldStart("systemPrompt")
-			s.SystemPrompt.Encode(e)
-		}
+		e.FieldStart("systemPrompt")
+		e.Str(s.SystemPrompt)
 	}
 	{
-		if s.DefaultModel.Set {
-			e.FieldStart("defaultModel")
-			s.DefaultModel.Encode(e)
-		}
-	}
-	{
-		if s.ToolAllowlist != nil {
-			e.FieldStart("toolAllowlist")
-			e.ArrStart()
-			for _, elem := range s.ToolAllowlist {
-				e.Str(elem)
-			}
-			e.ArrEnd()
-		}
-	}
-	{
-		if s.Params.Set {
-			e.FieldStart("params")
-			s.Params.Encode(e)
-		}
-	}
-	{
-		if s.MaxSteps.Set {
-			e.FieldStart("maxSteps")
-			s.MaxSteps.Encode(e)
-		}
-	}
-	{
-		if s.Agentic.Set {
-			e.FieldStart("agentic")
-			s.Agentic.Encode(e)
-		}
-	}
-	{
-		if s.Kind.Set {
-			e.FieldStart("kind")
-			s.Kind.Encode(e)
-		}
-	}
-	{
-		if s.Preamble.Set {
-			e.FieldStart("preamble")
-			s.Preamble.Encode(e)
-		}
-	}
-	{
-		if s.ToolCalling.Set {
-			e.FieldStart("toolCalling")
-			s.ToolCalling.Encode(e)
-		}
+		e.FieldStart("defaultModel")
+		e.Str(s.DefaultModel)
 	}
 }
 
-var jsonFieldsNameOfMode = [10]string{
+var jsonFieldsNameOfMode = [3]string{
 	0: "name",
 	1: "systemPrompt",
 	2: "defaultModel",
-	3: "toolAllowlist",
-	4: "params",
-	5: "maxSteps",
-	6: "agentic",
-	7: "kind",
-	8: "preamble",
-	9: "toolCalling",
 }
 
 // Decode decodes Mode from json.
@@ -2737,7 +2680,7 @@ func (s *Mode) Decode(d *jx.Decoder) error {
 	if s == nil {
 		return errors.New("invalid: unable to decode Mode to nil")
 	}
-	var requiredBitSet [2]uint8
+	var requiredBitSet [1]uint8
 
 	if err := d.ObjBytes(func(d *jx.Decoder, k []byte) error {
 		switch string(k) {
@@ -2754,9 +2697,11 @@ func (s *Mode) Decode(d *jx.Decoder) error {
 				return errors.Wrap(err, "decode field \"name\"")
 			}
 		case "systemPrompt":
+			requiredBitSet[0] |= 1 << 1
 			if err := func() error {
-				s.SystemPrompt.Reset()
-				if err := s.SystemPrompt.Decode(d); err != nil {
+				v, err := d.Str()
+				s.SystemPrompt = string(v)
+				if err != nil {
 					return err
 				}
 				return nil
@@ -2764,93 +2709,16 @@ func (s *Mode) Decode(d *jx.Decoder) error {
 				return errors.Wrap(err, "decode field \"systemPrompt\"")
 			}
 		case "defaultModel":
+			requiredBitSet[0] |= 1 << 2
 			if err := func() error {
-				s.DefaultModel.Reset()
-				if err := s.DefaultModel.Decode(d); err != nil {
+				v, err := d.Str()
+				s.DefaultModel = string(v)
+				if err != nil {
 					return err
 				}
 				return nil
 			}(); err != nil {
 				return errors.Wrap(err, "decode field \"defaultModel\"")
-			}
-		case "toolAllowlist":
-			if err := func() error {
-				s.ToolAllowlist = make([]string, 0)
-				if err := d.Arr(func(d *jx.Decoder) error {
-					var elem string
-					v, err := d.Str()
-					elem = string(v)
-					if err != nil {
-						return err
-					}
-					s.ToolAllowlist = append(s.ToolAllowlist, elem)
-					return nil
-				}); err != nil {
-					return err
-				}
-				return nil
-			}(); err != nil {
-				return errors.Wrap(err, "decode field \"toolAllowlist\"")
-			}
-		case "params":
-			if err := func() error {
-				s.Params.Reset()
-				if err := s.Params.Decode(d); err != nil {
-					return err
-				}
-				return nil
-			}(); err != nil {
-				return errors.Wrap(err, "decode field \"params\"")
-			}
-		case "maxSteps":
-			if err := func() error {
-				s.MaxSteps.Reset()
-				if err := s.MaxSteps.Decode(d); err != nil {
-					return err
-				}
-				return nil
-			}(); err != nil {
-				return errors.Wrap(err, "decode field \"maxSteps\"")
-			}
-		case "agentic":
-			if err := func() error {
-				s.Agentic.Reset()
-				if err := s.Agentic.Decode(d); err != nil {
-					return err
-				}
-				return nil
-			}(); err != nil {
-				return errors.Wrap(err, "decode field \"agentic\"")
-			}
-		case "kind":
-			if err := func() error {
-				s.Kind.Reset()
-				if err := s.Kind.Decode(d); err != nil {
-					return err
-				}
-				return nil
-			}(); err != nil {
-				return errors.Wrap(err, "decode field \"kind\"")
-			}
-		case "preamble":
-			if err := func() error {
-				s.Preamble.Reset()
-				if err := s.Preamble.Decode(d); err != nil {
-					return err
-				}
-				return nil
-			}(); err != nil {
-				return errors.Wrap(err, "decode field \"preamble\"")
-			}
-		case "toolCalling":
-			if err := func() error {
-				s.ToolCalling.Reset()
-				if err := s.ToolCalling.Decode(d); err != nil {
-					return err
-				}
-				return nil
-			}(); err != nil {
-				return errors.Wrap(err, "decode field \"toolCalling\"")
 			}
 		default:
 			return d.Skip()
@@ -2861,9 +2729,8 @@ func (s *Mode) Decode(d *jx.Decoder) error {
 	}
 	// Validate required fields.
 	var failures []validate.FieldError
-	for i, mask := range [2]uint8{
-		0b00000001,
-		0b00000000,
+	for i, mask := range [1]uint8{
+		0b00000111,
 	} {
 		if result := (requiredBitSet[i] & mask) ^ mask; result != 0 {
 			// Mask only required fields and check equality to mask using XOR.
@@ -2905,46 +2772,6 @@ func (s *Mode) MarshalJSON() ([]byte, error) {
 
 // UnmarshalJSON implements stdjson.Unmarshaler.
 func (s *Mode) UnmarshalJSON(data []byte) error {
-	d := jx.DecodeBytes(data)
-	return s.Decode(d)
-}
-
-// Encode encodes ModeToolCalling as json.
-func (s ModeToolCalling) Encode(e *jx.Encoder) {
-	e.Str(string(s))
-}
-
-// Decode decodes ModeToolCalling from json.
-func (s *ModeToolCalling) Decode(d *jx.Decoder) error {
-	if s == nil {
-		return errors.New("invalid: unable to decode ModeToolCalling to nil")
-	}
-	v, err := d.StrBytes()
-	if err != nil {
-		return err
-	}
-	// Try to use constant string.
-	switch ModeToolCalling(v) {
-	case ModeToolCallingNative:
-		*s = ModeToolCallingNative
-	case ModeToolCallingRouter:
-		*s = ModeToolCallingRouter
-	default:
-		*s = ModeToolCalling(v)
-	}
-
-	return nil
-}
-
-// MarshalJSON implements stdjson.Marshaler.
-func (s ModeToolCalling) MarshalJSON() ([]byte, error) {
-	e := jx.Encoder{}
-	s.Encode(&e)
-	return e.Bytes(), nil
-}
-
-// UnmarshalJSON implements stdjson.Unmarshaler.
-func (s *ModeToolCalling) UnmarshalJSON(data []byte) error {
 	d := jx.DecodeBytes(data)
 	return s.Decode(d)
 }
@@ -3476,39 +3303,6 @@ func (s *OptInt64) UnmarshalJSON(data []byte) error {
 	return s.Decode(d)
 }
 
-// Encode encodes ModeToolCalling as json.
-func (o OptModeToolCalling) Encode(e *jx.Encoder) {
-	if !o.Set {
-		return
-	}
-	e.Str(string(o.Value))
-}
-
-// Decode decodes ModeToolCalling from json.
-func (o *OptModeToolCalling) Decode(d *jx.Decoder) error {
-	if o == nil {
-		return errors.New("invalid: unable to decode OptModeToolCalling to nil")
-	}
-	o.Set = true
-	if err := o.Value.Decode(d); err != nil {
-		return err
-	}
-	return nil
-}
-
-// MarshalJSON implements stdjson.Marshaler.
-func (s OptModeToolCalling) MarshalJSON() ([]byte, error) {
-	e := jx.Encoder{}
-	s.Encode(&e)
-	return e.Bytes(), nil
-}
-
-// UnmarshalJSON implements stdjson.Unmarshaler.
-func (s *OptModeToolCalling) UnmarshalJSON(data []byte) error {
-	d := jx.DecodeBytes(data)
-	return s.Decode(d)
-}
-
 // Encode encodes ModelLiveState as json.
 func (o OptModelLiveState) Encode(e *jx.Encoder) {
 	if !o.Set {
@@ -3538,39 +3332,6 @@ func (s OptModelLiveState) MarshalJSON() ([]byte, error) {
 
 // UnmarshalJSON implements stdjson.Unmarshaler.
 func (s *OptModelLiveState) UnmarshalJSON(data []byte) error {
-	d := jx.DecodeBytes(data)
-	return s.Decode(d)
-}
-
-// Encode encodes SamplingParams as json.
-func (o OptSamplingParams) Encode(e *jx.Encoder) {
-	if !o.Set {
-		return
-	}
-	o.Value.Encode(e)
-}
-
-// Decode decodes SamplingParams from json.
-func (o *OptSamplingParams) Decode(d *jx.Decoder) error {
-	if o == nil {
-		return errors.New("invalid: unable to decode OptSamplingParams to nil")
-	}
-	o.Set = true
-	if err := o.Value.Decode(d); err != nil {
-		return err
-	}
-	return nil
-}
-
-// MarshalJSON implements stdjson.Marshaler.
-func (s OptSamplingParams) MarshalJSON() ([]byte, error) {
-	e := jx.Encoder{}
-	s.Encode(&e)
-	return e.Bytes(), nil
-}
-
-// UnmarshalJSON implements stdjson.Unmarshaler.
-func (s *OptSamplingParams) UnmarshalJSON(data []byte) error {
 	d := jx.DecodeBytes(data)
 	return s.Decode(d)
 }
@@ -3899,86 +3660,6 @@ func (s *Revision) MarshalJSON() ([]byte, error) {
 
 // UnmarshalJSON implements stdjson.Unmarshaler.
 func (s *Revision) UnmarshalJSON(data []byte) error {
-	d := jx.DecodeBytes(data)
-	return s.Decode(d)
-}
-
-// Encode implements json.Marshaler.
-func (s *SamplingParams) Encode(e *jx.Encoder) {
-	e.ObjStart()
-	s.encodeFields(e)
-	e.ObjEnd()
-}
-
-// encodeFields encodes fields.
-func (s *SamplingParams) encodeFields(e *jx.Encoder) {
-	{
-		if s.Temperature.Set {
-			e.FieldStart("temperature")
-			s.Temperature.Encode(e)
-		}
-	}
-	{
-		if s.MaxTokens.Set {
-			e.FieldStart("maxTokens")
-			s.MaxTokens.Encode(e)
-		}
-	}
-}
-
-var jsonFieldsNameOfSamplingParams = [2]string{
-	0: "temperature",
-	1: "maxTokens",
-}
-
-// Decode decodes SamplingParams from json.
-func (s *SamplingParams) Decode(d *jx.Decoder) error {
-	if s == nil {
-		return errors.New("invalid: unable to decode SamplingParams to nil")
-	}
-
-	if err := d.ObjBytes(func(d *jx.Decoder, k []byte) error {
-		switch string(k) {
-		case "temperature":
-			if err := func() error {
-				s.Temperature.Reset()
-				if err := s.Temperature.Decode(d); err != nil {
-					return err
-				}
-				return nil
-			}(); err != nil {
-				return errors.Wrap(err, "decode field \"temperature\"")
-			}
-		case "maxTokens":
-			if err := func() error {
-				s.MaxTokens.Reset()
-				if err := s.MaxTokens.Decode(d); err != nil {
-					return err
-				}
-				return nil
-			}(); err != nil {
-				return errors.Wrap(err, "decode field \"maxTokens\"")
-			}
-		default:
-			return d.Skip()
-		}
-		return nil
-	}); err != nil {
-		return errors.Wrap(err, "decode SamplingParams")
-	}
-
-	return nil
-}
-
-// MarshalJSON implements stdjson.Marshaler.
-func (s *SamplingParams) MarshalJSON() ([]byte, error) {
-	e := jx.Encoder{}
-	s.Encode(&e)
-	return e.Bytes(), nil
-}
-
-// UnmarshalJSON implements stdjson.Unmarshaler.
-func (s *SamplingParams) UnmarshalJSON(data []byte) error {
 	d := jx.DecodeBytes(data)
 	return s.Decode(d)
 }

@@ -115,8 +115,9 @@ see `client/tauri/README.md` for the CORS/ACL details.
 
 ## Functionality
 
-- **Modes** — `editor` · `proofreader` · `grammar` · `drafter` (declarative:
-  prompt + model + tools, `server/config/modes/`).
+- **Presets** — `editor` · `proofreader` · `grammar` · `drafter` (declarative:
+  prompt + model, `server/config/modes/`). All tools are global and one pipeline
+  serves every preset (ADR-0045).
 - **Tools** — `edit_markdown` (block replace), `retrieve`, `read_note`, `diff`
   (`server/config/tools/`).
 - **Versioning** — git-backed document history + per-block AI candidates.
@@ -132,9 +133,9 @@ see `client/tauri/README.md` for the CORS/ACL details.
   (`ENGINE_BIND`, `ENGINE_PORT`, `ENGINE_CORS_ORIGINS`).
 - **Clients are dumb** — all edits and versioning go through the engine; there
   is no shared client/engine code.
-- The **tool router** (`toolCalling: "router"`) is off — `native` tool-calling is
-  the baseline until the deferred fine-tune lands (see
-  [`status.md`](docs/writing-assistant/status.md)).
+- The **tool router** is parked (ADR-0045) — the loop no longer reads
+  `toolCalling`; native tool-calling is the only path until an explicit unpark
+  (see [`status.md`](docs/writing-assistant/status.md)).
 
 ## Developing
 

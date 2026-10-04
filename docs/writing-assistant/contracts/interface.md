@@ -21,8 +21,8 @@ embeds a sibling module's package type.
 | DTO | Used across | Defined in § |
 |---|---|---|
 | `Capabilities` | Fleet (`Model`), Provider (`Target`) | 1, 2 |
-| `SamplingParams` | Provider, Fleet (`Resolution.EffectiveParams`), `Mode` | 1, 2, 8 |
-| `ContextBudget` | `Mode` | 8 |
+| `SamplingParams` | Provider, Fleet (`Resolution.EffectiveParams`) | 1, 2 |
+| `PipelinePolicy` | Pipeline policy, Assembler (`AssemblerInput`), Agent loop | 5, 7, 8c |
 | `Model` | Fleet | 1 |
 | `Target` | Provider | 2 |
 | `Resolution`, `LiveState` | Fleet | 1 |
@@ -124,7 +124,7 @@ type ResolveOpts struct {
 
 type Resolution struct {
     Model            Model           // the RESOLVED (possibly fallback) model
-    EffectiveParams  SamplingParams  // merged: manifest.defaults ← mode.params ← overrides
+    EffectiveParams  SamplingParams  // merged: manifest.defaults ← opts.Overrides
     LiveState        LiveState
     Degraded         bool            // true when a fallback served
     UsedName         string          // actual serving name (== fallback when Degraded)
@@ -143,7 +143,7 @@ type FleetGateway interface {
 ```
 
 Semantics:
-- `Resolve` **merges** `manifest.Defaults` ← `mode.params` ← `opts.Overrides` into
+- `Resolve` **merges** `manifest.Defaults` ← `opts.Overrides` into
   `EffectiveParams`, **enforces capability gates** (context budget vs contextLength,
   thinking-mode support) surfacing typed errors, and **folds in fallback**: when the
   preferred model is `down`/`not-found`, it walks the models sharing `opts.ModeTag`
@@ -308,7 +308,8 @@ type AssemblerInput struct {
     Mode        Mode
     ModelName   string        // the actually-resolved serving model (usedName)
     Params      SamplingParams // merged effective params
-    Tools       []ToolDef     // the mode's allowlisted tools, in splices order
+    Tools       []ToolDef     // all registered tools (global; ADR-0045), in splice order
+    Policy      PipelinePolicy // the one global pipeline policy (budgets; ADR-0045 §3)
     RAGChunks   []Chunk
     History     []Message
     Mentions    []MentionContent // ADR-0036; spliced after history, before user input
@@ -323,7 +324,7 @@ type Request struct {     // the fully-assembled provider request (pure DTO)
     ModelName       string         // the resolved serving model
     Messages        []Message      // system + history + rag + user, in order
     Tools           []ToolDef      // spliced function definitions
-    EffectiveParams SamplingParams // merged defaults ← mode.params ← overrides
+    EffectiveParams SamplingParams // merged defaults ← opts.Overrides
 }
 
 type Payload struct {
@@ -347,8 +348,9 @@ verbatim to `Provider.Chat`/`Stream`, closing the §2 gap.)
 (Amended by ADR-0036: `AssemblerInput` gains `Mentions []MentionContent` and
 `Breakdown` gains `Mentions int` — mention text is spliced after history and
 before the user input, in mention order, each wrapped in a path marker line.
-The `Mentions` budget is `Mode.ContextBudget.MaxMentionTokens`; over-budget
-mentions are truncated from the tail with a labeled overflow line.)
+The `Mentions` budget is `PipelinePolicy.MaxMentionTokens`; over-budget
+mentions are truncated from the tail with a labeled overflow line. ADR-0045
+moved the history/RAG/mention budgets from the mode to `PipelinePolicy`.)
 
 ## 6. Token metering (Go)
 
@@ -417,9 +419,10 @@ type AgentLoop interface {
 ```
 
 `Run` starts the turn asynchronously; events carry `turnID`. The loop is a thin
-orchestrator owning only the turn state machine (bounded by `mode.maxSteps`). It is
-**session-scoped**: it reads `session.History` into the assembler and appends each
-turn's messages back to the session (ADR-0026).
+orchestrator owning only the turn state machine (bounded by the global
+`PipelinePolicy.MaxSteps`, ADR-0045). It is **session-scoped**: it reads
+`session.History` into the assembler and appends each turn's messages back to the
+session (ADR-0026).
 
 (Amended by ADR-0036: `Task` gains `Mentions []Mention`. `Run` resolves every
 mention through `Workspace.Read` **before** the turn state machine starts;
@@ -427,23 +430,19 @@ failures are fail-fast, pre-streaming, typed SSE errors: `mention-not-found`,
 `mention-too-large`, `mention-unreadable`, `too-many-mentions`. Mentions are
 turn-scoped — they are not persisted into session history.)
 
+(Amended by ADR-0045: one fixed pipeline for every preset — all registered tools
+advertised, auto-RAG always runs (`PipelinePolicy.AutoRagTopK`), one agentic loop
+bounded by `PipelinePolicy.MaxSteps`. The single-shot `maxSteps=0` branch and all
+per-mode branches are gone.)
+
 ## 8. Mode registry + Tool registry + Tool executor (Go)
 
 ```go
-type Mode struct {
-    Name          string
-    SystemPrompt  string
-    DefaultModel  string
-    ToolAllowlist []string
-    Params        SamplingParams
-    ContextBudget ContextBudget // { MaxHistoryTokens, MaxRagTokens, MaxMentionTokens int }
-    MaxSteps      int
-    Agentic       bool
-    Kind          string  // "model" | "assistant"
-    Preamble      string
-    ToolCalling   string  // "native" | "router" (default "native")
+type Mode struct { // ADR-0045: a prompt preset
+    Name         string
+    SystemPrompt string
+    DefaultModel string
 }
-type ContextBudget struct{ MaxHistoryTokens, MaxRagTokens, MaxMentionTokens int }
 
 type ModeRegistry interface {
     List() []Mode
@@ -456,10 +455,9 @@ type ToolDef struct {
     Parameters  JSONSchema // prompt-spliced function schema
 }
 
-type ToolRegistry interface {
+type ToolRegistry interface { // ADR-0045: tools are global; no per-mode allowlist
     Register(tool ToolDef) error
     List() []ToolDef
-    AllowlistFor(mode Mode) []ToolDef
 }
 
 type ToolExecutor interface {
@@ -470,10 +468,15 @@ type ToolExecutor interface {
 The tool def↔handler bind is the **`name`** (executor owns the private handler map;
 startup cross-check fails with `tool-has-no-handler`).
 
-## 8b. Tool decider (Go, optional)
+## 8b. Tool decider (Go, optional — parked)
 
-Wired into the loop only when a mode sets `toolCalling: "router"` (ADR-0028). When
-absent, the loop uses native tool-calling. Types live in `shared`/`dto` (ADR-0027).
+**Parked by ADR-0045**: the loop no longer reads `toolCalling` (the field is
+removed), the composition root wires no `ToolDecider`, and the startup gates are
+unwired. The package, types, and tests stay in-tree for a future unpark. The
+contract below is retained as the seam's definition.
+
+When wired (historically, when a mode set `toolCalling: "router"`), the loop used
+the decider; otherwise native tool-calling. Types live in `shared`/`dto` (ADR-0027).
 
 ```go
 type Decision struct {
@@ -527,14 +530,37 @@ recording the ADR-0028 §6/§7 resolution choices:
   (`FinishReason "stop"`). The decider parses that content — the Provider carries
   it untouched, so no shared wire type beyond `Completion.FinishReason` (§2).
 - **Refusal → answering** is realized as: append a "no tool needed" tool-result
-  message for `request_tool`, run **one** more writer round (bounded by
-  `mode.maxSteps` like any dispatch), and treat that round's `stop` stream as the
-  answering phase (state-machine §1.2 `deciding → answering`). No error event.
-  A transport error instead emits `error`/`router-unreachable` first, then the
-  same bounded writer round — no retry loop.
+  message for `request_tool`, run **one** more writer round (bounded by the
+  global `PipelinePolicy.MaxSteps` like any dispatch), and treat that round's
+  `stop` stream as the answering phase (state-machine §1.2 `deciding → answering`).
+  No error event. A transport error instead emits `error`/`router-unreachable`
+  first, then the same bounded writer round — no retry loop.
 - The router call is metered as its own `Meter.Attribute` row
   (`model = "needle-router"`) at dispatch time, whether the outcome is confident
   or a refusal (ADR-0028 §5).)
+
+## 8c. Pipeline policy (Go)
+
+The one global turn policy (ADR-0045 §3), loaded from the embedded
+`config/pipeline.json`, schema-validated fail-fast at startup with the typed
+error `pipeline-invalid` (failure-semantics §2).
+
+```go
+type PipelinePolicy struct {
+    MaxSteps         int // global dispatch/observe bound (≥ 1)
+    MaxHistoryTokens int // assembler history budget (0 drops all)
+    MaxRagTokens     int // assembler auto-RAG budget (0 drops all)
+    MaxMentionTokens int // assembler mention budget (0 truncates all, labeled)
+    AutoRagTopK      int // auto-RAG retrieval depth, every turn (≥ 1)
+}
+
+type PipelinePolicyRegistry interface {
+    Policy() PipelinePolicy
+}
+```
+
+The loop holds the registry, passes `Policy()` into `AssemblerInput`, and bounds
+its one agentic loop with `MaxSteps`; there is no per-mode policy (ADR-0045).
 
 ## 9. Document store (Go)
 

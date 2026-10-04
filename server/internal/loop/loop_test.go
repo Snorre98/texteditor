@@ -3,12 +3,10 @@ package loop
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"sync"
 	"testing"
 	"time"
 
-	"texteditor/internal/provider"
 	"texteditor/internal/workspace"
 	"texteditor/shared/dto"
 )
@@ -34,9 +32,8 @@ func (s stubMode) Get(name string) (dto.Mode, error) {
 
 type stubTools struct{ defs []dto.ToolDef }
 
-func (s stubTools) Register(dto.ToolDef) error          { return nil }
-func (s stubTools) List() []dto.ToolDef                 { return s.defs }
-func (s stubTools) AllowlistFor(dto.Mode) []dto.ToolDef { return s.defs }
+func (s stubTools) Register(dto.ToolDef) error { return nil }
+func (s stubTools) List() []dto.ToolDef        { return s.defs }
 
 type stubExecutor struct{}
 
@@ -106,10 +103,30 @@ func (stubDoc) Diff(string, string, string) ([]dto.WordEdit, error) { return nil
 func (stubDoc) History(string) ([]dto.Revision, error)              { return nil, nil }
 func (stubDoc) Candidates(string, string) ([]dto.Candidate, error)  { return nil, nil }
 
-type stubRetriever struct{ chunks []dto.Chunk }
+type stubRetriever struct {
+	mu     sync.Mutex
+	chunks []dto.Chunk
+	calls  []int // topK per Query
+}
 
-func (s stubRetriever) Query(context.Context, string, int) ([]dto.Chunk, error) { return s.chunks, nil }
-func (stubRetriever) Index(context.Context, string) error                       { return nil }
+func (s *stubRetriever) Query(_ context.Context, _ string, topK int) ([]dto.Chunk, error) {
+	s.mu.Lock()
+	s.calls = append(s.calls, topK)
+	s.mu.Unlock()
+	return s.chunks, nil
+}
+func (*stubRetriever) Index(context.Context, string) error { return nil }
+
+func (s *stubRetriever) queries() []int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]int(nil), s.calls...)
+}
+
+// stubPipeline supplies the one global policy (ADR-0045 §3) to the loop.
+type stubPipeline struct{ policy dto.PipelinePolicy }
+
+func (s stubPipeline) Policy() dto.PipelinePolicy { return s.policy }
 
 type stubSessions struct{ hist []dto.Message }
 
@@ -198,10 +215,17 @@ func happyPathDeps(bus *stubBus) Deps {
 			UsedName:        "gemma4-12b",
 		}},
 		Doc:       stubDoc{},
-		Retriever: stubRetriever{},
+		Retriever: &stubRetriever{},
 		Sessions:  stubSessions{},
 		Meter:     &stubMeter{},
 		Bus:       bus,
+		Pipeline: stubPipeline{policy: dto.PipelinePolicy{
+			MaxSteps:         6,
+			MaxHistoryTokens: 32000,
+			MaxRagTokens:     16000,
+			MaxMentionTokens: 16000,
+			AutoRagTopK:      3,
+		}},
 	}
 }
 
@@ -284,7 +308,7 @@ func TestAgenticToolDispatch(t *testing.T) {
 
 	deps := happyPathDeps(bus)
 	deps.Modes = stubMode{modes: map[string]dto.Mode{
-		"editor": {Name: "editor", DefaultModel: "gemma4-12b", Agentic: true, MaxSteps: 4},
+		"editor": {Name: "editor", DefaultModel: "gemma4-12b"},
 	}}
 	deps.Executor = exec
 	deps.Provider = provider
@@ -351,7 +375,7 @@ func TestAgenticRetrieveEmitsRag(t *testing.T) {
 
 	deps := happyPathDeps(bus)
 	deps.Modes = stubMode{modes: map[string]dto.Mode{
-		"drafter": {Name: "drafter", DefaultModel: "mistral-24b", Agentic: true, MaxSteps: 4},
+		"drafter": {Name: "drafter", DefaultModel: "mistral-24b"},
 	}}
 	deps.Executor = exec
 	deps.Provider = provider
@@ -452,56 +476,29 @@ func (b budgetMeter) Attribute(context.Context, string, string, string, dto.Brea
 }
 func (b budgetMeter) SessionUsage(context.Context, string) (int, error) { return b.used, nil }
 
-// --------------------- router-mode stubs (ADR-0028) ---------------------
+// --------------------- one pipeline, every preset (ADR-0045) ---------------------
 
-// stubDecider implements the loop's sealed Decider subset (interface.md §8b).
-type stubDecider struct {
-	mu       sync.Mutex
-	calls    int
-	intents  []string
-	decision dto.Decision
-	err      error
-}
+// shippedPresets mirrors the four data presets in server/config/modes/.
+var shippedPresets = []string{"drafter", "editor", "grammar", "proofreader"}
 
-func (s *stubDecider) SignalTool() dto.ToolDef {
-	return dto.ToolDef{
-		Name:        "request_tool",
-		Description: "Request an external action.",
-		Parameters:  json.RawMessage(`{"type":"object","properties":{"intent":{"type":"string"}},"required":["intent"]}`),
+// presetDeps returns loop deps with all four shipped presets and all four
+// registered tools.
+func presetDeps(bus *stubBus) (Deps, []dto.ToolDef) {
+	modes := map[string]dto.Mode{}
+	for _, name := range shippedPresets {
+		modes[name] = dto.Mode{Name: name, SystemPrompt: "preset " + name, DefaultModel: "gemma4-12b"}
 	}
-}
-
-func (s *stubDecider) Decide(_ context.Context, intent string, _ dto.RouterContext) (dto.RouterResult, error) {
-	s.mu.Lock()
-	s.calls++
-	s.intents = append(s.intents, intent)
-	s.mu.Unlock()
-	if s.err != nil {
-		return dto.RouterResult{}, s.err
+	defs := []dto.ToolDef{
+		{Name: "diff", Description: "d", Parameters: json.RawMessage(`{"type":"object"}`)},
+		{Name: "edit_markdown", Description: "e", Parameters: json.RawMessage(`{"type":"object"}`)},
+		{Name: "read_note", Description: "r", Parameters: json.RawMessage(`{"type":"object"}`)},
+		{Name: "retrieve", Description: "q", Parameters: json.RawMessage(`{"type":"object"}`)},
 	}
-	return dto.RouterResult{
-		Decision: s.decision,
-		Usage: dto.RouterUsage{
-			Breakdown: dto.Breakdown{SystemPrompt: 40, User: 5},
-			Counts:    dto.ProviderCounts{InputTokens: 45, OutputTokens: 10},
-		},
-	}, nil
+	deps := happyPathDeps(bus)
+	deps.Modes = stubMode{modes: modes}
+	deps.Tools = stubTools{defs: defs}
+	return deps, defs
 }
-
-// recordingMeter records the model name of every Attribute call (the router row
-// must be tagged needle-router, ADR-0028 §5).
-type recordingMeter struct {
-	mu   sync.Mutex
-	rows []string
-}
-
-func (r *recordingMeter) Attribute(_ context.Context, _, _, model string, _ dto.Breakdown, _ dto.ProviderCounts) (dto.AttributedBreakdown, error) {
-	r.mu.Lock()
-	r.rows = append(r.rows, model)
-	r.mu.Unlock()
-	return dto.AttributedBreakdown{}, nil
-}
-func (r *recordingMeter) SessionUsage(context.Context, string) (int, error) { return 0, nil }
 
 // reqProvider records every dto.Request it streams, so tests can assert the
 // spliced tool set.
@@ -522,291 +519,163 @@ func (s *reqProvider) Stream(ctx context.Context, t dto.Target, r dto.Request, e
 }
 func (*reqProvider) Embed(context.Context, dto.Target, string) ([]float32, error) { return nil, nil }
 
-// requestToolRound + answerRound are the writer's two router-mode rounds.
-func requestToolRound(emit func(dto.RawEvent)) {
-	emit(dto.RawEvent{Type: "tool_call", Data: json.RawMessage(`{"id":"c1","name":"request_tool","arguments":"{\"intent\":\"rewrite block b9\"}"}`)})
-	emit(dto.RawEvent{Type: "finish", Data: json.RawMessage(`{"reason":"tool_calls"}`)})
-}
-
-func answerRound(emit func(dto.RawEvent)) {
-	emit(dto.RawEvent{Type: "token", Data: json.RawMessage(`{"text":"answered"}`)})
-	emit(dto.RawEvent{Type: "finish", Data: json.RawMessage(`{"reason":"stop"}`)})
-	emit(dto.RawEvent{Type: "done", Data: json.RawMessage(`{"inputTokens":14,"outputTokens":5}`)})
-}
-
-func routerDeps(bus *stubBus, decider Decider, prov provider.Interface) Deps {
-	deps := happyPathDeps(bus)
-	deps.Modes = stubMode{modes: map[string]dto.Mode{
-		"editor": {Name: "editor", DefaultModel: "gemma4-12b", Agentic: true, MaxSteps: 4, ToolCalling: "router"},
-	}}
-	deps.Decider = decider
-	deps.Provider = prov
-	return deps
-}
-
-// --------------------- router-mode tests (tool-routing.feature) ---------------------
-
-// TestRouterConfidentDispatch: the writer emits request_tool; Decide returns a
-// confident Decision; the loop invokes the resolved tool and meters the router
-// call as its own needle-router row (ADR-0028 §5, D4).
-func TestRouterConfidentDispatch(t *testing.T) {
-	bus := &stubBus{done: make(chan struct{})}
-	decider := &stubDecider{decision: dto.Decision{
-		Name:       "edit_markdown",
-		Args:       json.RawMessage(`{"blockId":"b9","text":"new"}`),
-		Confidence: 0.9,
-	}}
-	exec := &recordingExecutor{result: json.RawMessage(`{"ok":true,"blockId":"b9","diff":{"ok":true}}`)}
-	meter := &recordingMeter{}
-
+// editThenAnswerProvider emits an edit_markdown tool call in round 1 and a
+// terminal stop round in round 2.
+func editThenAnswerProvider() *reqProvider {
 	round := 0
-	prov := &reqProvider{stream: func(ctx context.Context, req dto.Request, emit func(dto.RawEvent)) error {
+	return &reqProvider{stream: func(ctx context.Context, req dto.Request, emit func(dto.RawEvent)) error {
 		round++
 		if round == 1 {
-			requestToolRound(emit)
+			emit(dto.RawEvent{Type: "tool_call", Data: json.RawMessage(`{"id":"c1","name":"edit_markdown","arguments":"{\"blockId\":\"b1\",\"text\":\"new\"}"}`)})
+			emit(dto.RawEvent{Type: "finish", Data: json.RawMessage(`{"reason":"tool_calls"}`)})
 		} else {
-			answerRound(emit)
+			emit(dto.RawEvent{Type: "token", Data: json.RawMessage(`{"text":"done"}`)})
+			emit(dto.RawEvent{Type: "finish", Data: json.RawMessage(`{"reason":"stop"}`)})
+			emit(dto.RawEvent{Type: "done", Data: json.RawMessage(`{"inputTokens":14,"outputTokens":5}`)})
 		}
 		return nil
 	}}
+}
 
-	deps := routerDeps(bus, decider, prov)
+// TestEveryPresetRunsEditTurn is the ADR-0045 gate: every preset shares the one
+// pipeline, every registered tool is advertised (never request_tool), and an
+// edit_markdown tool call stages a candidate — the drafter trap is gone.
+func TestEveryPresetRunsEditTurn(t *testing.T) {
+	for _, preset := range shippedPresets {
+		t.Run(preset, func(t *testing.T) {
+			bus := &stubBus{done: make(chan struct{})}
+			deps, defs := presetDeps(bus)
+			exec := &recordingExecutor{result: json.RawMessage(`{"ok":true,"blockId":"b1","diff":{"ok":true}}`)}
+			prov := editThenAnswerProvider()
+			deps.Executor = exec
+			deps.Provider = prov
+
+			l := New(deps)
+			if _, err := l.Run(context.Background(), dto.Task{
+				SessionID: "s1", ModeName: preset, DocumentID: "d1", UserInput: "rewrite this",
+			}); err != nil {
+				t.Fatal(err)
+			}
+			waitDone(t, bus)
+
+			exec.mu.Lock()
+			calls := append([]string(nil), exec.calls...)
+			exec.mu.Unlock()
+			if len(calls) != 1 || calls[0] != "edit_markdown" {
+				t.Fatalf("executor calls = %v, want [edit_markdown]", calls)
+			}
+
+			events := busEvents(t, bus)
+			if !hasEvent(events, "candidate") || !hasEvent(events, "done") {
+				t.Fatalf("want candidate + done, got %+v", events)
+			}
+
+			prov.mu.Lock()
+			reqs := append([]dto.Request(nil), prov.reqs...)
+			prov.mu.Unlock()
+			if len(reqs) == 0 {
+				t.Fatal("provider never called")
+			}
+			for _, req := range reqs {
+				if len(req.Tools) != len(defs) {
+					t.Fatalf("tools advertised = %d, want all %d", len(req.Tools), len(defs))
+				}
+				for _, td := range req.Tools {
+					if td.Name == "request_tool" {
+						t.Fatalf("request_tool advertised in a payload: %+v", req.Tools)
+					}
+				}
+			}
+		})
+	}
+}
+
+// TestAutoRagRunsForEveryPreset: retrieval always runs with the policy's top-k,
+// regardless of preset, and the chunks reach the assembler.
+func TestAutoRagRunsForEveryPreset(t *testing.T) {
+	for _, preset := range shippedPresets {
+		t.Run(preset, func(t *testing.T) {
+			bus := &stubBus{done: make(chan struct{})}
+			deps, _ := presetDeps(bus)
+			ret := &stubRetriever{chunks: []dto.Chunk{{BlockID: "b9", Text: "retrieved"}}}
+			asm := &recordingAssembler{}
+			deps.Retriever = ret
+			deps.Assembler = asm
+
+			l := New(deps)
+			if _, err := l.Run(context.Background(), dto.Task{
+				SessionID: "s1", ModeName: preset, DocumentID: "d1", UserInput: "hi",
+			}); err != nil {
+				t.Fatal(err)
+			}
+			waitDone(t, bus)
+
+			calls := ret.queries()
+			if len(calls) != 1 || calls[0] != 3 {
+				t.Fatalf("retriever calls = %v, want one Query with the policy top-k 3", calls)
+			}
+			asm.mu.Lock()
+			rag := append([]dto.Chunk(nil), asm.rag...)
+			asm.mu.Unlock()
+			if len(rag) != 1 || rag[0].Text != "retrieved" {
+				t.Fatalf("assembler RAG chunks = %+v, want the retrieved chunk", rag)
+			}
+		})
+	}
+}
+
+// TestGlobalMaxStepsCap: the global policy bounds the dispatch/observe cycle
+// for every preset (a mode has no step field to diverge).
+func TestGlobalMaxStepsCap(t *testing.T) {
+	bus := &stubBus{done: make(chan struct{})}
+	deps := happyPathDeps(bus)
+	deps.Pipeline = stubPipeline{policy: dto.PipelinePolicy{
+		MaxSteps: 2, MaxHistoryTokens: 1, MaxRagTokens: 1, MaxMentionTokens: 1, AutoRagTopK: 1,
+	}}
+	exec := &recordingExecutor{result: json.RawMessage(`{"ok":true}`)}
+	rounds := 0
+	prov := &reqProvider{stream: func(ctx context.Context, req dto.Request, emit func(dto.RawEvent)) error {
+		rounds++
+		emit(dto.RawEvent{Type: "tool_call", Data: json.RawMessage(`{"id":"c1","name":"retrieve","arguments":"{}"}`)})
+		emit(dto.RawEvent{Type: "finish", Data: json.RawMessage(`{"reason":"tool_calls"}`)})
+		return nil
+	}}
 	deps.Executor = exec
-	deps.Meter = meter
-	l := New(deps)
+	deps.Provider = prov
 
-	_, err := l.Run(context.Background(), dto.Task{
-		SessionID: "s1", ModeName: "editor", DocumentID: "d1", UserInput: "rewrite it",
-	})
-	if err != nil {
+	l := New(deps)
+	if _, err := l.Run(context.Background(), dto.Task{
+		SessionID: "s1", ModeName: "proofreader", DocumentID: "d1", UserInput: "loop",
+	}); err != nil {
 		t.Fatal(err)
 	}
 	waitDone(t, bus)
 
 	exec.mu.Lock()
-	calls := append([]string(nil), exec.calls...)
+	n := len(exec.calls)
 	exec.mu.Unlock()
-	if len(calls) != 1 || calls[0] != "edit_markdown" {
-		t.Fatalf("executor calls = %v, want [edit_markdown] (the resolved tool)", calls)
+	if n != 2 {
+		t.Fatalf("executor calls = %d, want the global cap 2", n)
 	}
-
-	decider.mu.Lock()
-	gotIntent := append([]string(nil), decider.intents...)
-	decider.mu.Unlock()
-	if len(gotIntent) != 1 || gotIntent[0] != "rewrite block b9" {
-		t.Fatalf("intents = %v, want [rewrite block b9]", gotIntent)
-	}
-
-	meter.mu.Lock()
-	rows := append([]string(nil), meter.rows...)
-	meter.mu.Unlock()
-	if len(rows) != 2 || rows[0] != "needle-router" || rows[1] != "gemma4-12b" {
-		t.Fatalf("meter rows = %v, want [needle-router gemma4-12b] (router row + writer row)", rows)
-	}
-
-	events := busEvents(t, bus)
-	if !hasEvent(events, "candidate") || !hasEvent(events, "done") {
-		t.Fatalf("want candidate + done, got %+v", events)
-	}
-}
-
-// TestRouterRefusalAnswers: a refused/empty Decide (zero Decision) appends a
-// "no tool" result and drives one more writer round whose stream is the
-// answering phase — no error event, done still lands (state-machine §1.2).
-func TestRouterRefusalAnswers(t *testing.T) {
-	bus := &stubBus{done: make(chan struct{})}
-	decider := &stubDecider{decision: dto.Decision{}} // refusal
-	meter := &recordingMeter{}
-
-	round := 0
-	prov := &reqProvider{stream: func(ctx context.Context, req dto.Request, emit func(dto.RawEvent)) error {
-		round++
-		if round == 1 {
-			requestToolRound(emit)
-		} else {
-			answerRound(emit)
-		}
-		return nil
-	}}
-
-	deps := routerDeps(bus, decider, prov)
-	deps.Meter = meter
-	l := New(deps)
-
-	_, err := l.Run(context.Background(), dto.Task{
-		SessionID: "s1", ModeName: "editor", DocumentID: "d1", UserInput: "rewrite it",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	waitDone(t, bus)
-
-	events := busEvents(t, bus)
-	if !hasEvent(events, "done") {
-		t.Fatalf("want done, got %+v", events)
-	}
-	for _, ev := range events {
-		if ev.Type == "error" {
-			t.Fatalf("refusal must emit no error event, got %+v", events)
-		}
-	}
-	meter.mu.Lock()
-	defer meter.mu.Unlock()
-	if len(meter.rows) != 2 || meter.rows[0] != "needle-router" {
-		t.Fatalf("meter rows = %v, want a needle-router row even on refusal", meter.rows)
-	}
-}
-
-// TestRouterDecideErrorDegrades: a Decide transport error emits a labeled
-// router-unreachable event, then the same bounded writer round answers — no
-// retry loop (failure-semantics §3).
-func TestRouterDecideErrorDegrades(t *testing.T) {
-	bus := &stubBus{done: make(chan struct{})}
-	decider := &stubDecider{err: errors.New("needle down mid-turn")}
-
-	round := 0
-	prov := &reqProvider{stream: func(ctx context.Context, req dto.Request, emit func(dto.RawEvent)) error {
-		round++
-		if round == 1 {
-			requestToolRound(emit)
-		} else {
-			answerRound(emit)
-		}
-		return nil
-	}}
-
-	deps := routerDeps(bus, decider, prov)
-	l := New(deps)
-
-	_, err := l.Run(context.Background(), dto.Task{
-		SessionID: "s1", ModeName: "editor", DocumentID: "d1", UserInput: "rewrite it",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	waitDone(t, bus)
-
-	events := busEvents(t, bus)
-	var sawRouterErr bool
-	for _, ev := range events {
-		if ev.Type == "error" {
-			var v struct {
-				Code string `json:"code"`
-			}
-			_ = json.Unmarshal(ev.Data, &v)
-			if v.Code == "router-unreachable" {
-				sawRouterErr = true
-			}
-		}
-	}
-	if !sawRouterErr || !hasEvent(events, "done") {
-		t.Fatalf("want router-unreachable error + graceful done, got %+v", events)
-	}
-}
-
-// TestRouterSplicesRequestTool: in router mode the writer's payload carries
-// exactly the single synthetic request_tool, never the mode allowlist.
-func TestRouterSplicesRequestTool(t *testing.T) {
-	bus := &stubBus{done: make(chan struct{})}
-	decider := &stubDecider{decision: dto.Decision{}} // refusal; tools still asserted
-
-	round := 0
-	prov := &reqProvider{stream: func(ctx context.Context, req dto.Request, emit func(dto.RawEvent)) error {
-		round++
-		if round == 1 {
-			requestToolRound(emit)
-		} else {
-			answerRound(emit)
-		}
-		return nil
-	}}
-
-	deps := routerDeps(bus, decider, prov)
-	deps.Tools = stubTools{defs: []dto.ToolDef{
-		{Name: "edit_markdown"}, {Name: "retrieve"}, {Name: "diff"},
-	}}
-	l := New(deps)
-
-	_, err := l.Run(context.Background(), dto.Task{
-		SessionID: "s1", ModeName: "editor", DocumentID: "d1", UserInput: "hi",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	waitDone(t, bus)
-
-	prov.mu.Lock()
-	defer prov.mu.Unlock()
-	if len(prov.reqs) == 0 {
-		t.Fatal("provider never called")
-	}
-	tools := prov.reqs[0].Tools
-	if len(tools) != 1 || tools[0].Name != "request_tool" {
-		t.Fatalf("tools = %+v, want exactly [request_tool]", tools)
-	}
-}
-
-// TestNativeNeverConsultsDecider: a wired decider is invisible to native modes
-// (the byte-identical baseline, ADR-0028 §3).
-func TestNativeNeverConsultsDecider(t *testing.T) {
-	bus := &stubBus{done: make(chan struct{})}
-	decider := &stubDecider{decision: dto.Decision{Name: "retrieve"}}
-
-	deps := happyPathDeps(bus)
-	deps.Decider = decider
-	l := New(deps)
-
-	_, err := l.Run(context.Background(), dto.Task{
-		SessionID: "s1", ModeName: "proofreader", DocumentID: "d1", UserInput: "fix",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	waitDone(t, bus)
-
-	decider.mu.Lock()
-	defer decider.mu.Unlock()
-	if decider.calls != 0 {
-		t.Fatalf("decider consulted %d times in native mode, want 0", decider.calls)
-	}
-}
-
-// TestRouterUnwiredEmitsError: a router mode with no wired decider (a
-// composition-root bug the startup gates prevent) surfaces an error event
-// instead of half-running.
-func TestRouterUnwiredEmitsError(t *testing.T) {
-	bus := &stubBus{done: make(chan struct{})}
-	deps := routerDeps(bus, nil, stubProvider{stream: func(ctx context.Context, emit func(dto.RawEvent)) error {
-		return nil
-	}})
-	l := New(deps)
-
-	_, err := l.Run(context.Background(), dto.Task{
-		SessionID: "s1", ModeName: "editor", DocumentID: "d1", UserInput: "hi",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	waitDone(t, bus)
-
-	events := busEvents(t, bus)
-	if len(events) == 0 || events[0].Type != "error" {
-		t.Fatalf("want an error event, got %+v", events)
+	if rounds != 3 {
+		t.Fatalf("provider rounds = %d, want cap+1 = 3", rounds)
 	}
 }
 
 // --------------------- mention resolution (ADR-0036 §2) ---------------------
 
-// recordingAssembler captures the MentionContent handed to it, asserting the
-// loop resolves mentions through Workspace and passes them to the assembler.
+// recordingAssembler captures the MentionContent and RAG chunks handed to it,
+// asserting the loop resolves mentions through Workspace and always retrieves.
 type recordingAssembler struct {
 	mu       sync.Mutex
 	mentions []dto.MentionContent
+	rag      []dto.Chunk
 }
 
 func (r *recordingAssembler) Assemble(_ context.Context, in dto.AssemblerInput) (dto.Payload, dto.Breakdown, error) {
 	r.mu.Lock()
 	r.mentions = append([]dto.MentionContent(nil), in.Mentions...)
+	r.rag = append([]dto.Chunk(nil), in.RAGChunks...)
 	r.mu.Unlock()
 	return dto.Payload{Request: dto.Request{ModelName: "gemma4-12b"}}, dto.Breakdown{SystemPrompt: 10, User: 4}, nil
 }

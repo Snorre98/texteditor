@@ -70,7 +70,7 @@ prose contracts, verified through the boundary tests — there is no Gherkin
 runner, and no CI yet (see `docs/writing-assistant/status.md`).
 
 Manual live-model smoke (ADR-0047 write-through; excluded from `go test` — it
-needs a running engine + control daemon + a live model serving `proofreader`):
+needs a running engine + control daemon + a live model tagged `editor`):
 
 ```sh
 tools/smoke-write-through.sh   # ENGINE_URL defaults to http://127.0.0.1:9100

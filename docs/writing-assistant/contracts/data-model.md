@@ -179,24 +179,22 @@ every runner must use the **Metal** GPU backend (ADR-0030).
 
 ## 3. Mode & tool definitions (data files, engine repo)
 
-Source ADR-0019. Live at `config/modes/*.json` and `config/tools/*.json` in the
-engine repo, versioned + `go:embed`'d, validated at startup.
+Source ADR-0019 as amended by ADR-0045. Live at `config/modes/*.json` and
+`config/tools/*.json` in the engine repo, versioned + `go:embed`'d, validated at
+startup. The pipeline policy lives in `config/pipeline.json` (§3.3).
 
-### 3.1 Mode
+### 3.1 Mode (prompt preset)
+
+Since ADR-0045 a mode is exactly three fields; the behavioral fields
+(`toolAllowlist`, `params`, `contextBudget`, `maxSteps`, `agentic`, `kind`,
+`preamble`, `toolCalling`) are removed from the schema and the shipped files, and
+a stale file carrying one fails startup with `schema-invalid`.
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
 | `name` | string | yes | unique; also the fallback `modeTag` |
 | `systemPrompt` | string | yes | fixed cost per turn |
 | `defaultModel` | string | yes | must resolve via the manifest |
-| `toolAllowlist` | string[] | no | subset of registered tool names |
-| `params` | object | no | `temperature`, `maxTokens` |
-| `contextBudget` | object | no | `maxHistoryTokens`, `maxRagTokens`, `maxMentionTokens` (ADR-0036) |
-| `maxSteps` | integer | no | per-mode dispatch/observe bound |
-| `agentic` | boolean | no | multi-turn tool loop vs single-shot pass |
-| `kind` | string | no | `model` \| `assistant` (reserved) |
-| `preamble` | string | no | spliced before `systemPrompt` |
-| `toolCalling` | string | no | `native` \| `router` (default `native`) |
 
 ### 3.2 Tool
 
@@ -206,9 +204,27 @@ engine repo, versioned + `go:embed`'d, validated at startup.
 | `description` | string | yes | goes into the prompt |
 | `parameters` | JSON Schema | yes | the prompt-spliced function schema |
 
+Tools are global (ADR-0045): every registered tool is advertised on every turn;
+no mode restricts them.
+
+### 3.3 Pipeline policy
+
+Source ADR-0045 §3. Live at `config/pipeline.json` (embedded, schema-validated at
+startup). One policy for every preset.
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `maxSteps` | integer ≥ 1 | yes | global dispatch/observe bound |
+| `maxHistoryTokens` | integer ≥ 0 | yes | history budget; 0 drops all |
+| `maxRagTokens` | integer ≥ 0 | yes | auto-RAG budget; 0 drops all |
+| `maxMentionTokens` | integer ≥ 0 | yes | mention budget; 0 truncates all (labeled) |
+| `autoRagTopK` | integer ≥ 1 | yes | auto-RAG retrieval depth, every turn |
+
 Startup validation failures (typed errors): `mode-refs-unknown-model`,
-`mode-unreachable-no-tag`, `mode-refs-unknown-tool`, `tool-has-no-handler`,
-`schema-invalid` (ADR-0019).
+`mode-unreachable-no-tag`, `tool-has-no-handler`, `schema-invalid` (ADR-0019),
+and `pipeline-invalid` (ADR-0045). The mode-level `mode-refs-unknown-tool` gate
+is gone with the tool field; the tool registry's `tool-has-no-handler` gate
+remains.
 
 ## 4. Invariants (cross-store)
 

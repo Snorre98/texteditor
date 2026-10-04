@@ -1219,16 +1219,9 @@ func (s *MessageRole) UnmarshalText(data []byte) error {
 
 // Ref: #/components/schemas/Mode
 type Mode struct {
-	Name          string             `json:"name"`
-	SystemPrompt  OptString          `json:"systemPrompt"`
-	DefaultModel  OptString          `json:"defaultModel"`
-	ToolAllowlist []string           `json:"toolAllowlist"`
-	Params        OptSamplingParams  `json:"params"`
-	MaxSteps      OptInt             `json:"maxSteps"`
-	Agentic       OptBool            `json:"agentic"`
-	Kind          OptString          `json:"kind"`
-	Preamble      OptString          `json:"preamble"`
-	ToolCalling   OptModeToolCalling `json:"toolCalling"`
+	Name         string `json:"name"`
+	SystemPrompt string `json:"systemPrompt"`
+	DefaultModel string `json:"defaultModel"`
 }
 
 // GetName returns the value of Name.
@@ -1237,48 +1230,13 @@ func (s *Mode) GetName() string {
 }
 
 // GetSystemPrompt returns the value of SystemPrompt.
-func (s *Mode) GetSystemPrompt() OptString {
+func (s *Mode) GetSystemPrompt() string {
 	return s.SystemPrompt
 }
 
 // GetDefaultModel returns the value of DefaultModel.
-func (s *Mode) GetDefaultModel() OptString {
+func (s *Mode) GetDefaultModel() string {
 	return s.DefaultModel
-}
-
-// GetToolAllowlist returns the value of ToolAllowlist.
-func (s *Mode) GetToolAllowlist() []string {
-	return s.ToolAllowlist
-}
-
-// GetParams returns the value of Params.
-func (s *Mode) GetParams() OptSamplingParams {
-	return s.Params
-}
-
-// GetMaxSteps returns the value of MaxSteps.
-func (s *Mode) GetMaxSteps() OptInt {
-	return s.MaxSteps
-}
-
-// GetAgentic returns the value of Agentic.
-func (s *Mode) GetAgentic() OptBool {
-	return s.Agentic
-}
-
-// GetKind returns the value of Kind.
-func (s *Mode) GetKind() OptString {
-	return s.Kind
-}
-
-// GetPreamble returns the value of Preamble.
-func (s *Mode) GetPreamble() OptString {
-	return s.Preamble
-}
-
-// GetToolCalling returns the value of ToolCalling.
-func (s *Mode) GetToolCalling() OptModeToolCalling {
-	return s.ToolCalling
 }
 
 // SetName sets the value of Name.
@@ -1287,89 +1245,13 @@ func (s *Mode) SetName(val string) {
 }
 
 // SetSystemPrompt sets the value of SystemPrompt.
-func (s *Mode) SetSystemPrompt(val OptString) {
+func (s *Mode) SetSystemPrompt(val string) {
 	s.SystemPrompt = val
 }
 
 // SetDefaultModel sets the value of DefaultModel.
-func (s *Mode) SetDefaultModel(val OptString) {
+func (s *Mode) SetDefaultModel(val string) {
 	s.DefaultModel = val
-}
-
-// SetToolAllowlist sets the value of ToolAllowlist.
-func (s *Mode) SetToolAllowlist(val []string) {
-	s.ToolAllowlist = val
-}
-
-// SetParams sets the value of Params.
-func (s *Mode) SetParams(val OptSamplingParams) {
-	s.Params = val
-}
-
-// SetMaxSteps sets the value of MaxSteps.
-func (s *Mode) SetMaxSteps(val OptInt) {
-	s.MaxSteps = val
-}
-
-// SetAgentic sets the value of Agentic.
-func (s *Mode) SetAgentic(val OptBool) {
-	s.Agentic = val
-}
-
-// SetKind sets the value of Kind.
-func (s *Mode) SetKind(val OptString) {
-	s.Kind = val
-}
-
-// SetPreamble sets the value of Preamble.
-func (s *Mode) SetPreamble(val OptString) {
-	s.Preamble = val
-}
-
-// SetToolCalling sets the value of ToolCalling.
-func (s *Mode) SetToolCalling(val OptModeToolCalling) {
-	s.ToolCalling = val
-}
-
-type ModeToolCalling string
-
-const (
-	ModeToolCallingNative ModeToolCalling = "native"
-	ModeToolCallingRouter ModeToolCalling = "router"
-)
-
-// AllValues returns all ModeToolCalling values.
-func (ModeToolCalling) AllValues() []ModeToolCalling {
-	return []ModeToolCalling{
-		ModeToolCallingNative,
-		ModeToolCallingRouter,
-	}
-}
-
-// MarshalText implements encoding.TextMarshaler.
-func (s ModeToolCalling) MarshalText() ([]byte, error) {
-	switch s {
-	case ModeToolCallingNative:
-		return []byte(s), nil
-	case ModeToolCallingRouter:
-		return []byte(s), nil
-	default:
-		return nil, errors.Errorf("invalid value: %q", s)
-	}
-}
-
-// UnmarshalText implements encoding.TextUnmarshaler.
-func (s *ModeToolCalling) UnmarshalText(data []byte) error {
-	switch ModeToolCalling(data) {
-	case ModeToolCallingNative:
-		*s = ModeToolCallingNative
-		return nil
-	case ModeToolCallingRouter:
-		*s = ModeToolCallingRouter
-		return nil
-	default:
-		return errors.Errorf("invalid value: %q", data)
-	}
 }
 
 // Ref: #/components/schemas/Model
@@ -1791,52 +1673,6 @@ func (o OptInt64) Or(d int64) int64 {
 	return d
 }
 
-// NewOptModeToolCalling returns new OptModeToolCalling with value set to v.
-func NewOptModeToolCalling(v ModeToolCalling) OptModeToolCalling {
-	return OptModeToolCalling{
-		Value: v,
-		Set:   true,
-	}
-}
-
-// OptModeToolCalling is optional ModeToolCalling.
-type OptModeToolCalling struct {
-	Value ModeToolCalling
-	Set   bool
-}
-
-// IsSet returns true if OptModeToolCalling was set.
-func (o OptModeToolCalling) IsSet() bool { return o.Set }
-
-// Reset unsets value.
-func (o *OptModeToolCalling) Reset() {
-	var v ModeToolCalling
-	o.Value = v
-	o.Set = false
-}
-
-// SetTo sets value to v.
-func (o *OptModeToolCalling) SetTo(v ModeToolCalling) {
-	o.Set = true
-	o.Value = v
-}
-
-// Get returns value and boolean that denotes whether value was set.
-func (o OptModeToolCalling) Get() (v ModeToolCalling, ok bool) {
-	if !o.Set {
-		return v, false
-	}
-	return o.Value, true
-}
-
-// Or returns value if set, or given parameter if does not.
-func (o OptModeToolCalling) Or(d ModeToolCalling) ModeToolCalling {
-	if v, ok := o.Get(); ok {
-		return v
-	}
-	return d
-}
-
 // NewOptModelLiveState returns new OptModelLiveState with value set to v.
 func NewOptModelLiveState(v ModelLiveState) OptModelLiveState {
 	return OptModelLiveState{
@@ -1877,52 +1713,6 @@ func (o OptModelLiveState) Get() (v ModelLiveState, ok bool) {
 
 // Or returns value if set, or given parameter if does not.
 func (o OptModelLiveState) Or(d ModelLiveState) ModelLiveState {
-	if v, ok := o.Get(); ok {
-		return v
-	}
-	return d
-}
-
-// NewOptSamplingParams returns new OptSamplingParams with value set to v.
-func NewOptSamplingParams(v SamplingParams) OptSamplingParams {
-	return OptSamplingParams{
-		Value: v,
-		Set:   true,
-	}
-}
-
-// OptSamplingParams is optional SamplingParams.
-type OptSamplingParams struct {
-	Value SamplingParams
-	Set   bool
-}
-
-// IsSet returns true if OptSamplingParams was set.
-func (o OptSamplingParams) IsSet() bool { return o.Set }
-
-// Reset unsets value.
-func (o *OptSamplingParams) Reset() {
-	var v SamplingParams
-	o.Value = v
-	o.Set = false
-}
-
-// SetTo sets value to v.
-func (o *OptSamplingParams) SetTo(v SamplingParams) {
-	o.Set = true
-	o.Value = v
-}
-
-// Get returns value and boolean that denotes whether value was set.
-func (o OptSamplingParams) Get() (v SamplingParams, ok bool) {
-	if !o.Set {
-		return v, false
-	}
-	return o.Value, true
-}
-
-// Or returns value if set, or given parameter if does not.
-func (o OptSamplingParams) Or(d SamplingParams) SamplingParams {
 	if v, ok := o.Get(); ok {
 		return v
 	}
@@ -2146,32 +1936,6 @@ func (s *Revision) SetPath(val OptString) {
 
 func (*Revision) commitDocumentRes() {}
 func (*Revision) saveDocumentRes()   {}
-
-// Ref: #/components/schemas/SamplingParams
-type SamplingParams struct {
-	Temperature OptFloat64 `json:"temperature"`
-	MaxTokens   OptInt     `json:"maxTokens"`
-}
-
-// GetTemperature returns the value of Temperature.
-func (s *SamplingParams) GetTemperature() OptFloat64 {
-	return s.Temperature
-}
-
-// GetMaxTokens returns the value of MaxTokens.
-func (s *SamplingParams) GetMaxTokens() OptInt {
-	return s.MaxTokens
-}
-
-// SetTemperature sets the value of Temperature.
-func (s *SamplingParams) SetTemperature(val OptFloat64) {
-	s.Temperature = val
-}
-
-// SetMaxTokens sets the value of MaxTokens.
-func (s *SamplingParams) SetMaxTokens(val OptInt) {
-	s.MaxTokens = val
-}
 
 // The manual-edit whole-tree snapshot (ADR-0038). Array order = position.
 // Ref: #/components/schemas/SaveTreeRequest

@@ -15,10 +15,10 @@ Last verified: 2026-10-04.
 | Area | Status |
 |---|---|
 | Track 1 — Engine (A) · Serving control (B) · TUI (C) | ✅ |
-| Router seam (D2–D5) + enablement seam (D1 minus the ML job) | ✅ committed (`504cd16`) |
+| Router seam (D2–D5) + enablement seam (D1 minus the ML job) | ✅ committed (`504cd16`); **parked** (ADR-0045) — packages in-tree, unwired |
 | Track 2 — Deployment (E) · Tauri editor (F) | ✅ landed — **frozen** (ADR-0044) |
 | Fleet observability surface (ADR-0040 — `/fleet`, batch status, selectors) | ✅ |
-| Context-engine refocus (write-through safety, presets, RAG wiring, context inspector, `/locate`, context management — workspaces, multi-root corpus, tray — Ratatui TUI) | 🚧 active roadmap — [`plans/implementation-sequence-context-engine.md`](plans/implementation-sequence-context-engine.md) |
+| Context-engine refocus (write-through safety, presets, RAG wiring, context inspector, `/locate`, context management — workspaces, multi-root corpus, tray — Ratatui TUI) | 🚧 active roadmap — Phase B landed; C–F remain — [`plans/implementation-sequence-context-engine.md`](plans/implementation-sequence-context-engine.md) |
 | D1 ML fine-tune (Needle 2 `.cact` + flip a mode to `router`) | 🚧 deferred by trigger |
 | CI automation | 🚧 none |
 | `InferenceControl` surface (risk #9) | 🚧 deferred |
@@ -58,25 +58,28 @@ Last verified: 2026-10-04.
 | Module | Package | Status |
 |---|---|---|
 | Provider gateway | `internal/provider` | ✅ |
-| Agent loop / orchestrator | `internal/loop` | ✅ (router seam ✅; ML enablement 🚧) |
-| Mode registry | `internal/mode` | ✅ |
-| Tool registry | `internal/tool` | ✅ |
+| Agent loop / orchestrator | `internal/loop` | ✅ one fixed pipeline for every preset (ADR-0045); router seam parked |
+| Mode registry | `internal/mode` | ✅ prompt presets (name/prompt/model) |
+| Pipeline policy | `internal/pipeline` | ✅ one global turn policy, validated at startup (ADR-0045) |
+| Tool registry | `internal/tool` | ✅ all tools global (ADR-0045) |
 | Context assembler | `internal/assembler` | ✅ |
 | Retriever | `internal/retriever` | ✅ (sqlite-vec `vec0` + FTS5 hybrid) |
 | Token metering | `internal/meter` | ✅ |
 | Document store + versioning | `internal/document` | ✅ (git coarse + block candidates) |
-| `ToolDecider` (optional router) | `internal/tooldecider` | ✅ seam; enablement 🚧 |
+| `ToolDecider` (optional router) | `internal/tooldecider` | ✅ seam, **parked/unwired** (ADR-0045); enablement 🚧 |
 | Fleet gateway — observability | `internal/fleet` | ✅ `ListStatus` over daemon `status/all` + last-good cache (ADR-0040); daemon-side verb in macos-dev-config (ADR-0007) |
 
-Shipped **modes** (4): `drafter`, `editor`, `proofreader`, `grammar`
-(`literature-reviewer` from architecture.md §64 is a future mode, not shipped —
-superseded by ADR-0019's "modes are data"). Collapse to prompt presets is
-accepted (ADR-0045) but not yet implemented.
+Shipped **presets** (4): `drafter`, `editor`, `proofreader`, `grammar` — each
+exactly `name` + `systemPrompt` + `defaultModel` (ADR-0045 collapse landed;
+behavioral mode fields removed). One pipeline serves every preset: all tools are
+global, auto-RAG always runs, and the step cap and context budgets live in
+`config/pipeline.json`. (`literature-reviewer` from architecture.md §64 is a
+future preset, not shipped — superseded by ADR-0019's "modes are data".)
 
-Shipped **tools** (4): `diff`, `edit_markdown`, `read_note`, `retrieve`
-(`suggest_revision`, `cite`, `search_vault` from architecture.md §65 are future
-tools — not shipped; the reserved `request_tool` is the router's synthetic wire
-format, never registered).
+Shipped **tools** (4): `diff`, `edit_markdown`, `read_note`, `retrieve` — all
+advertised on every turn (ADR-0045). (`suggest_revision`, `cite`, `search_vault`
+from architecture.md §65 are future tools — not shipped; the reserved
+`request_tool` is the parked router's synthetic wire format, never registered.)
 
 ## Storage & the app database
 
@@ -146,7 +149,7 @@ The phases (A–F) are detailed in
 (ADR-0044 as extended by ADR-0045–0049).
 
 1. **Phase A — trustworthy write-through (ADR-0047)** — open revalidation + path canonicalization; pre-write conflict check (`file-changed-externally`); no-op re-sync; newest-first, base-validated candidates; guards live on the model path; symlink-safe writes; HTTP-level E2E tests.
-2. **Phase B — prompt presets + one pipeline (ADR-0045)** — collapse mode data to name/systemPrompt/defaultModel; `config/pipeline.json`; one agentic loop, all tools, global budgets; park the router seam.
+2. ✅ **Phase B — prompt presets + one pipeline (ADR-0045)** — landed: modes are `name`/`systemPrompt`/`defaultModel`; `config/pipeline.json` is the one validated policy (maxSteps + budgets + autoRagTopK); one agentic loop, all tools global, auto-RAG always; router parked/unwired.
 3. **Phase C — real RAG + context management + context inspector (ADR-0044, ADR-0049)** — production indexing + vault bulk ingest; workspace registry (`workspaces.db`) + per-workspace context-state shards; multi-root corpus scope (default `**/*.md`, hidden dirs excluded) with canonicalized dedupe; `ALLOWED_ROOTS` boundary on browsing + indexing; idempotent eviction (vec0 + FTS) and per-document status (`/corpus`); hybrid FTS5 + vec0 fusion; auto-RAG `rag` events; labeled truncation; assembler v2 + persisted snapshots + `context` route + `GET /sessions/{id}/meter`.
 4. **Phase D — `/locate` (ADR-0048)** — engine-side command parse; normalized exact-then-fuzzy resolver over the open document then the vault; `locate` event + snapshot record; ambiguity picker; anchored guarded edit.
 5. **Phase E — Ratatui TUI v2 (ADR-0046)** — `client/tui-rs/`; regenerated Rust client + Rust SSE decoder; preset tabs, meter, context panel, diff/approve, write-through status, bracketed paste, mentions/sessions/cancel; workspace open/resume, corpus tree (multi-root scope, status, index/evict/rebuild, allowed-roots UX), context tray (pin/remove, retrieval query, auto-RAG, pin-for-session); fleet orchestration engine-side + daemon reliability fixes; retire OpenTUI on parity.
@@ -169,4 +172,5 @@ client needs it; `GET /sessions/{id}/meter` is now Phase 2.
 - Mirror drift tests pass: `daemon-http.md`, `fleet-manifest.schema.json`, `needle-facade.md`.
 - `go run ./cmd/toolhash` hash == `routergate.ToolSetHash`.
 - D1 seam committed in `504cd16` — the earlier "uncommitted" note was stale.
-- Client suites (`bun test`/typecheck in `client/tui` + `client/tauri`; `cargo test` in `src-tauri`) are claimed green in the plans but were **not re-run** during this review. Tauri suites are frozen with the client (ADR-0044).
+- Phase B gates (ADR-0045): `CGO_ENABLED=0 go test -count=1 ./...`, `go vet ./...`, and `gofmt -l server/` all clean; `client/tui` `bun test` (34 pass) + `bun run typecheck` green; the TUI generated client was regenerated against the reduced `/modes` schema.
+- Client suites: `client/tui` re-run for Phase B (above); `client/tauri` + `src-tauri` suites remain frozen with the client (ADR-0044) and were not re-run.

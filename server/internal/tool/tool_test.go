@@ -7,7 +7,7 @@ import (
 	"texteditor/shared/dto"
 )
 
-func TestRegistryRegisterListAllowlist(t *testing.T) {
+func TestRegistryRegisterList(t *testing.T) {
 	r := NewRegistry()
 
 	submit := dto.ToolDef{Name: "submit", Description: "s", Parameters: json.RawMessage(`{"type":"object"}`)}
@@ -25,7 +25,8 @@ func TestRegistryRegisterListAllowlist(t *testing.T) {
 		t.Fatalf("duplicate register: got %v want ErrDuplicate", err)
 	}
 
-	// Reserved name rejected (ADR-0028 §2).
+	// Reserved name rejected (ADR-0028 §2; the seam is parked by ADR-0045 but the
+	// name stays reserved).
 	if err := r.Register(dto.ToolDef{Name: ReservedRequestToolName}); err != ErrReservedName {
 		t.Fatalf("reserved name: got %v want ErrReservedName", err)
 	}
@@ -37,19 +38,6 @@ func TestRegistryRegisterListAllowlist(t *testing.T) {
 	}
 	if list[0].Name != "retrieve" || list[1].Name != "submit" {
 		t.Fatalf("List order = %v, want [retrieve submit]", list)
-	}
-
-	// AllowlistFor preserves the mode's order and returns only known tools.
-	mode := dto.Mode{ToolAllowlist: []string{"submit", "retrieve"}}
-	al := r.AllowlistFor(mode)
-	if len(al) != 2 || al[0].Name != "submit" || al[1].Name != "retrieve" {
-		t.Fatalf("AllowlistFor order = %v", al)
-	}
-
-	// Unknown names are simply omitted.
-	mode2 := dto.Mode{ToolAllowlist: []string{"nope"}}
-	if got := r.AllowlistFor(mode2); len(got) != 0 {
-		t.Fatalf("AllowlistFor unknown returned %v", got)
 	}
 }
 

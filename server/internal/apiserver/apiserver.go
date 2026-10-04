@@ -553,22 +553,11 @@ func fleetModelToGen(m dto.Model, st dto.LiveState) genapi.FleetModel {
 }
 
 func modeToGen(m dto.Mode) genapi.Mode {
-	om := genapi.Mode{
-		Name:          m.Name,
-		ToolAllowlist: m.ToolAllowlist,
+	return genapi.Mode{
+		Name:         m.Name,
+		SystemPrompt: m.SystemPrompt,
+		DefaultModel: m.DefaultModel,
 	}
-	om.SystemPrompt = genapi.NewOptString(m.SystemPrompt)
-	om.DefaultModel = genapi.NewOptString(m.DefaultModel)
-	om.Params = genapi.NewOptSamplingParams(genapi.SamplingParams{
-		Temperature: genapi.NewOptFloat64(m.Params.Temperature),
-		MaxTokens:   genapi.NewOptInt(m.Params.MaxTokens),
-	})
-	om.MaxSteps = genapi.NewOptInt(m.MaxSteps)
-	om.Agentic = genapi.NewOptBool(m.Agentic)
-	om.Kind = genapi.NewOptString(m.Kind)
-	om.Preamble = genapi.NewOptString(m.Preamble)
-	om.ToolCalling = genapi.NewOptModeToolCalling(genapi.ModeToolCalling(m.ToolCalling))
-	return om
 }
 
 func toolDefToGen(d dto.ToolDef) genapi.ToolDef {

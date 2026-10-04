@@ -543,7 +543,7 @@ components:
 
     Mode:
       type: object
-      required: [name]
+      required: [name, systemPrompt, defaultModel]
       properties:
         name:
           type: string
@@ -551,23 +551,6 @@ components:
           type: string
         defaultModel:
           type: string
-        toolAllowlist:
-          type: array
-          items:
-            type: string
-        params:
-          $ref: '#/components/schemas/SamplingParams'
-        maxSteps:
-          type: integer
-        agentic:
-          type: boolean
-        kind:
-          type: string
-        preamble:
-          type: string
-        toolCalling:
-          type: string
-          enum: [native, router]
 
     ToolDef:
       type: object

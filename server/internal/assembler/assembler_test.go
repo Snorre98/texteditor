@@ -15,15 +15,14 @@ func TestAssembleDeterministic(t *testing.T) {
 		Mode: dto.Mode{
 			Name:         "proofreader",
 			SystemPrompt: "You are a proofreader.",
-			Params:       dto.SamplingParams{Temperature: 0.3, MaxTokens: 100},
-			ContextBudget: dto.ContextBudget{
-				MaxHistoryTokens: 1000,
-				MaxRagTokens:     1000,
-			},
-			ToolAllowlist: []string{"edit_markdown"},
 		},
 		ModelName: "gemma4-12b",
 		Params:    dto.SamplingParams{Temperature: 0.3, MaxTokens: 100},
+		Policy: dto.PipelinePolicy{
+			MaxHistoryTokens: 1000,
+			MaxRagTokens:     1000,
+			MaxMentionTokens: 1000,
+		},
 		Tools: []dto.ToolDef{
 			{Name: "edit_markdown", Description: "edits a block", Parameters: json.RawMessage(`{"type":"object"}`)},
 		},
@@ -79,10 +78,10 @@ func TestAssembleTruncatesHistoryAndRag(t *testing.T) {
 	big := dto.AssemblerInput{
 		Mode: dto.Mode{
 			SystemPrompt: "sys",
-			ContextBudget: dto.ContextBudget{
-				MaxHistoryTokens: 4, // ~16 bytes → roughly one short message
-				MaxRagTokens:     4,
-			},
+		},
+		Policy: dto.PipelinePolicy{
+			MaxHistoryTokens: 4, // ~16 bytes → roughly one short message
+			MaxRagTokens:     4,
 		},
 		History: []dto.Message{
 			{Role: "user", Content: "aaaaaaaaaaaaaaaaaaaa"}, // oldest, large
@@ -137,9 +136,9 @@ func TestAssembleMentionsSpliced(t *testing.T) {
 	in := dto.AssemblerInput{
 		Mode: dto.Mode{
 			SystemPrompt: "sys",
-			ContextBudget: dto.ContextBudget{
-				MaxMentionTokens: 1000,
-			},
+		},
+		Policy: dto.PipelinePolicy{
+			MaxMentionTokens: 1000,
 		},
 		UserInput: "summarize",
 		Mentions: []dto.MentionContent{
@@ -179,9 +178,9 @@ func TestAssembleMentionsTruncateTailAndOverflow(t *testing.T) {
 	in := dto.AssemblerInput{
 		Mode: dto.Mode{
 			SystemPrompt: "sys",
-			ContextBudget: dto.ContextBudget{
-				MaxMentionTokens: 6, // small budget → truncates the tail
-			},
+		},
+		Policy: dto.PipelinePolicy{
+			MaxMentionTokens: 6, // small budget → truncates the tail
 		},
 		UserInput: "hi",
 		Mentions: []dto.MentionContent{
@@ -220,9 +219,9 @@ func TestAssembleMentionsZeroBudget(t *testing.T) {
 	in := dto.AssemblerInput{
 		Mode: dto.Mode{
 			SystemPrompt: "sys",
-			ContextBudget: dto.ContextBudget{
-				MaxMentionTokens: 0, // no mention budget → all content truncated
-			},
+		},
+		Policy: dto.PipelinePolicy{
+			MaxMentionTokens: 0, // no mention budget → all content truncated
 		},
 		UserInput: "hi",
 		Mentions: []dto.MentionContent{

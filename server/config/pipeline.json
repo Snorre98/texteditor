@@ -1,0 +1,7 @@
+{
+  "maxSteps": 6,
+  "maxHistoryTokens": 32000,
+  "maxRagTokens": 16000,
+  "maxMentionTokens": 16000,
+  "autoRagTopK": 3
+}

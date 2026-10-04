@@ -32,13 +32,12 @@ import (
 	"texteditor/internal/loop"
 	"texteditor/internal/meter"
 	"texteditor/internal/mode"
+	"texteditor/internal/pipeline"
 	"texteditor/internal/provider"
 	"texteditor/internal/retriever"
-	"texteditor/internal/routergate"
 	"texteditor/internal/session"
 	"texteditor/internal/textformatter"
 	"texteditor/internal/tool"
-	"texteditor/internal/tooldecider"
 	"texteditor/internal/workspace"
 	"texteditor/shared/dto"
 )
@@ -119,8 +118,8 @@ func run() error {
 		return fmt.Errorf("fleet unavailable: %w", err)
 	}
 
-	// --- Provider (one shared gateway: retriever embeds, loop streams, the
-	// router decides — stateless transport, safe to share) ---
+	// --- Provider (one shared gateway: retriever embeds, loop streams —
+	// stateless transport, safe to share) ---
 	providerGW := provider.New()
 
 	// --- Retriever (index.db; block source = Document store) ---
@@ -148,7 +147,7 @@ func run() error {
 		return err
 	}
 
-	// --- Mode registry (leaf; cross-checks against fleet models + tools) ---
+	// --- Mode registry (leaf; cross-checks against the fleet's models + tags) ---
 	modelTags := map[string][]string{}
 	modelNames := make([]string, 0, len(models))
 	for _, m := range models {
@@ -158,36 +157,16 @@ func run() error {
 	modeReg, err := mode.New(mode.ValidationInput{
 		Models:    modelNames,
 		ModelTags: modelTags,
-		Tools:     toolNames,
 	})
 	if err != nil {
 		return err
 	}
 
-	// --- Router startup gates (ADR-0028 §4, run at the composition root — the
-	// sequencing note in implementation-sequence.md; the Mode registry stays a
-	// leaf). A no-op when no mode opts into the router. ---
-	toolHash := routergate.ToolSetHash(registry.List())
-	present := map[string]bool{}
-	for _, n := range modelNames {
-		present[n] = true
-	}
-	if err := routergate.Check(modeReg.List(),
-		func(name string) bool { return present[name] },
-		fleetGW.Fingerprint,
-		toolHash,
-	); err != nil {
+	// --- Pipeline policy (ADR-0045 §3: one global turn policy, validated
+	// fail-fast at startup) ---
+	pipelineGW, err := pipeline.New()
+	if err != nil {
 		return err
-	}
-
-	// --- ToolDecider (wired only when a mode opts in — ADR-0028 §3: the native
-	// baseline wires no decider) ---
-	var deciderGW loop.Decider
-	for _, m := range modeReg.List() {
-		if m.ToolCalling == "router" {
-			deciderGW = tooldecider.New(fleetGW, providerGW)
-			break
-		}
 	}
 
 	// --- Assembler + loop ---
@@ -205,7 +184,7 @@ func run() error {
 		Sessions:  sessStore,
 		Meter:     meterStore,
 		Bus:       bus,
-		Decider:   deciderGW,
+		Pipeline:  pipelineGW,
 		Workspace: ws,
 	})
 

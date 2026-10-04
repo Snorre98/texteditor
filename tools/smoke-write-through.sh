@@ -1,13 +1,26 @@
 #!/usr/bin/env bash
 # Manual live-model smoke for ADR-0047 write-through. NOT part of `go test`:
 # it needs a running engine (default http://127.0.0.1:9100, override ENGINE_URL)
-# with the control daemon and a live model serving the `proofreader` preset.
+# with the control daemon and a live model tagged `editor` (the only shipped
+# preset that dispatches edit_markdown — proofreader/grammar are non-agentic).
 #
 # It exercises the acceptance path end to end:
 #   open temp note -> one turn (model stages an edit_markdown candidate) ->
 #   external edit -> commit must 409 with no clobber -> overwrite -> file changed.
 #
+# The turn input names the target block's id/hash because the as-built native
+# path does not yet inject document blocks into the prompt (ADR-0029 §6's edit
+# read path lands with Phase B/C); the model only has to echo them into the tool
+# call, which the edit_markdown schema now carries as the base-hash guard.
+#
+# If the serving stack cannot emit structured tool_calls (e.g. an older
+# mlx-lm server that streams the call as content), set SMOKE_STAGE_DIRECT=1:
+# the script then stages the edit over `POST /documents/{id}/edits` — the same
+# HTTP route the tool handler uses — and still exercises the commit/conflict/
+# overwrite boundary. The model tool-call leg is skipped and labeled.
+#
 # Usage: ENGINE_URL=http://127.0.0.1:9100 tools/smoke-write-through.sh
+#        SMOKE_STAGE_DIRECT=1 tools/smoke-write-through.sh
 set -euo pipefail
 
 ENGINE_URL="${ENGINE_URL:-http://127.0.0.1:9100}"
@@ -26,7 +39,11 @@ fi
 
 printf 'The quick brown fox jumps over the lazy dog.\n' >"$NOTE"
 
-post() { curl -fsS -X POST "$ENGINE_URL$1" -H 'content-type: application/json' -d "${2:-{}}"; }
+post() {
+  local body="${2:-}"
+  [ -n "$body" ] || body='{}'
+  curl -fsS -X POST "$ENGINE_URL$1" -H 'content-type: application/json' -d "$body"
+}
 
 echo "engine: $ENGINE_URL"
 echo "note:   $NOTE"
@@ -34,17 +51,46 @@ echo "note:   $NOTE"
 doc_id="$(post /documents "{\"path\":\"$NOTE\"}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')"
 echo "document: $doc_id"
 
-# One turn: ask for a rewrite. The SSE stream is drained; the candidate is
-# staged engine-side.
-curl -fsS -N -X POST "$ENGINE_URL/turn" -H 'content-type: application/json' \
-  -d "{\"sessionId\":\"smoke-$doc_id\",\"modeName\":\"proofreader\",\"documentId\":\"$doc_id\",\"userInput\":\"Rewrite the paragraph to be more concise.\"}" \
-  >/dev/null
+# Read the target block (id + guard hash) so the turn can name them.
+blocks_json="$(curl -fsS "$ENGINE_URL/documents/$doc_id/blocks")"
+block_id="$(printf '%s' "$blocks_json" | python3 -c 'import json,sys; print(json.load(sys.stdin)[0]["id"])')"
+block_hash="$(printf '%s' "$blocks_json" | python3 -c 'import json,sys; print(json.load(sys.stdin)[0]["hash"])')"
+block_text="$(printf '%s' "$blocks_json" | python3 -c 'import json,sys; print(json.load(sys.stdin)[0]["text"])')"
 
-block_id="$(curl -fsS "$ENGINE_URL/documents/$doc_id/blocks" | python3 -c 'import json,sys; print(json.load(sys.stdin)[0]["id"])')"
+# One turn: ask for a rewrite through edit_markdown. The SSE stream is drained;
+# the candidate is staged engine-side.
+turn_body="$(python3 - "$doc_id" "$block_id" "$block_hash" "$block_text" <<'PY'
+import json, sys
+doc, bid, bh, text = sys.argv[1:5]
+print(json.dumps({
+    "sessionId": f"smoke-{doc}",
+    "modeName": "editor",
+    "documentId": doc,
+    "userInput": (
+        "Rewrite the paragraph to be more concise. Call the edit_markdown tool "
+        f"with blockId {bid}, baseHash {bh}, and replace this text: {text}"
+    ),
+}))
+PY
+)"
+curl -fsS -N -X POST "$ENGINE_URL/turn" -H 'content-type: application/json' -d "$turn_body" >/dev/null
+
 candidate_count="$(curl -fsS "$ENGINE_URL/documents/$doc_id/blocks/$block_id/candidates" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')"
 if [ "$candidate_count" -eq 0 ]; then
-  echo "FAIL: the turn staged no candidate (is a live model serving proofreader?)"
-  exit 1
+  if [ "${SMOKE_STAGE_DIRECT:-0}" != "1" ]; then
+    echo "FAIL: the turn staged no candidate (is a live model tagged editor up," >&2
+    echo "and does its server emit structured tool_calls?)" >&2
+    echo "Hint: SMOKE_STAGE_DIRECT=1 stages the edit over HTTP instead." >&2
+    exit 1
+  fi
+  echo "note: SMOKE_STAGE_DIRECT=1 — staging the edit over HTTP (model tool-call leg skipped)"
+  post "/documents/$doc_id/edits" "$(python3 - "$block_id" <<'PY'
+import json, sys
+bid = sys.argv[1]
+print(json.dumps({"blockId": bid, "text": "A quick brown fox leaps over a lazy dog."}))
+PY
+)" >/dev/null
+  candidate_count=1
 fi
 echo "candidate staged for block $block_id"
 

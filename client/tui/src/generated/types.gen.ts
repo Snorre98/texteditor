@@ -52,15 +52,8 @@ export type ProvisionResponse = {
 
 export type Mode = {
     name: string;
-    systemPrompt?: string;
-    defaultModel?: string;
-    toolAllowlist?: Array<string>;
-    params?: SamplingParams;
-    maxSteps?: number;
-    agentic?: boolean;
-    kind?: string;
-    preamble?: string;
-    toolCalling?: 'native' | 'router';
+    systemPrompt: string;
+    defaultModel: string;
 };
 
 export type ToolDef = {

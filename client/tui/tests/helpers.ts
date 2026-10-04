@@ -61,7 +61,8 @@ export function stubApi(opts: StubApiOptions = {}) {
     },
     provisionModel: async () => ok({ provisionID: "p1" }),
     getModelStatus: async (name: string) => ok({ name, state: "up" }),
-    listModes: async () => ok([{ name: "proofreader" } satisfies Mode]),
+    listModes: async () =>
+      ok([{ name: "proofreader", systemPrompt: "You are a proofreader.", defaultModel: "gemma4-26b" } satisfies Mode]),
     listTools: async () => ok([{ name: "edit_markdown" } satisfies ToolDef]),
     openDocument: async (path: string) => {
       calls.push(`open:${path}`);

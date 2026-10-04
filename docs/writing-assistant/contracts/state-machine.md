@@ -18,7 +18,7 @@ back to the session.
 |---|---|---|
 | `idle` | phase | no turn in progress |
 | `planning` | phase | building the plan for the task |
-| `deciding` | phase | resolving a `request_tool` intent to a concrete tool (router mode only) |
+| `deciding` | phase | (parked) resolving a `request_tool` intent to a concrete tool — router only, unwired (ADR-0045) |
 | `dispatching` | phase | a tool call is in flight |
 | `observing` | phase | integrating tool results |
 | `answering` | phase | streaming the final answer |
@@ -31,31 +31,28 @@ back to the session.
 |---|---|---|---|
 | (start) | `planning` | `Run(task)` | |
 | `planning` | `dispatching` | plan needs a tool | else → `answering` |
-| `planning` | `deciding` | writer emitted `request_tool` (router mode) | native mode skips straight to `dispatching` |
-| `deciding` | `dispatching` | `Decide` returned `Confidence ≥ τ` | |
-| `deciding` | `answering` | `Confidence < τ` / refusal / transport error | graceful "no tool" |
 | `dispatching` | `observing` | tool returned | via Tool executor `Invoke` |
-| `observing` | `dispatching` | plan needs another tool | bounded by `mode.maxSteps` |
+| `observing` | `dispatching` | plan needs another tool | bounded by `PipelinePolicy.MaxSteps` |
 | `observing` | `answering` | plan complete | |
 | `answering` | `done` | stream finished | emit `done` (with `degraded`/`usedModel`) |
 | any | `error` | unrecoverable failure | emit `error` |
 
+The parked router seam's `planning → deciding → dispatching | answering`
+transitions (ADR-0028) are retained in `interface.md` §8b and
+`behaviors/tool-routing.feature`; they are unreachable while ADR-0045's parking
+stands.
+
 ### 1.3 Invariants
 
-- `mode.maxSteps` bounds the dispatch/observe cycle (bounded per mode, not a global;
-  ADR-0019). A non-`agentic` mode (`agentic: false`) has `maxSteps=0`: single-shot,
-  no tool loop.
-- `deciding` exists only when `mode.toolCalling == "router"`; the native path's
-  `planning → dispatching` is unchanged (ADR-0028).
-- `deciding → answering` (refusal / `router-unreachable`) is realized as **one
-  bounded writer round**: the loop appends a "no tool needed" tool-result message
-  for `request_tool` and the writer's next `stop` stream is the answering phase
-  (recorded amendment, ADR-0028 §6). It counts against `mode.maxSteps` like any
-  dispatch and emits no error event on refusal.
+- `PipelinePolicy.MaxSteps` bounds the dispatch/observe cycle — one global
+  pipeline policy for every preset (ADR-0045). There is no per-mode bound and no
+  single-shot branch: every turn runs the same agentic loop.
+- `deciding` exists only in the parked router seam (ADR-0028, parked by
+  ADR-0045); the live path's `planning → dispatching` is unchanged.
 - A tool result is **structured and retryable** (ADR-0029): `guard-failed` → the
   loop re-reads the block and re-enters `dispatching`; `invalid-structure` → the
-  model retries with the issue list. Both count against `mode.maxSteps`, never
-  looping unbounded.
+  model retries with the issue list. Both count against `PipelinePolicy.MaxSteps`,
+  never looping unbounded.
 - `answering` is entered exactly once per turn; after `done`/`error` the loop
   returns to `idle`.
 - One turn in flight **per session**; distinct sessions run turns concurrently

@@ -4,6 +4,10 @@ Feature: Tool routing
   router (`ToolDecider`), selected per mode by `toolCalling`.
   Normative per ADR-0028.
 
+  # Parked by ADR-0045: no mode enables the router; the loop no longer reads
+  # `toolCalling`. The seam and its gates stay in-tree, unwired. These scenarios
+  # are retained as the contract for a future unpark.
+
   Scenario: Native mode lets the writer decide the exact tool
     Given a mode with toolCalling native and 3 allowlisted tools
     When the writer emits a structured tool_call

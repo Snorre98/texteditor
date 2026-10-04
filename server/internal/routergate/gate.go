@@ -2,8 +2,11 @@
 // optional router seam. It is a composition-root helper leaf, NOT part of the
 // Mode registry (sequencing note, implementation-sequence.md): the gates need
 // Fleet facts (the needle-router model's presence and manifest fingerprint), so
-// they run where Fleet is already wired. `Check` is a no-op when no mode opts
-// into the router.
+// they run where Fleet is already wired.
+//
+// ADR-0045 parked the seam: no mode can enable the router, so the composition
+// root wires no caller and `enabled` is always false. The package and its tests
+// stay in-tree for a future unpark.
 package routergate
 
 import (
@@ -54,14 +57,15 @@ func ToolSetHash(defs []dto.ToolDef) string {
 }
 
 // Check runs the two startup gates at the composition root (ADR-0028 §4,
-// ADR-0019 §2 discipline). It returns nil when no mode has
-// toolCalling: "router", ErrRouterUnavailable when one does but no resolvable
+// ADR-0019 §2 discipline). `enabled` is true only when some mode opts into the
+// router — parked by ADR-0045, so the composition root never calls it today; it
+// returns nil when disabled, ErrRouterUnavailable when enabled but no resolvable
 // needle-router model is in the manifest projection, and ErrToolsStale when the
-// manifest fingerprint (empty included) differs from the engine's tool-set
-// hash. `fingerprint` returns the daemon list projection's fingerprint for a
-// model ("" when absent) — the Fleet gateway's Fingerprint op.
-func Check(modes []dto.Mode, modelPresent func(name string) bool, fingerprint func(name string) (string, error), toolHash string) error {
-	if !wantsRouter(modes) {
+// manifest fingerprint (empty included) differs from the engine's tool-set hash.
+// `fingerprint` returns the daemon list projection's fingerprint for a model
+// ("" when absent) — the Fleet gateway's Fingerprint op.
+func Check(enabled bool, modelPresent func(name string) bool, fingerprint func(name string) (string, error), toolHash string) error {
+	if !enabled {
 		return nil
 	}
 	if !modelPresent(RouterModelName) {
@@ -75,15 +79,6 @@ func Check(modes []dto.Mode, modelPresent func(name string) bool, fingerprint fu
 		return ErrToolsStale
 	}
 	return nil
-}
-
-func wantsRouter(modes []dto.Mode) bool {
-	for _, m := range modes {
-		if m.ToolCalling == "router" {
-			return true
-		}
-	}
-	return false
 }
 
 // canonicalJSON compacts raw JSON through a round-trip (whitespace- and

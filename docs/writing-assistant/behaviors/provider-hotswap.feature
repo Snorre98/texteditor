@@ -2,7 +2,7 @@
 Feature: Provider hot-swap and fallback
   Swap which model serves a mode without an engine rebuild, and degrade
   gracefully when the preferred model is unavailable.
-  Normative per ADR-0005, ADR-0009, ADR-0015, ADR-0016.
+  Normative per ADR-0005, ADR-0009, ADR-0015, ADR-0016, ADR-0045.
 
   Scenario: Swap a mode's model by editing data
     Given mode "editor" defaults to model "gemma4-12b"
@@ -36,3 +36,10 @@ Feature: Provider hot-swap and fallback
     Given the agent loop asks the provider to stream
     When the provider receives a Target
     Then the provider speaks REST with no knowledge of model names or the manifest
+
+  Scenario: Every preset shares the same pipeline and is edit-capable
+    Given the four shipped presets drafter, editor, grammar, proofreader
+    When a turn runs with any preset
+    Then every registered tool is advertised on the payload
+    And an edit_markdown tool call is dispatched and surfaces as a candidate
+    # Normative per ADR-0045 (the drafter trap is gone).
