@@ -642,6 +642,7 @@ func (h *handler) CreateSession(ctx context.Context, req *genapi.CreateSessionRe
 	if err := h.d.Workspaces.RouteSession(s.ID, workspaceID); err != nil {
 		return nil, err
 	}
+	h.emitSession("created", workspaceID, s)
 	o := sessionToGen(s, workspaceID)
 	return &o, nil
 }
@@ -676,6 +677,7 @@ func (h *handler) RenameSession(ctx context.Context, req *genapi.RenameSessionRe
 		}
 		return nil, err
 	}
+	h.emitSession("renamed", workspaceID, s)
 	o := sessionToGen(s, workspaceID)
 	return &o, nil
 }
@@ -987,6 +989,68 @@ func writeSSE(w http.ResponseWriter, ev dto.Event) error {
 	return nil
 }
 
+// feedEventTypes is the positive non-turn allowlist carried on GET /events
+// (ADR-0052 §4). Turn events are never delivered here — they belong to the
+// per-turn /turn stream; `backpressure` is included so a feed overflow is
+// labeled, never silent.
+func isFeedEvent(eventType string) bool {
+	switch eventType {
+	case "corpus", "document", "session", "fleet", "backpressure":
+		return true
+	default:
+		return false
+	}
+}
+
+// GetEvents is the hand-framed non-turn liveness feed (ADR-0052 §4, ADR-0031).
+// It subscribes to the bus with the non-turn allowlist, optionally scoped to a
+// workspace: corpus/session events are workspace-scoped; document/fleet events
+// are global and always delivered. The stream is long-lived and coexists with
+// the per-turn /turn stream; a bounded-channel overflow arrives as the labeled
+// `backpressure` event.
+func (h *handler) GetEvents(ctx context.Context, p genapi.GetEventsParams, w http.ResponseWriter) error {
+	if h.bus == nil {
+		return fmt.Errorf("event bus not wired")
+	}
+	workspaceID := p.WorkspaceId.Or("")
+	stream := h.bus.Subscribe(func(e dto.Event) bool {
+		if !isFeedEvent(e.Type) {
+			return false
+		}
+		return e.WorkspaceID == "" || workspaceID == "" || e.WorkspaceID == workspaceID
+	})
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+
+	// ogen wraps the ResponseWriter; ResponseController unwraps to the Flusher.
+	rc := http.NewResponseController(w)
+	// Flush the headers immediately so a subscriber sees the stream established
+	// before the first event arrives (unlike /turn, which writes its first
+	// event right away).
+	if err := rc.Flush(); err != nil {
+		return err
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case ev, more := <-stream:
+			if !more {
+				return nil
+			}
+			if err := writeSSE(w, ev); err != nil {
+				return err
+			}
+			if err := rc.Flush(); err != nil {
+				return err
+			}
+		}
+	}
+}
+
 // ------------------------- DTO conversions -------------------------
 
 func modelToGen(m dto.Model) genapi.Model {
@@ -1069,6 +1133,20 @@ func writeResultToGen(res dto.WriteResult) *genapi.Revision {
 	rev.WrittenThrough = res.WrittenThrough
 	rev.Path = res.Path
 	return revisionToGen(rev)
+}
+
+// emitSession publishes one `session` feed event (create/rename, ADR-0052 §4).
+// A nil bus is a no-op. The event is workspace-scoped so a filtered feed only
+// sees sessions from its own workspace.
+func (h *handler) emitSession(kind, workspaceID string, sess dto.Session) {
+	if h.bus == nil {
+		return
+	}
+	data, err := json.Marshal(dto.SessionEventPayload{Kind: kind, WorkspaceID: workspaceID, Session: sess})
+	if err != nil {
+		return
+	}
+	h.bus.Emit(dto.Event{WorkspaceID: workspaceID, Type: dto.EventSession, Data: data})
 }
 
 func sessionToGen(s dto.Session, workspaceID string) genapi.Session {

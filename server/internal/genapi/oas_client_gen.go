@@ -28,6 +28,16 @@ func trimTrailingSlashes(u *url.URL) {
 
 // Invoker invokes operations described by OpenAPI v3 specification.
 type Invoker interface {
+	// AcceptBlock invokes acceptBlock operation.
+	//
+	// The approve write boundary as one server-side operation: validate the staged candidate for the
+	// block, re-validate its base content hash, format, commit, and mirror the canonical markdown to the
+	// opened file (ADR-0047). The client supplies no candidate text. An externally changed file is refused
+	// with the typed `file-changed-externally` (409) and no bytes are written. The staged routes
+	// (`GET .../candidates`, `POST /edits`, `POST /commits`) remain for compatibility.
+	//
+	// POST /documents/{id}/blocks/{bid}/accept
+	AcceptBlock(ctx context.Context, request OptCommitRequest, params AcceptBlockParams) (AcceptBlockRes, error)
 	// ApplyEdit invokes applyEdit operation.
 	//
 	// POST /documents/{id}/edits
@@ -90,6 +100,19 @@ type Invoker interface {
 	//
 	// GET /documents/{id}/diff
 	GetDiff(ctx context.Context, params GetDiffParams) ([]WordEdit, error)
+	// GetEvents invokes getEvents operation.
+	//
+	// A long-lived SSE feed carrying non-turn engine events so clients stop polling: `corpus` (job
+	// progress/done), `document` (external-change/commit), `session` (create/rename), and `fleet` (a
+	// daemon live-state change observed by the engine-side poller). Each message is `event: <type>`
+	// followed by `data: <payload>` where is one of the FeedEvent.type enum values and is the matching
+	// component schema (CorpusEvent, DocumentEvent, SessionEvent, FleetEvent). The feed is bounded; a
+	// dropped event is labeled `backpressure`, never silent. It coexists with the per-turn `/turn` stream.
+	// An optional `workspaceId` scopes corpus and session events; global events (document, fleet) are
+	// always delivered.
+	//
+	// GET /events
+	GetEvents(ctx context.Context, params GetEventsParams) (GetEventsRes, error)
 	// GetFleet invokes getFleet operation.
 	//
 	// The observability surface the model selectors consume. Answers 200 even when the control daemon is
@@ -181,12 +204,31 @@ type Invoker interface {
 	//
 	// GET /workspaces
 	ListWorkspaces(ctx context.Context) ([]Workspace, error)
+	// Open invokes open operation.
+	//
+	// Resolves a path into everything a client needs to start, in one call: the workspace, and either a
+	// bounded directory listing (a directory path) or the document, block tree, open-or-resumed session,
+	// and prompt presets (a file path). The client performs no path arithmetic, listing probe, or
+	// multi-call sequencing. A path outside ALLOWED_ROOTS is the typed `path-outside-allowed-roots`
+	// refusal. `POST /documents` and `GET /directories` remain for composability.
+	//
+	// POST /open
+	Open(ctx context.Context, request *OpenRequest) (OpenRes, error)
 	// OpenDocument invokes openDocument operation.
 	//
 	// Open/create a document by path; returns its surrogate id.
 	//
 	// POST /documents
 	OpenDocument(ctx context.Context, request *OpenDocumentRequest) (*Document, error)
+	// OpenDocumentSession invokes openDocumentSession operation.
+	//
+	// Returns the session to use for a document: the anchor-keyed session when `anchorBlockId` is given,
+	// otherwise the document's most recently updated session, creating one if none exists. The "newest"
+	// policy and the create-or-resume semantics are engine data; the client never lists sessions to choose
+	// one.
+	//
+	// POST /documents/{id}/session
+	OpenDocumentSession(ctx context.Context, request OptOpenSessionRequest, params OpenDocumentSessionParams) (*Session, error)
 	// ProvisionModel invokes provisionModel operation.
 	//
 	// POST /models/{name}/provision
@@ -294,6 +336,131 @@ func (c *Client) requestURL(ctx context.Context) *url.URL {
 		return c.serverURL
 	}
 	return u
+}
+
+// AcceptBlock invokes acceptBlock operation.
+//
+// The approve write boundary as one server-side operation: validate the staged candidate for the
+// block, re-validate its base content hash, format, commit, and mirror the canonical markdown to the
+// opened file (ADR-0047). The client supplies no candidate text. An externally changed file is refused
+// with the typed `file-changed-externally` (409) and no bytes are written. The staged routes
+// (`GET .../candidates`, `POST /edits`, `POST /commits`) remain for compatibility.
+//
+// POST /documents/{id}/blocks/{bid}/accept
+func (c *Client) AcceptBlock(ctx context.Context, request OptCommitRequest, params AcceptBlockParams) (AcceptBlockRes, error) {
+	res, err := c.sendAcceptBlock(ctx, request, params)
+	return res, err
+}
+
+func (c *Client) sendAcceptBlock(ctx context.Context, request OptCommitRequest, params AcceptBlockParams) (res AcceptBlockRes, err error) {
+	otelAttrs := []attribute.KeyValue{
+		otelogen.OperationID("acceptBlock"),
+		semconv.HTTPRequestMethodKey.String("POST"),
+		semconv.URLTemplateKey.String("/documents/{id}/blocks/{bid}/accept"),
+	}
+	otelAttrs = append(otelAttrs, c.cfg.Attributes...)
+
+	// Run stopwatch.
+	startTime := time.Now()
+	defer func() {
+		// Use floating point division here for higher precision (instead of Millisecond method).
+		elapsedDuration := time.Since(startTime)
+		c.duration.Record(ctx, float64(elapsedDuration)/float64(time.Millisecond), metric.WithAttributes(otelAttrs...))
+	}()
+
+	// Increment request counter.
+	c.requests.Add(ctx, 1, metric.WithAttributes(otelAttrs...))
+
+	// Start a span for this request.
+	ctx, span := c.cfg.Tracer.Start(ctx, AcceptBlockOperation,
+		trace.WithAttributes(otelAttrs...),
+		clientSpanKind,
+	)
+	// Track stage for error reporting.
+	var stage string
+	defer func() {
+		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, stage)
+			c.errors.Add(ctx, 1, metric.WithAttributes(otelAttrs...))
+		}
+		span.End()
+	}()
+
+	stage = "BuildURL"
+	u := uri.Clone(c.requestURL(ctx))
+	var pathParts [5]string
+	pathParts[0] = "/documents/"
+	{
+		// Encode "id" parameter.
+		e := uri.NewPathEncoder(uri.PathEncoderConfig{
+			Param:   "id",
+			Style:   uri.PathStyleSimple,
+			Explode: false,
+		})
+		if err := func() error {
+			return e.EncodeValue(conv.StringToString(params.ID))
+		}(); err != nil {
+			return res, errors.Wrap(err, "encode path")
+		}
+		encoded, err := e.Result()
+		if err != nil {
+			return res, errors.Wrap(err, "encode path")
+		}
+		pathParts[1] = encoded
+	}
+	pathParts[2] = "/blocks/"
+	{
+		// Encode "bid" parameter.
+		e := uri.NewPathEncoder(uri.PathEncoderConfig{
+			Param:   "bid",
+			Style:   uri.PathStyleSimple,
+			Explode: false,
+		})
+		if err := func() error {
+			return e.EncodeValue(conv.StringToString(params.Bid))
+		}(); err != nil {
+			return res, errors.Wrap(err, "encode path")
+		}
+		encoded, err := e.Result()
+		if err != nil {
+			return res, errors.Wrap(err, "encode path")
+		}
+		pathParts[3] = encoded
+	}
+	pathParts[4] = "/accept"
+	uri.AddPathParts(u, pathParts[:]...)
+
+	stage = "EncodeRequest"
+	r, err := ht.NewRequest(ctx, "POST", u)
+	if err != nil {
+		return res, errors.Wrap(err, "create request")
+	}
+	if err := encodeAcceptBlockRequest(request, r); err != nil {
+		return res, errors.Wrap(err, "encode request")
+	}
+
+	stage = "SendRequest"
+	resp, err := c.cfg.Client.Do(r)
+	if err != nil {
+		return res, errors.Wrap(err, "do request")
+	}
+	body := resp.Body
+	defer func() {
+		// Drain the body to EOF before closing, so the underlying
+		// connection can be reused by the Transport regardless of the
+		// response status code. See https://github.com/ogen-go/ogen/issues/1670.
+		_, _ = io.Copy(io.Discard, body)
+		_ = body.Close()
+	}()
+
+	stage = "DecodeResponse"
+	result, err := decodeAcceptBlockResponse(resp)
+	if err != nil {
+		return res, errors.Wrap(err, "decode response")
+	}
+
+	return result, nil
 }
 
 // ApplyEdit invokes applyEdit operation.
@@ -1322,6 +1489,106 @@ func (c *Client) sendGetDiff(ctx context.Context, params GetDiffParams) (res []W
 
 	stage = "DecodeResponse"
 	result, err := decodeGetDiffResponse(resp)
+	if err != nil {
+		return res, errors.Wrap(err, "decode response")
+	}
+
+	return result, nil
+}
+
+// GetEvents invokes getEvents operation.
+//
+// A long-lived SSE feed carrying non-turn engine events so clients stop polling: `corpus` (job
+// progress/done), `document` (external-change/commit), `session` (create/rename), and `fleet` (a
+// daemon live-state change observed by the engine-side poller). Each message is `event: <type>`
+// followed by `data: <payload>` where is one of the FeedEvent.type enum values and is the matching
+// component schema (CorpusEvent, DocumentEvent, SessionEvent, FleetEvent). The feed is bounded; a
+// dropped event is labeled `backpressure`, never silent. It coexists with the per-turn `/turn` stream.
+// An optional `workspaceId` scopes corpus and session events; global events (document, fleet) are
+// always delivered.
+//
+// GET /events
+func (c *Client) GetEvents(ctx context.Context, params GetEventsParams) (GetEventsRes, error) {
+	res, err := c.sendGetEvents(ctx, params)
+	return res, err
+}
+
+func (c *Client) sendGetEvents(ctx context.Context, params GetEventsParams) (res GetEventsRes, err error) {
+	otelAttrs := []attribute.KeyValue{
+		otelogen.OperationID("getEvents"),
+		semconv.HTTPRequestMethodKey.String("GET"),
+		semconv.URLTemplateKey.String("/events"),
+	}
+	otelAttrs = append(otelAttrs, c.cfg.Attributes...)
+
+	// Run stopwatch.
+	startTime := time.Now()
+	defer func() {
+		// Use floating point division here for higher precision (instead of Millisecond method).
+		elapsedDuration := time.Since(startTime)
+		c.duration.Record(ctx, float64(elapsedDuration)/float64(time.Millisecond), metric.WithAttributes(otelAttrs...))
+	}()
+
+	// Increment request counter.
+	c.requests.Add(ctx, 1, metric.WithAttributes(otelAttrs...))
+
+	// Start a span for this request.
+	ctx, span := c.cfg.Tracer.Start(ctx, GetEventsOperation,
+		trace.WithAttributes(otelAttrs...),
+		clientSpanKind,
+	)
+	// Track stage for error reporting.
+	var stage string
+	defer func() {
+		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, stage)
+			c.errors.Add(ctx, 1, metric.WithAttributes(otelAttrs...))
+		}
+		span.End()
+	}()
+
+	stage = "BuildURL"
+	u := uri.Clone(c.requestURL(ctx))
+	var pathParts [1]string
+	pathParts[0] = "/events"
+	uri.AddPathParts(u, pathParts[:]...)
+
+	stage = "EncodeQueryParams"
+	q := uri.NewQueryEncoder()
+	{
+		// Encode "workspaceId" parameter.
+		cfg := uri.QueryParameterEncodingConfig{
+			Name:    "workspaceId",
+			Style:   uri.QueryStyleForm,
+			Explode: true,
+		}
+
+		if err := q.EncodeParam(cfg, func(e uri.Encoder) error {
+			if val, ok := params.WorkspaceId.Get(); ok {
+				return e.EncodeValue(conv.StringToString(val))
+			}
+			return nil
+		}); err != nil {
+			return res, errors.Wrap(err, "encode query")
+		}
+	}
+	u.RawQuery = q.Values().Encode()
+
+	stage = "EncodeRequest"
+	r, err := ht.NewRequest(ctx, "GET", u)
+	if err != nil {
+		return res, errors.Wrap(err, "create request")
+	}
+
+	stage = "SendRequest"
+	resp, err := c.cfg.Client.Do(r)
+	if err != nil {
+		return res, errors.Wrap(err, "do request")
+	}
+
+	stage = "DecodeResponse"
+	result, err := decodeGetEventsResponse(resp)
 	if err != nil {
 		return res, errors.Wrap(err, "decode response")
 	}
@@ -2702,6 +2969,93 @@ func (c *Client) sendListWorkspaces(ctx context.Context) (res []Workspace, err e
 	return result, nil
 }
 
+// Open invokes open operation.
+//
+// Resolves a path into everything a client needs to start, in one call: the workspace, and either a
+// bounded directory listing (a directory path) or the document, block tree, open-or-resumed session,
+// and prompt presets (a file path). The client performs no path arithmetic, listing probe, or
+// multi-call sequencing. A path outside ALLOWED_ROOTS is the typed `path-outside-allowed-roots`
+// refusal. `POST /documents` and `GET /directories` remain for composability.
+//
+// POST /open
+func (c *Client) Open(ctx context.Context, request *OpenRequest) (OpenRes, error) {
+	res, err := c.sendOpen(ctx, request)
+	return res, err
+}
+
+func (c *Client) sendOpen(ctx context.Context, request *OpenRequest) (res OpenRes, err error) {
+	otelAttrs := []attribute.KeyValue{
+		otelogen.OperationID("open"),
+		semconv.HTTPRequestMethodKey.String("POST"),
+		semconv.URLTemplateKey.String("/open"),
+	}
+	otelAttrs = append(otelAttrs, c.cfg.Attributes...)
+
+	// Run stopwatch.
+	startTime := time.Now()
+	defer func() {
+		// Use floating point division here for higher precision (instead of Millisecond method).
+		elapsedDuration := time.Since(startTime)
+		c.duration.Record(ctx, float64(elapsedDuration)/float64(time.Millisecond), metric.WithAttributes(otelAttrs...))
+	}()
+
+	// Increment request counter.
+	c.requests.Add(ctx, 1, metric.WithAttributes(otelAttrs...))
+
+	// Start a span for this request.
+	ctx, span := c.cfg.Tracer.Start(ctx, OpenOperation,
+		trace.WithAttributes(otelAttrs...),
+		clientSpanKind,
+	)
+	// Track stage for error reporting.
+	var stage string
+	defer func() {
+		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, stage)
+			c.errors.Add(ctx, 1, metric.WithAttributes(otelAttrs...))
+		}
+		span.End()
+	}()
+
+	stage = "BuildURL"
+	u := uri.Clone(c.requestURL(ctx))
+	var pathParts [1]string
+	pathParts[0] = "/open"
+	uri.AddPathParts(u, pathParts[:]...)
+
+	stage = "EncodeRequest"
+	r, err := ht.NewRequest(ctx, "POST", u)
+	if err != nil {
+		return res, errors.Wrap(err, "create request")
+	}
+	if err := encodeOpenRequest(request, r); err != nil {
+		return res, errors.Wrap(err, "encode request")
+	}
+
+	stage = "SendRequest"
+	resp, err := c.cfg.Client.Do(r)
+	if err != nil {
+		return res, errors.Wrap(err, "do request")
+	}
+	body := resp.Body
+	defer func() {
+		// Drain the body to EOF before closing, so the underlying
+		// connection can be reused by the Transport regardless of the
+		// response status code. See https://github.com/ogen-go/ogen/issues/1670.
+		_, _ = io.Copy(io.Discard, body)
+		_ = body.Close()
+	}()
+
+	stage = "DecodeResponse"
+	result, err := decodeOpenResponse(resp)
+	if err != nil {
+		return res, errors.Wrap(err, "decode response")
+	}
+
+	return result, nil
+}
+
 // OpenDocument invokes openDocument operation.
 //
 // Open/create a document by path; returns its surrogate id.
@@ -2778,6 +3132,111 @@ func (c *Client) sendOpenDocument(ctx context.Context, request *OpenDocumentRequ
 
 	stage = "DecodeResponse"
 	result, err := decodeOpenDocumentResponse(resp)
+	if err != nil {
+		return res, errors.Wrap(err, "decode response")
+	}
+
+	return result, nil
+}
+
+// OpenDocumentSession invokes openDocumentSession operation.
+//
+// Returns the session to use for a document: the anchor-keyed session when `anchorBlockId` is given,
+// otherwise the document's most recently updated session, creating one if none exists. The "newest"
+// policy and the create-or-resume semantics are engine data; the client never lists sessions to choose
+// one.
+//
+// POST /documents/{id}/session
+func (c *Client) OpenDocumentSession(ctx context.Context, request OptOpenSessionRequest, params OpenDocumentSessionParams) (*Session, error) {
+	res, err := c.sendOpenDocumentSession(ctx, request, params)
+	return res, err
+}
+
+func (c *Client) sendOpenDocumentSession(ctx context.Context, request OptOpenSessionRequest, params OpenDocumentSessionParams) (res *Session, err error) {
+	otelAttrs := []attribute.KeyValue{
+		otelogen.OperationID("openDocumentSession"),
+		semconv.HTTPRequestMethodKey.String("POST"),
+		semconv.URLTemplateKey.String("/documents/{id}/session"),
+	}
+	otelAttrs = append(otelAttrs, c.cfg.Attributes...)
+
+	// Run stopwatch.
+	startTime := time.Now()
+	defer func() {
+		// Use floating point division here for higher precision (instead of Millisecond method).
+		elapsedDuration := time.Since(startTime)
+		c.duration.Record(ctx, float64(elapsedDuration)/float64(time.Millisecond), metric.WithAttributes(otelAttrs...))
+	}()
+
+	// Increment request counter.
+	c.requests.Add(ctx, 1, metric.WithAttributes(otelAttrs...))
+
+	// Start a span for this request.
+	ctx, span := c.cfg.Tracer.Start(ctx, OpenDocumentSessionOperation,
+		trace.WithAttributes(otelAttrs...),
+		clientSpanKind,
+	)
+	// Track stage for error reporting.
+	var stage string
+	defer func() {
+		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, stage)
+			c.errors.Add(ctx, 1, metric.WithAttributes(otelAttrs...))
+		}
+		span.End()
+	}()
+
+	stage = "BuildURL"
+	u := uri.Clone(c.requestURL(ctx))
+	var pathParts [3]string
+	pathParts[0] = "/documents/"
+	{
+		// Encode "id" parameter.
+		e := uri.NewPathEncoder(uri.PathEncoderConfig{
+			Param:   "id",
+			Style:   uri.PathStyleSimple,
+			Explode: false,
+		})
+		if err := func() error {
+			return e.EncodeValue(conv.StringToString(params.ID))
+		}(); err != nil {
+			return res, errors.Wrap(err, "encode path")
+		}
+		encoded, err := e.Result()
+		if err != nil {
+			return res, errors.Wrap(err, "encode path")
+		}
+		pathParts[1] = encoded
+	}
+	pathParts[2] = "/session"
+	uri.AddPathParts(u, pathParts[:]...)
+
+	stage = "EncodeRequest"
+	r, err := ht.NewRequest(ctx, "POST", u)
+	if err != nil {
+		return res, errors.Wrap(err, "create request")
+	}
+	if err := encodeOpenDocumentSessionRequest(request, r); err != nil {
+		return res, errors.Wrap(err, "encode request")
+	}
+
+	stage = "SendRequest"
+	resp, err := c.cfg.Client.Do(r)
+	if err != nil {
+		return res, errors.Wrap(err, "do request")
+	}
+	body := resp.Body
+	defer func() {
+		// Drain the body to EOF before closing, so the underlying
+		// connection can be reused by the Transport regardless of the
+		// response status code. See https://github.com/ogen-go/ogen/issues/1670.
+		_, _ = io.Copy(io.Discard, body)
+		_ = body.Close()
+	}()
+
+	stage = "DecodeResponse"
+	result, err := decodeOpenDocumentSessionResponse(resp)
 	if err != nil {
 		return res, errors.Wrap(err, "decode response")
 	}

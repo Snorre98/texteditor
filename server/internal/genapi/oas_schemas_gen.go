@@ -2140,6 +2140,79 @@ type EvictCorpusDocumentNoContent struct{}
 
 func (*EvictCorpusDocumentNoContent) evictCorpusDocumentRes() {}
 
+// Framing marker for the `GET /events` liveness feed: the `event:` line carries `type`; the `data:`
+// line carries the payload schema matching that type (ADR-0052 §4). The payload JSON itself has no
+// `type` field.
+// Ref: #/components/schemas/FeedEvent
+type FeedEvent struct {
+	Type FeedEventType `json:"type"`
+}
+
+// GetType returns the value of Type.
+func (s *FeedEvent) GetType() FeedEventType {
+	return s.Type
+}
+
+// SetType sets the value of Type.
+func (s *FeedEvent) SetType(val FeedEventType) {
+	s.Type = val
+}
+
+type FeedEventType string
+
+const (
+	FeedEventTypeCorpus   FeedEventType = "corpus"
+	FeedEventTypeDocument FeedEventType = "document"
+	FeedEventTypeSession  FeedEventType = "session"
+	FeedEventTypeFleet    FeedEventType = "fleet"
+)
+
+// AllValues returns all FeedEventType values.
+func (FeedEventType) AllValues() []FeedEventType {
+	return []FeedEventType{
+		FeedEventTypeCorpus,
+		FeedEventTypeDocument,
+		FeedEventTypeSession,
+		FeedEventTypeFleet,
+	}
+}
+
+// MarshalText implements encoding.TextMarshaler.
+func (s FeedEventType) MarshalText() ([]byte, error) {
+	switch s {
+	case FeedEventTypeCorpus:
+		return []byte(s), nil
+	case FeedEventTypeDocument:
+		return []byte(s), nil
+	case FeedEventTypeSession:
+		return []byte(s), nil
+	case FeedEventTypeFleet:
+		return []byte(s), nil
+	default:
+		return nil, errors.Errorf("invalid value: %q", s)
+	}
+}
+
+// UnmarshalText implements encoding.TextUnmarshaler.
+func (s *FeedEventType) UnmarshalText(data []byte) error {
+	switch FeedEventType(data) {
+	case FeedEventTypeCorpus:
+		*s = FeedEventTypeCorpus
+		return nil
+	case FeedEventTypeDocument:
+		*s = FeedEventTypeDocument
+		return nil
+	case FeedEventTypeSession:
+		*s = FeedEventTypeSession
+		return nil
+	case FeedEventTypeFleet:
+		*s = FeedEventTypeFleet
+		return nil
+	default:
+		return errors.Errorf("invalid value: %q", data)
+	}
+}
+
 // The file at `documents.path` changed externally since the engine last read it; the write-through was
 // refused and no bytes were written (ADR-0047 §3). `currentHash` is the current on-disk content hash
 // so the client can show or compare it; retry with `overwrite: true` to accept it.
@@ -2180,6 +2253,7 @@ func (s *FileChangedExternally) SetCurrentHash(val string) {
 	s.CurrentHash = val
 }
 
+func (*FileChangedExternally) acceptBlockRes()    {}
 func (*FileChangedExternally) commitDocumentRes() {}
 func (*FileChangedExternally) saveDocumentRes()   {}
 
@@ -2411,6 +2485,23 @@ func (s *FleetStateControl) UnmarshalText(data []byte) error {
 		return errors.Errorf("invalid value: %q", data)
 	}
 }
+
+// GetEventsOKRawTextEventStream represents raw HTTP response for GetEvents text/event-stream.
+type GetEventsOKRawTextEventStream struct {
+	Response *http.Response `json:"-"`
+}
+
+// GetResponse returns the value of Response.
+func (s *GetEventsOKRawTextEventStream) GetResponse() *http.Response {
+	return s.Response
+}
+
+// SetResponse sets the value of Response.
+func (s *GetEventsOKRawTextEventStream) SetResponse(val *http.Response) {
+	s.Response = val
+}
+
+func (*GetEventsOKRawTextEventStream) getEventsRes() {}
 
 // Ref: #/components/schemas/Guard
 type Guard struct {
@@ -3311,6 +3402,7 @@ func (s *NotFound) SetID(val string) {
 func (*NotFound) cancelTurnRes()        {}
 func (*NotFound) getSessionMeterRes()   {}
 func (*NotFound) getTurnContextRes()    {}
+func (*NotFound) openRes()              {}
 func (*NotFound) putSessionContextRes() {}
 func (*NotFound) renameSessionRes()     {}
 func (*NotFound) resolveLocateRes()     {}
@@ -3352,8 +3444,10 @@ func (s *NotFoundError) UnmarshalText(data []byte) error {
 type NotFoundResource string
 
 const (
-	NotFoundResourceTurn    NotFoundResource = "turn"
-	NotFoundResourceSession NotFoundResource = "session"
+	NotFoundResourceTurn     NotFoundResource = "turn"
+	NotFoundResourceSession  NotFoundResource = "session"
+	NotFoundResourcePath     NotFoundResource = "path"
+	NotFoundResourceDocument NotFoundResource = "document"
 )
 
 // AllValues returns all NotFoundResource values.
@@ -3361,6 +3455,8 @@ func (NotFoundResource) AllValues() []NotFoundResource {
 	return []NotFoundResource{
 		NotFoundResourceTurn,
 		NotFoundResourceSession,
+		NotFoundResourcePath,
+		NotFoundResourceDocument,
 	}
 }
 
@@ -3370,6 +3466,10 @@ func (s NotFoundResource) MarshalText() ([]byte, error) {
 	case NotFoundResourceTurn:
 		return []byte(s), nil
 	case NotFoundResourceSession:
+		return []byte(s), nil
+	case NotFoundResourcePath:
+		return []byte(s), nil
+	case NotFoundResourceDocument:
 		return []byte(s), nil
 	default:
 		return nil, errors.Errorf("invalid value: %q", s)
@@ -3384,6 +3484,12 @@ func (s *NotFoundResource) UnmarshalText(data []byte) error {
 		return nil
 	case NotFoundResourceSession:
 		*s = NotFoundResourceSession
+		return nil
+	case NotFoundResourcePath:
+		*s = NotFoundResourcePath
+		return nil
+	case NotFoundResourceDocument:
+		*s = NotFoundResourceDocument
 		return nil
 	default:
 		return errors.Errorf("invalid value: %q", data)
@@ -3403,6 +3509,192 @@ func (s *OpenDocumentRequest) GetPath() string {
 // SetPath sets the value of Path.
 func (s *OpenDocumentRequest) SetPath(val string) {
 	s.Path = val
+}
+
+// The bootstrap request for `POST /open` (ADR-0052 §1).
+// Ref: #/components/schemas/OpenRequest
+type OpenRequest struct {
+	// Absolute path to open; a directory returns a bounded listing, a file opens as a document.
+	Path string `json:"path"`
+	// Optional block anchor; selects the anchor-keyed session when given (ADR-0052 §2).
+	AnchorBlockId OptString `json:"anchorBlockId"`
+	// Optional preset persisted on a newly created session.
+	ModeType OptString `json:"modeType"`
+}
+
+// GetPath returns the value of Path.
+func (s *OpenRequest) GetPath() string {
+	return s.Path
+}
+
+// GetAnchorBlockId returns the value of AnchorBlockId.
+func (s *OpenRequest) GetAnchorBlockId() OptString {
+	return s.AnchorBlockId
+}
+
+// GetModeType returns the value of ModeType.
+func (s *OpenRequest) GetModeType() OptString {
+	return s.ModeType
+}
+
+// SetPath sets the value of Path.
+func (s *OpenRequest) SetPath(val string) {
+	s.Path = val
+}
+
+// SetAnchorBlockId sets the value of AnchorBlockId.
+func (s *OpenRequest) SetAnchorBlockId(val OptString) {
+	s.AnchorBlockId = val
+}
+
+// SetModeType sets the value of ModeType.
+func (s *OpenRequest) SetModeType(val OptString) {
+	s.ModeType = val
+}
+
+// The engine-owned bootstrap result (ADR-0052 §1). `kind` discriminates: `workspace` is always
+// present; `listing` is present for kind=directory; `document`, `blocks`, `session`, and `modes` are
+// present for kind=document.
+// Ref: #/components/schemas/OpenResult
+type OpenResult struct {
+	Kind      OpenResultKind      `json:"kind"`
+	Workspace Workspace           `json:"workspace"`
+	Listing   OptDirectoryListing `json:"listing"`
+	Document  OptDocument         `json:"document"`
+	Blocks    []Block             `json:"blocks"`
+	Session   OptSession          `json:"session"`
+	Modes     []Mode              `json:"modes"`
+}
+
+// GetKind returns the value of Kind.
+func (s *OpenResult) GetKind() OpenResultKind {
+	return s.Kind
+}
+
+// GetWorkspace returns the value of Workspace.
+func (s *OpenResult) GetWorkspace() Workspace {
+	return s.Workspace
+}
+
+// GetListing returns the value of Listing.
+func (s *OpenResult) GetListing() OptDirectoryListing {
+	return s.Listing
+}
+
+// GetDocument returns the value of Document.
+func (s *OpenResult) GetDocument() OptDocument {
+	return s.Document
+}
+
+// GetBlocks returns the value of Blocks.
+func (s *OpenResult) GetBlocks() []Block {
+	return s.Blocks
+}
+
+// GetSession returns the value of Session.
+func (s *OpenResult) GetSession() OptSession {
+	return s.Session
+}
+
+// GetModes returns the value of Modes.
+func (s *OpenResult) GetModes() []Mode {
+	return s.Modes
+}
+
+// SetKind sets the value of Kind.
+func (s *OpenResult) SetKind(val OpenResultKind) {
+	s.Kind = val
+}
+
+// SetWorkspace sets the value of Workspace.
+func (s *OpenResult) SetWorkspace(val Workspace) {
+	s.Workspace = val
+}
+
+// SetListing sets the value of Listing.
+func (s *OpenResult) SetListing(val OptDirectoryListing) {
+	s.Listing = val
+}
+
+// SetDocument sets the value of Document.
+func (s *OpenResult) SetDocument(val OptDocument) {
+	s.Document = val
+}
+
+// SetBlocks sets the value of Blocks.
+func (s *OpenResult) SetBlocks(val []Block) {
+	s.Blocks = val
+}
+
+// SetSession sets the value of Session.
+func (s *OpenResult) SetSession(val OptSession) {
+	s.Session = val
+}
+
+// SetModes sets the value of Modes.
+func (s *OpenResult) SetModes(val []Mode) {
+	s.Modes = val
+}
+
+func (*OpenResult) openRes() {}
+
+type OpenResultKind string
+
+const (
+	OpenResultKindDirectory OpenResultKind = "directory"
+	OpenResultKindDocument  OpenResultKind = "document"
+)
+
+// AllValues returns all OpenResultKind values.
+func (OpenResultKind) AllValues() []OpenResultKind {
+	return []OpenResultKind{
+		OpenResultKindDirectory,
+		OpenResultKindDocument,
+	}
+}
+
+// MarshalText implements encoding.TextMarshaler.
+func (s OpenResultKind) MarshalText() ([]byte, error) {
+	switch s {
+	case OpenResultKindDirectory:
+		return []byte(s), nil
+	case OpenResultKindDocument:
+		return []byte(s), nil
+	default:
+		return nil, errors.Errorf("invalid value: %q", s)
+	}
+}
+
+// UnmarshalText implements encoding.TextUnmarshaler.
+func (s *OpenResultKind) UnmarshalText(data []byte) error {
+	switch OpenResultKind(data) {
+	case OpenResultKindDirectory:
+		*s = OpenResultKindDirectory
+		return nil
+	case OpenResultKindDocument:
+		*s = OpenResultKindDocument
+		return nil
+	default:
+		return errors.Errorf("invalid value: %q", data)
+	}
+}
+
+// Body for `POST /documents/{id}/session` (ADR-0052 §2).
+// Ref: #/components/schemas/OpenSessionRequest
+type OpenSessionRequest struct {
+	// Optional block anchor; when present the anchor-keyed session is returned (created if none exists),
+	// otherwise the document's most recently updated session.
+	AnchorBlockId OptString `json:"anchorBlockId"`
+}
+
+// GetAnchorBlockId returns the value of AnchorBlockId.
+func (s *OpenSessionRequest) GetAnchorBlockId() OptString {
+	return s.AnchorBlockId
+}
+
+// SetAnchorBlockId sets the value of AnchorBlockId.
+func (s *OpenSessionRequest) SetAnchorBlockId(val OptString) {
+	s.AnchorBlockId = val
 }
 
 // NewOptBool returns new OptBool with value set to v.
@@ -3727,6 +4019,98 @@ func (o OptCorpusJob) Or(d CorpusJob) CorpusJob {
 	return d
 }
 
+// NewOptDirectoryListing returns new OptDirectoryListing with value set to v.
+func NewOptDirectoryListing(v DirectoryListing) OptDirectoryListing {
+	return OptDirectoryListing{
+		Value: v,
+		Set:   true,
+	}
+}
+
+// OptDirectoryListing is optional DirectoryListing.
+type OptDirectoryListing struct {
+	Value DirectoryListing
+	Set   bool
+}
+
+// IsSet returns true if OptDirectoryListing was set.
+func (o OptDirectoryListing) IsSet() bool { return o.Set }
+
+// Reset unsets value.
+func (o *OptDirectoryListing) Reset() {
+	var v DirectoryListing
+	o.Value = v
+	o.Set = false
+}
+
+// SetTo sets value to v.
+func (o *OptDirectoryListing) SetTo(v DirectoryListing) {
+	o.Set = true
+	o.Value = v
+}
+
+// Get returns value and boolean that denotes whether value was set.
+func (o OptDirectoryListing) Get() (v DirectoryListing, ok bool) {
+	if !o.Set {
+		return v, false
+	}
+	return o.Value, true
+}
+
+// Or returns value if set, or given parameter if does not.
+func (o OptDirectoryListing) Or(d DirectoryListing) DirectoryListing {
+	if v, ok := o.Get(); ok {
+		return v
+	}
+	return d
+}
+
+// NewOptDocument returns new OptDocument with value set to v.
+func NewOptDocument(v Document) OptDocument {
+	return OptDocument{
+		Value: v,
+		Set:   true,
+	}
+}
+
+// OptDocument is optional Document.
+type OptDocument struct {
+	Value Document
+	Set   bool
+}
+
+// IsSet returns true if OptDocument was set.
+func (o OptDocument) IsSet() bool { return o.Set }
+
+// Reset unsets value.
+func (o *OptDocument) Reset() {
+	var v Document
+	o.Value = v
+	o.Set = false
+}
+
+// SetTo sets value to v.
+func (o *OptDocument) SetTo(v Document) {
+	o.Set = true
+	o.Value = v
+}
+
+// Get returns value and boolean that denotes whether value was set.
+func (o OptDocument) Get() (v Document, ok bool) {
+	if !o.Set {
+		return v, false
+	}
+	return o.Value, true
+}
+
+// Or returns value if set, or given parameter if does not.
+func (o OptDocument) Or(d Document) Document {
+	if v, ok := o.Get(); ok {
+		return v
+	}
+	return d
+}
+
 // NewOptFloat64 returns new OptFloat64 with value set to v.
 func NewOptFloat64(v float64) OptFloat64 {
 	return OptFloat64{
@@ -4003,6 +4387,52 @@ func (o OptModelLiveState) Or(d ModelLiveState) ModelLiveState {
 	return d
 }
 
+// NewOptOpenSessionRequest returns new OptOpenSessionRequest with value set to v.
+func NewOptOpenSessionRequest(v OpenSessionRequest) OptOpenSessionRequest {
+	return OptOpenSessionRequest{
+		Value: v,
+		Set:   true,
+	}
+}
+
+// OptOpenSessionRequest is optional OpenSessionRequest.
+type OptOpenSessionRequest struct {
+	Value OpenSessionRequest
+	Set   bool
+}
+
+// IsSet returns true if OptOpenSessionRequest was set.
+func (o OptOpenSessionRequest) IsSet() bool { return o.Set }
+
+// Reset unsets value.
+func (o *OptOpenSessionRequest) Reset() {
+	var v OpenSessionRequest
+	o.Value = v
+	o.Set = false
+}
+
+// SetTo sets value to v.
+func (o *OptOpenSessionRequest) SetTo(v OpenSessionRequest) {
+	o.Set = true
+	o.Value = v
+}
+
+// Get returns value and boolean that denotes whether value was set.
+func (o OptOpenSessionRequest) Get() (v OpenSessionRequest, ok bool) {
+	if !o.Set {
+		return v, false
+	}
+	return o.Value, true
+}
+
+// Or returns value if set, or given parameter if does not.
+func (o OptOpenSessionRequest) Or(d OpenSessionRequest) OpenSessionRequest {
+	if v, ok := o.Get(); ok {
+		return v
+	}
+	return d
+}
+
 // NewOptSelection returns new OptSelection with value set to v.
 func NewOptSelection(v Selection) OptSelection {
 	return OptSelection{
@@ -4043,6 +4473,52 @@ func (o OptSelection) Get() (v Selection, ok bool) {
 
 // Or returns value if set, or given parameter if does not.
 func (o OptSelection) Or(d Selection) Selection {
+	if v, ok := o.Get(); ok {
+		return v
+	}
+	return d
+}
+
+// NewOptSession returns new OptSession with value set to v.
+func NewOptSession(v Session) OptSession {
+	return OptSession{
+		Value: v,
+		Set:   true,
+	}
+}
+
+// OptSession is optional Session.
+type OptSession struct {
+	Value Session
+	Set   bool
+}
+
+// IsSet returns true if OptSession was set.
+func (o OptSession) IsSet() bool { return o.Set }
+
+// Reset unsets value.
+func (o *OptSession) Reset() {
+	var v Session
+	o.Value = v
+	o.Set = false
+}
+
+// SetTo sets value to v.
+func (o *OptSession) SetTo(v Session) {
+	o.Set = true
+	o.Value = v
+}
+
+// Get returns value and boolean that denotes whether value was set.
+func (o OptSession) Get() (v Session, ok bool) {
+	if !o.Set {
+		return v, false
+	}
+	return o.Value, true
+}
+
+// Or returns value if set, or given parameter if does not.
+func (o OptSession) Or(d Session) Session {
 	if v, ok := o.Get(); ok {
 		return v
 	}
@@ -4366,6 +4842,7 @@ func (s *PathOutsideAllowedRoots) SetAllowedRoots(val []string) {
 
 func (*PathOutsideAllowedRoots) evictCorpusDocumentRes() {}
 func (*PathOutsideAllowedRoots) listDirectoryRes()       {}
+func (*PathOutsideAllowedRoots) openRes()                {}
 func (*PathOutsideAllowedRoots) putCorpusRes()           {}
 
 type PathOutsideAllowedRootsError string
@@ -4552,6 +5029,7 @@ func (s *Revision) SetPath(val OptString) {
 	s.Path = val
 }
 
+func (*Revision) acceptBlockRes()    {}
 func (*Revision) commitDocumentRes() {}
 func (*Revision) saveDocumentRes()   {}
 

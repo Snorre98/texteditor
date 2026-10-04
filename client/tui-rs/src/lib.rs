@@ -12,6 +12,7 @@
 //! - [`gen`] — committed generated client/types (never hand-shaped).
 //! - [`discovery`] — `ENGINE_URL`/`ENGINE_PORT`/default resolution + `/health` probe.
 //! - [`sse`] — the `/turn` SSE framing + typed per-event dispatch.
+//! - [`feed`] — the `/events` non-turn liveness feed decoder (shares [`sse`]'s framing).
 //! - [`state`] — the render-only snapshot and its pure event reduction.
 //! - [`bridge`] — the tokio worker thread and the UI⇄engine channel shape.
 //! - [`ui`] — the Ratatui widgets and the synchronous crossterm event/render loop.
@@ -26,6 +27,7 @@ pub mod gen;
 
 pub mod bridge;
 pub mod discovery;
+pub mod feed;
 pub mod sse;
 pub mod state;
 pub mod ui;

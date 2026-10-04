@@ -1,8 +1,9 @@
-//! The async bridge (ADR-0046 §4).
+//! The async bridge (ADR-0046 §4, ADR-0052 §5).
 //!
-//! One tokio runtime on a worker OS thread owns the generated async calls and
-//! the `/turn` byte stream. The UI thread stays synchronous and render-only and
-//! exchanges messages with the worker over channels:
+//! One tokio runtime on a worker OS thread owns the generated async calls, the
+//! `/turn` byte stream, and the long-lived `/events` liveness feed. The UI
+//! thread stays synchronous and render-only and exchanges messages with the
+//! worker over channels:
 //!
 //! - **UI → worker:** [`Command`] over a `tokio::sync::mpsc::UnboundedSender`
 //!   (a synchronous `send`).
@@ -13,21 +14,24 @@
 //! responsive while a turn streams — that is what makes `Command::Cancel`
 //! deliverable. The worker owns the immutable engine facts (base URL, workspace
 //! id, open document id, session id); the UI supplies only the active preset
-//! name and the typed message per turn. No domain logic runs here — it routes
-//! bytes and events.
+//! name and the typed message per turn. Selection, sequencing, and liveness are
+//! engine-owned (ADR-0052): bootstrap is one `POST /open`, session resume is one
+//! `POST /documents/{id}/session`, approve is one atomic `accept`, and non-turn
+//! state arrives on `GET /events`. No domain logic runs here — it routes bytes
+//! and events.
 
-use std::path::Path;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 
 use futures_util::StreamExt;
 
 use crate::discovery::{self, EngineEnv};
+use crate::feed::{FeedDecoded, FeedDecoder, FeedEvent};
 use crate::gen::{
-    BlockEdit, CancelTurnApiError, CommitDocumentApiError, CommitRequest, ContextPolicy,
-    CorpusIndexRequest, CreateSessionRequest, CreateWorkspaceRequest, EvictCorpusDocumentApiError,
-    HttpClient, ListDirectoryApiError, OpenDocumentRequest, PutCorpusApiError, PutCorpusRequest,
-    RenameSessionRequest, Session, Task,
+    AcceptBlockApiError, CommitRequest, ContextPolicy, CorpusIndexRequest, CreateSessionRequest,
+    EvictCorpusDocumentApiError, FleetEvent, FleetEventControl, FleetState, FleetStateControl,
+    HttpClient, ListDirectoryApiError, OpenApiError, OpenRequest, OpenResult, OpenResultKind,
+    PutCorpusApiError, PutCorpusRequest, RenameSessionRequest, Session, Task,
 };
 use crate::sse::{Decoded, SseDecoder};
 use crate::state::{FleetErrorInfo, UiEvent};
@@ -35,17 +39,16 @@ use crate::state::{FleetErrorInfo, UiEvent};
 /// A request from the UI thread to the worker.
 #[derive(Debug, Clone)]
 pub enum Command {
-    /// Resolve-or-create a workspace for `path`; if it is a directory, show the
-    /// bounded listing, otherwise open it as a document (E2).
-    Bootstrap { path: String },
+    /// Engine-owned bootstrap: resolve `path` into a directory listing or a
+    /// document context in one `POST /open` (ADR-0052 §1).
+    Open { path: String },
+    /// Open a document chosen from the directory picker (same `POST /open`).
+    OpenDocument { path: String },
     /// List one directory (bounded by ALLOWED_ROOTS).
     ListDirectory { path: String },
-    /// Open a document (chosen from the directory picker) and resume/create its
-    /// session.
-    OpenDocument { path: String },
-    /// Refresh the workspace-scoped session list.
+    /// Refresh the workspace-scoped session list (the picker overlay; ADR-0049).
     ListSessions,
-    /// Resume an existing session.
+    /// Resume an existing session chosen from the list.
     OpenSession { session: Session },
     /// Create a new doc-level session for the active document.
     NewSession,
@@ -73,8 +76,6 @@ pub enum Command {
     PutSessionContext { policy: ContextPolicy },
     /// Read the workspace's corpus scope + per-document status + job progress.
     GetCorpus,
-    /// Re-read the corpus state (job-progress poll; GET /corpus).
-    RefreshCorpus,
     /// Set the corpus scope (idempotent, index-only; ADR-0049 §3/§4).
     PutCorpus {
         roots: Vec<String>,
@@ -93,10 +94,9 @@ pub enum Command {
     StopModel { name: String },
     /// Provision a model (raw lifecycle verb).
     ProvisionModel { name: String },
-    /// Accept the staged candidate for `block_id` (stage + commit + write-through).
-    Approve { block_id: String },
-    /// Retry an approve with the explicit `overwrite: true` opt-in.
-    Overwrite { block_id: String },
+    /// Atomically accept the staged candidate for `block_id` (ADR-0052 §3).
+    /// `overwrite` is the explicit external-change opt-in.
+    Accept { block_id: String, overwrite: bool },
     /// Ask the worker to stop.
     Shutdown,
 }
@@ -160,6 +160,8 @@ async fn run_worker(
         workspace_id: None,
         doc_id: None,
         session_id: None,
+        feed_task: None,
+        feed_workspace: None,
     };
 
     // The running turn's task handle (at most one turn at a time — the UI
@@ -168,9 +170,8 @@ async fn run_worker(
 
     while let Some(command) = cmd_rx.recv().await {
         match command {
-            Command::Bootstrap { path } => worker.bootstrap(path).await,
+            Command::Open { path } | Command::OpenDocument { path } => worker.open(path).await,
             Command::ListDirectory { path } => worker.list_directory(path).await,
-            Command::OpenDocument { path } => worker.open_document(path).await,
             Command::ListSessions => worker.refresh_sessions().await,
             Command::OpenSession { session } => worker.open_session(session),
             Command::NewSession => worker.new_session().await,
@@ -202,7 +203,7 @@ async fn run_worker(
             } => worker.resolve_locate(turn_id, chunk_key, cancel).await,
             Command::LoadBlocks => worker.load_blocks().await,
             Command::PutSessionContext { policy } => worker.put_session_context(policy).await,
-            Command::GetCorpus | Command::RefreshCorpus => worker.refresh_corpus().await,
+            Command::GetCorpus => worker.refresh_corpus().await,
             Command::PutCorpus {
                 roots,
                 include,
@@ -214,10 +215,15 @@ async fn run_worker(
             Command::StartModel { name } => worker.start_model(name).await,
             Command::StopModel { name } => worker.stop_model(name).await,
             Command::ProvisionModel { name } => worker.provision_model(name).await,
-            Command::Approve { block_id } => worker.approve(block_id, false).await,
-            Command::Overwrite { block_id } => worker.approve(block_id, true).await,
+            Command::Accept {
+                block_id,
+                overwrite,
+            } => worker.accept(block_id, overwrite).await,
             Command::Shutdown => {
                 if let Some(handle) = active.take() {
+                    handle.abort();
+                }
+                if let Some(handle) = worker.feed_task.take() {
                     handle.abort();
                 }
                 break;
@@ -232,6 +238,11 @@ struct Worker {
     workspace_id: Option<String>,
     doc_id: Option<String>,
     session_id: Option<String>,
+    /// The long-lived `/events` subscription task (aborted/replaced on workspace
+    /// change, ADR-0052 §4).
+    feed_task: Option<tokio::task::JoinHandle<()>>,
+    /// The workspace the current feed subscription is scoped to.
+    feed_workspace: Option<String>,
 }
 
 impl Worker {
@@ -243,96 +254,108 @@ impl Worker {
         self.emit(UiEvent::Error(message.into()));
     }
 
-    /// Resolve-or-create a workspace for `path` (E2). A directory opens the
-    /// bounded browser; a file opens as a document and resumes its session.
-    async fn bootstrap(&mut self, path: String) {
-        if self.client.is_none() {
+    /// Engine-owned bootstrap (ADR-0052 §1): one `POST /open` resolves the
+    /// workspace plus either a directory listing or a document context.
+    async fn open(&mut self, path: String) {
+        let Some(client) = self.client.clone() else {
             self.error("engine not connected; cannot open");
             return;
-        }
-        // Try the bounded directory listing first: a directory lists, a file
-        // does not. `ListDirectoryApiError::Status403` is the typed refusal.
-        match self.client.clone().unwrap().list_directory(&path).await {
-            Ok(listing) => {
-                self.adopt_workspace(path).await;
-                self.emit(UiEvent::Directory { listing });
-            }
+        };
+        let request = OpenRequest {
+            path,
+            anchor_block_id: None,
+            mode_type: None,
+        };
+        match client.open(request).await {
+            Ok(result) => self.handle_open_result(result).await,
             Err(err) => {
                 if let Some(api) = err.api() {
-                    if let Some(ListDirectoryApiError::Status403(refusal)) = &api.typed {
-                        self.emit(UiEvent::DirectoryRefused {
-                            path: refusal.path.clone(),
-                            allowed_roots: refusal.allowed_roots.clone(),
-                        });
-                        return;
+                    match &api.typed {
+                        Some(OpenApiError::Status403(refusal)) => {
+                            self.emit(UiEvent::DirectoryRefused {
+                                path: refusal.path.clone(),
+                                allowed_roots: refusal.allowed_roots.clone(),
+                            });
+                            return;
+                        }
+                        Some(OpenApiError::Status404(_)) => {
+                            self.error("open: path not found");
+                            return;
+                        }
+                        None => {}
                     }
                 }
-                self.open_document(path).await;
+                self.error(format!("open failed: {err}"));
             }
         }
     }
 
-    /// Resolve-or-create a workspace rooted at `root` and emit it.
-    async fn adopt_workspace(&mut self, root: String) {
-        let Some(client) = self.client.clone() else {
-            return;
-        };
-        match client
-            .create_workspace(CreateWorkspaceRequest { root, name: None })
-            .await
-        {
-            Ok(ws) => {
-                self.workspace_id = Some(ws.id.clone());
-                self.emit(UiEvent::Workspace {
-                    id: ws.id,
-                    root: ws.root,
-                    name: ws.name,
-                });
-                // Fetch the workspace corpus scope/status on adoption (E2c).
-                self.refresh_corpus().await;
-            }
-            Err(err) => self.error(format!("open workspace failed: {err}")),
-        }
-    }
-
-    /// Open a document by path, resolve its workspace, load presets, and
-    /// resume/create its session (E1 bootstrap, E2 workspace-aware).
-    async fn open_document(&mut self, path: String) {
-        let Some(client) = self.client.clone() else {
-            self.error("engine not connected; cannot open document");
-            return;
-        };
-
-        let document = match client.open_document(OpenDocumentRequest { path }).await {
-            Ok(document) => document,
-            Err(err) => {
-                self.error(format!("open document failed: {err}"));
-                return;
-            }
-        };
-        self.doc_id = Some(document.id.clone());
-        self.emit(UiEvent::Document {
-            id: document.id.clone(),
-            path: document.path.clone(),
-            external_change: document.external_change.unwrap_or(false),
+    /// Render one `POST /open` result and (re)subscribe the feed to its
+    /// workspace. The client performs no path arithmetic or multi-call probing.
+    async fn handle_open_result(&mut self, result: OpenResult) {
+        let workspace_id = result.workspace.id.clone();
+        self.workspace_id = Some(workspace_id.clone());
+        self.emit(UiEvent::Workspace {
+            id: workspace_id.clone(),
+            root: result.workspace.root.clone(),
+            name: result.workspace.name.clone(),
         });
 
-        // Resolve the workspace from the canonical document parent (string path
-        // arithmetic on engine-provided data; no client filesystem read).
-        if self.workspace_id.is_none() {
-            if let Some(parent) = Path::new(&document.path).parent() {
-                self.adopt_workspace(parent.to_string_lossy().into_owned())
-                    .await;
+        match result.kind {
+            OpenResultKind::Directory => {
+                self.doc_id = None;
+                self.session_id = None;
+                self.emit(UiEvent::Blocks(Vec::new()));
+                if let Some(listing) = result.listing {
+                    self.emit(UiEvent::Directory { listing });
+                }
+            }
+            OpenResultKind::Document => {
+                if let Some(document) = result.document {
+                    self.doc_id = Some(document.id.clone());
+                    self.emit(UiEvent::Document {
+                        id: document.id,
+                        path: document.path,
+                        external_change: document.external_change.unwrap_or(false),
+                    });
+                }
+                if let Some(blocks) = result.blocks {
+                    self.emit(UiEvent::Blocks(blocks));
+                }
+                if let Some(modes) = result.modes {
+                    self.emit(UiEvent::Modes(modes));
+                }
+                if let Some(session) = result.session {
+                    self.session_id = Some(session.id.clone());
+                    self.emit(UiEvent::Session {
+                        id: session.id,
+                        title: session.title.clone(),
+                        policy: session.context_policy.clone(),
+                    });
+                }
             }
         }
 
-        match client.list_modes().await {
-            Ok(modes) => self.emit(UiEvent::Modes(modes)),
-            Err(err) => self.error(format!("list presets failed: {err}")),
-        }
+        self.restart_feed(workspace_id);
+        self.refresh_corpus().await;
+    }
 
-        self.load_blocks().await;
-        self.resume_or_create(&document.id).await;
+    /// (Re)subscribe the `/events` feed to a workspace. A workspace change
+    /// aborts the old subscription and starts a new one.
+    fn restart_feed(&mut self, workspace_id: String) {
+        if self.feed_workspace.as_deref() == Some(workspace_id.as_str()) && self.feed_task.is_some()
+        {
+            return;
+        }
+        if let Some(handle) = self.feed_task.take() {
+            handle.abort();
+        }
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        let tx = self.event_tx.clone();
+        self.feed_workspace = Some(workspace_id.clone());
+        self.feed_task = Some(tokio::spawn(feed_loop(client, workspace_id, tx)));
     }
 
     /// List one directory (bounded).
@@ -368,35 +391,6 @@ impl Worker {
         {
             Ok(sessions) => self.emit(UiEvent::Sessions(sessions)),
             Err(err) => self.error(format!("list sessions failed: {err}")),
-        }
-    }
-
-    /// Resume the newest session for a document, or create one.
-    async fn resume_or_create(&mut self, document_id: &str) {
-        let Some(client) = self.client.clone() else {
-            return;
-        };
-        match client
-            .list_sessions(self.workspace_id.clone(), Some(document_id.to_string()))
-            .await
-        {
-            Ok(sessions) => {
-                self.emit(UiEvent::Sessions(sessions.clone()));
-                if let Some(session) = sessions.into_iter().next() {
-                    self.session_id = Some(session.id.clone());
-                    self.emit(UiEvent::Session {
-                        id: session.id,
-                        title: session.title,
-                        policy: session.context_policy,
-                    });
-                } else {
-                    self.create_session(document_id, None).await;
-                }
-            }
-            Err(err) => {
-                self.error(format!("list sessions failed: {err}"));
-                self.create_session(document_id, None).await;
-            }
         }
     }
 
@@ -494,8 +488,8 @@ impl Worker {
         }
     }
 
-    /// Read the workspace corpus state (ADR-0049 §4). `GET /corpus` is also the
-    /// pinned job-progress poll (Phase C); the overlay drives it while a job runs.
+    /// Read the workspace corpus state (ADR-0049 §4). Progress arrives on the
+    /// liveness feed; this is the on-demand status read (overlay open).
     async fn refresh_corpus(&self) {
         let (Some(client), Some(workspace_id)) = (self.client.clone(), self.workspace_id.clone())
         else {
@@ -581,9 +575,9 @@ impl Worker {
         }
     }
 
-    /// Read the fleet observability state (`GET /fleet`) (E3). There is no
-    /// client-side poll loop: the engine owns orchestration (ADR-0040 recorded
-    /// note) and the UI refetches on open and after each raw lifecycle verb.
+    /// Read the fleet observability state (`GET /fleet`) (E3). Ongoing changes
+    /// arrive on the liveness feed; the client refetches on open and after each
+    /// raw lifecycle verb.
     async fn refresh_fleet(&self) {
         let Some(client) = self.client.clone() else {
             return;
@@ -683,10 +677,10 @@ impl Worker {
             Err(err) => {
                 if let Some(api) = err.api() {
                     match &api.typed {
-                        Some(CancelTurnApiError::Status409(_)) => {
+                        Some(crate::gen::CancelTurnApiError::Status409(_)) => {
                             self.error("cancel: turn is not running")
                         }
-                        Some(CancelTurnApiError::Status404(_)) => {
+                        Some(crate::gen::CancelTurnApiError::Status404(_)) => {
                             self.error("cancel: unknown turn")
                         }
                         None => self.error(format!("cancel failed: {err}")),
@@ -698,40 +692,21 @@ impl Worker {
         }
     }
 
-    /// The diff-preview accept path: fetch the newest staged candidate, apply it,
-    /// then commit (which is the write boundary, ADR-0047). `overwrite` is the
-    /// explicit external-change opt-in.
-    async fn approve(&mut self, block_id: String, overwrite: bool) {
+    /// The atomic approve write boundary (ADR-0052 §3): one `accept` call
+    /// commits + writes through; the client sends no candidate text. An external
+    /// change is the typed 409, rendered as a labeled conflict.
+    async fn accept(&mut self, block_id: String, overwrite: bool) {
         let (Some(client), Some(document_id)) = (self.client.clone(), self.doc_id.clone()) else {
-            self.error("document not ready; approve ignored");
+            self.error("document not ready; accept ignored");
             return;
         };
-
-        let candidates = match client.get_candidates(&document_id, &block_id).await {
-            Ok(candidates) => candidates,
-            Err(err) => {
-                self.error(format!("list candidates failed: {err}"));
-                return;
-            }
-        };
-        // Engine returns candidates newest-first (ts DESC, rowid DESC — ADR-0047 §5).
-        let Some(text) = candidates.into_iter().next().and_then(|c| c.text) else {
-            self.error(format!("no candidate staged for block {block_id}"));
-            return;
-        };
-
-        if let Err(err) = client
-            .apply_edit(&document_id, BlockEdit::new(block_id, text))
-            .await
-        {
-            self.error(format!("apply edit failed: {err}"));
-            return;
-        }
-
         let request = CommitRequest {
             overwrite: Some(overwrite),
         };
-        match client.commit_document(&document_id, Some(request)).await {
+        match client
+            .accept_block(&document_id, &block_id, Some(request))
+            .await
+        {
             Ok(revision) => {
                 self.emit(UiEvent::Approved { revision });
                 // The engine's tree changed; refresh the reader (ADR-0050).
@@ -739,14 +714,14 @@ impl Worker {
             }
             Err(err) => {
                 if let Some(api) = err.api() {
-                    if let Some(CommitDocumentApiError::Status409(conflict)) = &api.typed {
+                    if let Some(AcceptBlockApiError::Status409(conflict)) = &api.typed {
                         self.emit(UiEvent::Conflict {
                             message: format!("file-changed-externally: {}", conflict.path),
                         });
                         return;
                     }
                 }
-                self.error(format!("commit failed: {err}"));
+                self.error(format!("accept failed: {err}"));
             }
         }
     }
@@ -763,6 +738,81 @@ fn fleet_action_error(action: &str, name: &str, err: impl std::fmt::Display) -> 
     FleetErrorInfo {
         message: format!("fleet {action} {name}: {rendered}"),
         provision_hint,
+    }
+}
+
+/// Subscribe to the non-turn `/events` feed and forward typed events to the UI.
+/// The subscription is scoped to a workspace (ADR-0052 §4) and reconnects with a
+/// short backoff; the task is aborted on workspace change or shutdown.
+async fn feed_loop(client: HttpClient, workspace_id: String, event_tx: Sender<UiEvent>) {
+    loop {
+        match client.get_events(Some(workspace_id.as_str())).await {
+            Ok(stream) => {
+                futures_util::pin_mut!(stream);
+                let mut decoder = FeedDecoder::new();
+                while let Some(chunk) = stream.next().await {
+                    match chunk {
+                        Ok(bytes) => {
+                            for decoded in decoder.push(&bytes) {
+                                emit_feed(&event_tx, decoded);
+                            }
+                        }
+                        Err(err) => {
+                            let _ = event_tx.send(UiEvent::ProtocolNote(format!(
+                                "feed stream error: {err}"
+                            )));
+                            break;
+                        }
+                    }
+                }
+                if let Some(decoded) = decoder.finish() {
+                    emit_feed(&event_tx, decoded);
+                }
+            }
+            Err(err) => {
+                let _ = event_tx.send(UiEvent::ProtocolNote(format!(
+                    "feed subscribe failed: {err}"
+                )));
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    }
+}
+
+/// Emit one decoded feed event to the UI; unknown/invalid events are labeled.
+fn emit_feed(event_tx: &Sender<UiEvent>, decoded: FeedDecoded) {
+    match decoded {
+        FeedDecoded::Event(event) => {
+            let ui = match event {
+                FeedEvent::Corpus(e) => UiEvent::CorpusJob(e.job),
+                FeedEvent::Document(e) => UiEvent::FeedDocument(e),
+                FeedEvent::Session(e) => UiEvent::FeedSession(e),
+                FeedEvent::Fleet(e) => UiEvent::Fleet(fleet_state_from_event(e)),
+            };
+            let _ = event_tx.send(ui);
+        }
+        FeedDecoded::Unknown { name } => {
+            let _ = event_tx.send(UiEvent::ProtocolNote(format!(
+                "unknown feed event `{name}` labeled and skipped"
+            )));
+        }
+        FeedDecoded::Invalid { name, error } => {
+            let _ = event_tx.send(UiEvent::ProtocolNote(format!(
+                "invalid feed `{name}` event labeled and skipped: {error}"
+            )));
+        }
+    }
+}
+
+/// Map a feed `fleet` event onto the `/fleet` render shape (identical fields).
+fn fleet_state_from_event(event: FleetEvent) -> FleetState {
+    let control = match event.control {
+        FleetEventControl::Up => FleetStateControl::Up,
+        FleetEventControl::Unreachable => FleetStateControl::Unreachable,
+    };
+    FleetState {
+        control,
+        models: event.models,
     }
 }
 
@@ -830,7 +880,8 @@ fn emit_decoded(event_tx: &Sender<UiEvent>, decoded: Decoded) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::fleet_action_error;
+    use super::{fleet_action_error, fleet_state_from_event};
+    use crate::gen::{FleetEvent, FleetEventControl, FleetModel, FleetModelLiveState, FleetStateControl};
 
     #[test]
     fn fleet_action_error_flags_the_provision_hint() {
@@ -844,5 +895,22 @@ mod tests {
 
         let other = fleet_action_error("stop", "phi-4", "500 daemon-unreachable");
         assert!(!other.provision_hint);
+    }
+
+    #[test]
+    fn fleet_event_maps_to_the_render_shape() {
+        let event = FleetEvent {
+            control: FleetEventControl::Unreachable,
+            models: vec![FleetModel {
+                base_url: "http://x/v1".to_string(),
+                capabilities: None,
+                live_state: FleetModelLiveState::Unknown,
+                mode_tags: None,
+                name: "m".to_string(),
+            }],
+        };
+        let state = fleet_state_from_event(event);
+        assert_eq!(state.control, FleetStateControl::Unreachable);
+        assert_eq!(state.models[0].name, "m");
     }
 }

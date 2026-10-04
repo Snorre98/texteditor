@@ -11,7 +11,7 @@ Feature: Context management — workspaces, multi-root corpus, and the turn cont
   re-meters after every edit, and pins are human overrides that bypass the
   decision gate but never budgets. Browsing and indexing are bounded by
   ALLOWED_ROOTS.
-  Normative per ADR-0049, ADR-0011, ADR-0036, ADR-0044, ADR-0048.
+  Normative per ADR-0049, ADR-0011, ADR-0036, ADR-0044, ADR-0048, ADR-0052.
 
   Scenario: Opening a directory creates or resumes its workspace
     Given the author opens a directory
@@ -117,3 +117,9 @@ Feature: Context management — workspaces, multi-root corpus, and the turn cont
     Then the client sends decisions, not payload text
     And the engine assembles and meters the resulting payload
     And the client computes no tokens, budgets, or provenance itself
+
+  Scenario: Corpus progress arrives on the liveness feed
+    Given the client is subscribed to GET /events
+    When the author starts a corpus index or the scope changes
+    Then job progress and completion arrive as typed corpus events
+    And the client does not poll GET /corpus for progress

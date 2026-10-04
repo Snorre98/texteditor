@@ -58,7 +58,7 @@ pub struct Task {
     #[serde(rename = "userInput")]
     pub user_input: String,
     /**The workspace whose shard owns this turn's sessions/meter/index (ADR-0049 §5). Optional: when absent the engine resolves-or-creates a workspace rooted at the canonical parent directory of the turn's document (keeps pre-workspace clients working).
-     */
+*/
     #[serde(rename = "workspaceId", skip_serializing_if = "Option::is_none")]
     pub workspace_id: Option<String>,
 }
@@ -230,16 +230,51 @@ impl AsRef<str> for SessionMeterComponentsItemComponent {
         self.as_str()
     }
 }
+/**A session create or rename (ADR-0052 §4). Workspace scoped: only delivered to a feed filtered to this workspace.
+*/
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SessionEvent {
+    pub kind: SessionEventKind,
+    pub session: Session,
+    #[serde(rename = "workspaceId")]
+    pub workspace_id: String,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, Default)]
+pub enum SessionEventKind {
+    #[default]
+    #[serde(rename = "created")]
+    Created,
+    #[serde(rename = "renamed")]
+    Renamed,
+}
+impl SessionEventKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Created => "created",
+            Self::Renamed => "renamed",
+        }
+    }
+}
+impl ::std::fmt::Display for SessionEventKind {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+impl AsRef<str> for SessionEventKind {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
 ///The manual-edit whole-tree snapshot (ADR-0038). Array order = position.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SaveTreeRequest {
     pub blocks: Vec<BlockWrite>,
     /**Explicit opt-in to overwrite an externally changed file (ADR-0047 §3). Default false: a mismatch is refused with `file-changed-externally` (409).
-     */
+*/
     #[serde(skip_serializing_if = "Option::is_none")]
     pub overwrite: Option<bool>,
     /**When true (explicit Save / Cmd+S, not the periodic autosave), the engine also mirrors the canonical markdown back to the opened file path (ADR-0039). Default false — the autosave only snapshots the engine worktree + git.
-     */
+*/
     #[serde(rename = "writeThrough", skip_serializing_if = "Option::is_none")]
     pub write_through: Option<bool>,
 }
@@ -343,6 +378,63 @@ impl AsRef<str> for PathOutsideAllowedRootsError {
         self.as_str()
     }
 }
+/**The engine-owned bootstrap result (ADR-0052 §1). `kind` discriminates: `workspace` is always present; `listing` is present for kind=directory; `document`, `blocks`, `session`, and `modes` are present for kind=document.
+*/
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct OpenResult {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blocks: Option<Vec<Block>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub document: Option<Document>,
+    pub kind: OpenResultKind,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub listing: Option<DirectoryListing>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub modes: Option<Vec<Mode>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session: Option<Session>,
+    pub workspace: Workspace,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, Default)]
+pub enum OpenResultKind {
+    #[default]
+    #[serde(rename = "directory")]
+    Directory,
+    #[serde(rename = "document")]
+    Document,
+}
+impl OpenResultKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Directory => "directory",
+            Self::Document => "document",
+        }
+    }
+}
+impl ::std::fmt::Display for OpenResultKind {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+impl AsRef<str> for OpenResultKind {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct Document {
+    /**True when the file changed on disk since the engine last read it and was re-read into the worktree on this open (ADR-0047 §2). Aliases of the same file resolve to one document row.
+*/
+    #[serde(rename = "externalChange", skip_serializing_if = "Option::is_none")]
+    pub external_change: Option<bool>,
+    pub id: String,
+    ///The canonical (symlink-resolved) absolute path the engine keys the document by (ADR-0047 §2).
+    pub path: String,
+    #[serde(rename = "rootBlockId")]
+    pub root_block_id: String,
+    #[serde(rename = "updatedAt", skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<i64>,
+}
 /**A typed not-found refusal for a routing lookup that resolved to no record (an unknown turn or session id). The engine never invents data.
 */
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -358,12 +450,18 @@ pub enum NotFoundResource {
     Turn,
     #[serde(rename = "session")]
     Session,
+    #[serde(rename = "path")]
+    Path,
+    #[serde(rename = "document")]
+    Document,
 }
 impl NotFoundResource {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Turn => "turn",
             Self::Session => "session",
+            Self::Path => "path",
+            Self::Document => "document",
         }
     }
 }
@@ -536,7 +634,7 @@ pub struct Session {
     #[serde(rename = "updatedAt", skip_serializing_if = "Option::is_none")]
     pub updated_at: Option<i64>,
     /**The workspace whose shard owns this session (ADR-0049 §5). Optional on the wire for backward compatibility; always populated by the engine on responses.
-     */
+*/
     #[serde(rename = "workspaceId", skip_serializing_if = "Option::is_none")]
     pub workspace_id: Option<String>,
 }
@@ -603,7 +701,7 @@ impl AsRef<str> for ModelLiveState {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Health {
     /**The engine's actual bound base URL (http://host:port). Populated so a dynamic-port client (ADR-0021 §1) can discover the engine rather than assume a port. In fixed mode this equals the configured address; in dynamic mode it is the OS-assigned port. Recorded amendment to ADR-0017 §4.
-     */
+*/
     #[serde(rename = "baseUrl", skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
     pub status: HealthStatus,
@@ -712,6 +810,13 @@ impl AsRef<str> for FleetStateControl {
         self.as_str()
     }
 }
+/**A fleet live-state change observed by the engine's daemon poller (ADR-0052 §4). Mirrors FleetState; `control` is `unreachable` during a daemon outage. Global; always delivered.
+*/
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct FleetEvent {
+    pub control: FleetEventControl,
+    pub models: Vec<FleetModel>,
+}
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct FleetModel {
     #[serde(rename = "baseUrl")]
@@ -771,6 +876,32 @@ pub struct Capabilities {
     #[serde(rename = "thinkingMode")]
     pub thinking_mode: bool,
 }
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, Default)]
+pub enum FleetEventControl {
+    #[default]
+    #[serde(rename = "up")]
+    Up,
+    #[serde(rename = "unreachable")]
+    Unreachable,
+}
+impl FleetEventControl {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Up => "up",
+            Self::Unreachable => "unreachable",
+        }
+    }
+}
+impl ::std::fmt::Display for FleetEventControl {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+impl AsRef<str> for FleetEventControl {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
 /**The file at `documents.path` changed externally since the engine last read it; the write-through was refused and no bytes were written (ADR-0047 §3). `currentHash` is the current on-disk content hash so the client can show or compare it; retry with `overwrite: true` to accept it.
 */
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -799,6 +930,44 @@ impl ::std::fmt::Display for FileChangedExternallyError {
     }
 }
 impl AsRef<str> for FileChangedExternallyError {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+/**Framing marker for the `GET /events` liveness feed: the `event:` line carries `type`; the `data:` line carries the payload schema matching that type (ADR-0052 §4). The payload JSON itself has no `type` field.
+*/
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct FeedEvent {
+    pub r#type: FeedEventType,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, Default)]
+pub enum FeedEventType {
+    #[default]
+    #[serde(rename = "corpus")]
+    Corpus,
+    #[serde(rename = "document")]
+    Document,
+    #[serde(rename = "session")]
+    Session,
+    #[serde(rename = "fleet")]
+    Fleet,
+}
+impl FeedEventType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Corpus => "corpus",
+            Self::Document => "document",
+            Self::Session => "session",
+            Self::Fleet => "fleet",
+        }
+    }
+}
+impl ::std::fmt::Display for FeedEventType {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+impl AsRef<str> for FeedEventType {
     fn as_ref(&self) -> &str {
         self.as_str()
     }
@@ -865,6 +1034,41 @@ impl AsRef<str> for EventType {
         self.as_str()
     }
 }
+/**A document lifecycle change: an external disk change detected on open, or a committed write-through (ADR-0052 §4). Global; always delivered.
+*/
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct DocumentEvent {
+    #[serde(rename = "documentId")]
+    pub document_id: String,
+    pub kind: DocumentEventKind,
+    pub path: String,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, Default)]
+pub enum DocumentEventKind {
+    #[default]
+    #[serde(rename = "external-change")]
+    ExternalChange,
+    #[serde(rename = "commit")]
+    Commit,
+}
+impl DocumentEventKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::ExternalChange => "external-change",
+            Self::Commit => "commit",
+        }
+    }
+}
+impl ::std::fmt::Display for DocumentEventKind {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+impl AsRef<str> for DocumentEventKind {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
 ///A shallow, non-recursive directory listing (ADR-0035 §2).
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct DirectoryListing {
@@ -912,6 +1116,14 @@ pub struct CorpusState {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub job: Option<CorpusJob>,
     pub roots: Vec<String>,
+    #[serde(rename = "workspaceId")]
+    pub workspace_id: String,
+}
+/**A corpus index job's progress or completion (ADR-0052 §4). Workspace scoped: only delivered to a feed filtered to this workspace.
+*/
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct CorpusEvent {
+    pub job: CorpusJob,
     #[serde(rename = "workspaceId")]
     pub workspace_id: String,
 }
@@ -1044,23 +1256,23 @@ impl AsRef<str> for CorpusDocumentStatus {
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct ContextPolicy {
     /**Whether auto-RAG retrieval runs. When absent the persisted session policy (or the default, true) applies. When false, retrieval is skipped but pins still apply.
-     */
+*/
     #[serde(rename = "autoRag", skip_serializing_if = "Option::is_none")]
     pub auto_rag: Option<bool>,
     /**Retrieved chunks to drop from the payload, matched by `chunkKey` (or by canonical `path` when only a path is given); each removal is recorded as a labeled drop.
-     */
+*/
     #[serde(skip_serializing_if = "Option::is_none")]
     pub excluded: Option<Vec<ChunkRef>>,
     /**Chunks to include as human-pinned overrides, front-loaded deterministically and resolved through the index (works even when not in the retrieval top-k).
-     */
+*/
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pinned: Option<Vec<ChunkRef>>,
     /**The query auto-RAG runs. When absent the persisted session policy, else `Task.userInput`, applies. Affects retrieval only, never the user message.
-     */
+*/
     #[serde(rename = "retrievalQuery", skip_serializing_if = "Option::is_none")]
     pub retrieval_query: Option<String>,
     /**The turn's thinking policy (ADR-0051 §1). When absent the persisted session policy, else the pipeline default, applies. `off` asks the runner to disable its thinking channel; `auto` runs thinking-off and escalates once after a structured failure; `on` always thinks. Never a preset field (ADR-0045).
-     */
+*/
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thinking: Option<ContextPolicyThinking>,
 }
@@ -1114,7 +1326,7 @@ pub struct ContextSnapshot {
     pub auto_rag: bool,
     pub budget: Vec<BudgetUsage>,
     /**True when the turn was cancelled by the user (POST /turns/{id}/cancel); the snapshot remains retrievable and records the partial usage. Absent/false for a normal turn.
-     */
+*/
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cancelled: Option<bool>,
     pub chunks: Vec<ContextChunk>,
@@ -1190,7 +1402,7 @@ pub struct ThinkingSnapshot {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub escalated: Option<bool>,
     /**The structured failure that triggered the escalation (`invalid-structure` | `guard-failed` | `no-outcome`).
-     */
+*/
     #[serde(rename = "escalationReason", skip_serializing_if = "Option::is_none")]
     pub escalation_reason: Option<String>,
     ///The resolved policy level (pipeline default ← session ← per-turn).
@@ -1271,7 +1483,7 @@ pub struct LocateResult {
     pub stale: Option<bool>,
     pub status: LocateResultStatus,
     /**Populated only on the emitted `locate` SSE event so a client can answer the ambiguity picker via POST /turns/{id}/locate; absent from the snapshot record (the snapshot envelope already carries turnId).
-     */
+*/
     #[serde(rename = "turnId", skip_serializing_if = "Option::is_none")]
     pub turn_id: Option<String>,
 }
@@ -1437,7 +1649,7 @@ pub struct ContextChunk {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub heading: Option<String>,
     /**True when the chunk is a human override (Phase C4; pins bypass the Phase F decision gate, never budgets).
-     */
+*/
     #[serde(rename = "humanOverride", skip_serializing_if = "Option::is_none")]
     pub human_override: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1476,11 +1688,11 @@ pub struct ContextDrop {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
     /**True when the dropped item was a human override (a pinned chunk dropped by truncation, Phase C4); labels the override in the snapshot.
-     */
+*/
     #[serde(rename = "humanOverride", skip_serializing_if = "Option::is_none")]
     pub human_override: Option<bool>,
     /**The labeled reason: `history-budget` | `rag-budget` | `mention-budget` | `excluded` | `not-found` | `context-window`.
-     */
+*/
     pub reason: String,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, Default)]
@@ -1537,7 +1749,7 @@ pub struct Revision {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timestamp: Option<i64>,
     /**True when the canonical markdown was mirrored to the opened file during this write boundary (ADR-0047 §8). False on an empty accept / engine-only autosave.
-     */
+*/
     #[serde(rename = "writtenThrough", skip_serializing_if = "Option::is_none")]
     pub written_through: Option<bool>,
 }
@@ -1776,7 +1988,7 @@ pub type BackpressureEvent = serde_json::Value;
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct CommitRequest {
     /**Explicit opt-in to overwrite an externally changed file. Default false: a mismatch is refused with `file-changed-externally` (409).
-     */
+*/
     #[serde(skip_serializing_if = "Option::is_none")]
     pub overwrite: Option<bool>,
 }
@@ -1794,11 +2006,11 @@ pub struct CreateSessionRequest {
     #[serde(rename = "modeType", skip_serializing_if = "Option::is_none")]
     pub mode_type: Option<String>,
     /**Optional human label for the new session. Purely a display title (data-model §1.4); it never affects assembly. An engine default (e.g. the document basename) may be derived when omitted; the client can rename it later via PUT /sessions/{id}.
-     */
+*/
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     /**The workspace shard that owns the new session (ADR-0049 §5). Optional: when absent the engine resolves-or-creates a workspace rooted at the canonical parent directory of the document.
-     */
+*/
     #[serde(rename = "workspaceId", skip_serializing_if = "Option::is_none")]
     pub workspace_id: Option<String>,
 }
@@ -1902,24 +2114,10 @@ impl CreateWorkspaceRequestBuilder {
         self.value
     }
 }
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct Document {
-    /**True when the file changed on disk since the engine last read it and was re-read into the worktree on this open (ADR-0047 §2). Aliases of the same file resolve to one document row.
-     */
-    #[serde(rename = "externalChange", skip_serializing_if = "Option::is_none")]
-    pub external_change: Option<bool>,
-    pub id: String,
-    ///The canonical (symlink-resolved) absolute path the engine keys the document by (ADR-0047 §2).
-    pub path: String,
-    #[serde(rename = "rootBlockId")]
-    pub root_block_id: String,
-    #[serde(rename = "updatedAt", skip_serializing_if = "Option::is_none")]
-    pub updated_at: Option<i64>,
-}
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct DoneEvent {
     /**True when the turn ended because the user cancelled it (POST /turns/{id}/cancel). The turn is not an error: any partial assistant text streamed before cancellation is preserved, and partial usage is metered. Absent/false for a normal completion.
-     */
+*/
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cancelled: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1930,7 +2128,7 @@ pub struct DoneEvent {
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct ErrorEvent {
     /**The typed terminal error code. Budget/window codes added by ADR-0051: `context-window-exceeded` (fixed + pinned + user alone exceed the model window, refused before any provider call) and `session-budget-exceeded` (the hard session budget would be crossed and compaction did not rescue the turn). `thinking-truncated` labels a `length` turn with neither a tool call nor an answer.
-     */
+*/
     #[serde(skip_serializing_if = "Option::is_none")]
     pub code: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1948,6 +2146,72 @@ pub struct LocateChoice {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct OpenDocumentRequest {
     pub path: String,
+}
+///The bootstrap request for `POST /open` (ADR-0052 §1).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct OpenRequest {
+    /**Optional block anchor; selects the anchor-keyed session when given (ADR-0052 §2).
+*/
+    #[serde(rename = "anchorBlockId", skip_serializing_if = "Option::is_none")]
+    pub anchor_block_id: Option<String>,
+    ///Optional preset persisted on a newly created session.
+    #[serde(rename = "modeType", skip_serializing_if = "Option::is_none")]
+    pub mode_type: Option<String>,
+    /**Absolute path to open; a directory returns a bounded listing, a file opens as a document.
+*/
+    pub path: String,
+}
+impl OpenRequest {
+    /// Construct this request with every required wire field.
+    pub fn new(path: String) -> Self {
+        Self {
+            path,
+            anchor_block_id: None,
+            mode_type: None,
+        }
+    }
+    /// Start a dependency-free builder with every required wire field.
+    pub fn builder(path: String) -> OpenRequestBuilder {
+        OpenRequestBuilder::new(path)
+    }
+}
+/// Dependency-free builder for [`#struct_name`].
+#[derive(Debug, Clone)]
+#[must_use]
+pub struct OpenRequestBuilder {
+    value: OpenRequest,
+}
+impl OpenRequestBuilder {
+    /// Start a builder with every required wire field.
+    pub fn new(path: String) -> Self {
+        Self {
+            value: OpenRequest::new(path),
+        }
+    }
+    #[doc = concat!("Set the optional `", "anchorBlockId", "` request field.")]
+    #[must_use]
+    pub fn anchor_block_id(mut self, anchor_block_id: String) -> Self {
+        self.value.anchor_block_id = Some(anchor_block_id);
+        self
+    }
+    #[doc = concat!("Set the optional `", "modeType", "` request field.")]
+    #[must_use]
+    pub fn mode_type(mut self, mode_type: String) -> Self {
+        self.value.mode_type = Some(mode_type);
+        self
+    }
+    /// Finish building the request model.
+    pub fn build(self) -> OpenRequest {
+        self.value
+    }
+}
+///Body for `POST /documents/{id}/session` (ADR-0052 §2).
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct OpenSessionRequest {
+    /**Optional block anchor; when present the anchor-keyed session is returned (created if none exists), otherwise the document's most recently updated session.
+*/
+    #[serde(rename = "anchorBlockId", skip_serializing_if = "Option::is_none")]
+    pub anchor_block_id: Option<String>,
 }
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ProvisionResponse {

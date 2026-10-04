@@ -1130,7 +1130,11 @@ never interprets pins/excludes.
 ```go
 type Event struct {
     TurnID string
-    Type   string // turn|token|meter|candidate|diff|rag|context|locate|thinking|done|error|backpressure
+    // WorkspaceID scopes a non-turn feed event to a workspace (ADR-0052 §4).
+    // Empty = global (always delivered to a filtered feed). Not on the wire;
+    // the bus uses it to filter `GET /events?workspaceId=`.
+    WorkspaceID string
+    Type   string // turn|token|meter|candidate|diff|rag|context|locate|thinking|done|error|backpressure|corpus|document|session|fleet
     Data   json.RawMessage
 }
 
@@ -1156,6 +1160,54 @@ must ignore it without dropping the stream (labeled, never fatal).
 `Task.context` and `PUT /sessions/{id}/context`; the `rag` event remains the
 post-exclude, pre-truncation auto-retrieved set, and pins appear only in the
 `context` snapshot (labeled `pinned`/`humanOverride`).
+
+*Amendment (ADR-0052 §4, Phase E4):* the vocabulary gains the **non-turn
+liveness feed** types `corpus`, `document`, `session`, and `fleet`, carried on a
+second SSE route `GET /events` (hand-framed like `/turn`, coexisting with it).
+The per-turn `/turn` stream is unchanged. The feed is bounded and drops are
+labeled `backpressure` (same bus contract). `Event` gains an internal
+`WorkspaceID` used only for feed filtering (`corpus`/`session` are
+workspace-scoped; `document`/`fleet` are global and always delivered). The
+payloads are owner-free shared DTOs (the `data:` JSON of each event name):
+
+```go
+type CorpusEventPayload struct {   // `corpus`: index job progress/completion
+    WorkspaceID string
+    Job         CorpusJob
+}
+type DocumentEventPayload struct { // `document`: external change / commit (global)
+    Kind       string // external-change | commit
+    DocumentID string
+    Path       string
+}
+type SessionEventPayload struct {  // `session`: create / rename
+    Kind        string // created | renamed
+    WorkspaceID string
+    Session     Session
+}
+type FleetEventPayload struct {    // `fleet`: daemon live-state change (global)
+    Control string            // up | unreachable
+    Models  []FleetEventModel
+}
+// FleetEventModel is the client-facing projection (never the internal dto.Model,
+// which carries Runner/ModelID that must not be exposed — ADR-0016 §1).
+type FleetEventModel struct {
+    Name         string
+    BaseURL      string
+    Capabilities Capabilities
+    ModeTags     []string
+    LiveState    LiveState
+}
+```
+
+The `fleet` producer is an engine-side bounded `Fleet.ListStatus` poller
+(interval configurable, emit-on-change; a daemon outage is `control:
+"unreachable"`, ADR-0040 §3); the `corpus` producer is the corpus job loop; the
+`document` producer is the `DocHook` (external-change on Open, commit on
+Commit/write-through SaveTree); the `session` producer is the session routes.
+The three lifecycle verbs (ADR-0052 §1–§3) are REST, not events:
+`POST /open`, `POST /documents/{id}/session`, `POST
+/documents/{id}/blocks/{bid}/accept`.
 
 
 ## 12. Serving lifecycle — the verb contract (transported by the daemon)

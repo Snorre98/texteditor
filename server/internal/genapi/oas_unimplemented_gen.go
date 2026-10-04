@@ -15,6 +15,19 @@ type UnimplementedHandler struct{}
 var _ Handler = UnimplementedHandler{}
 var _ RawHandler = UnimplementedHandler{}
 
+// AcceptBlock implements acceptBlock operation.
+//
+// The approve write boundary as one server-side operation: validate the staged candidate for the
+// block, re-validate its base content hash, format, commit, and mirror the canonical markdown to the
+// opened file (ADR-0047). The client supplies no candidate text. An externally changed file is refused
+// with the typed `file-changed-externally` (409) and no bytes are written. The staged routes
+// (`GET .../candidates`, `POST /edits`, `POST /commits`) remain for compatibility.
+//
+// POST /documents/{id}/blocks/{bid}/accept
+func (UnimplementedHandler) AcceptBlock(ctx context.Context, req OptCommitRequest, params AcceptBlockParams) (r AcceptBlockRes, _ error) {
+	return r, ht.ErrNotImplemented
+}
+
 // ApplyEdit implements applyEdit operation.
 //
 // POST /documents/{id}/edits
@@ -105,6 +118,22 @@ func (UnimplementedHandler) GetCorpus(ctx context.Context, params GetCorpusParam
 // GET /documents/{id}/diff
 func (UnimplementedHandler) GetDiff(ctx context.Context, params GetDiffParams) (r []WordEdit, _ error) {
 	return r, ht.ErrNotImplemented
+}
+
+// GetEvents implements getEvents operation.
+//
+// A long-lived SSE feed carrying non-turn engine events so clients stop polling: `corpus` (job
+// progress/done), `document` (external-change/commit), `session` (create/rename), and `fleet` (a
+// daemon live-state change observed by the engine-side poller). Each message is `event: <type>`
+// followed by `data: <payload>` where is one of the FeedEvent.type enum values and is the matching
+// component schema (CorpusEvent, DocumentEvent, SessionEvent, FleetEvent). The feed is bounded; a
+// dropped event is labeled `backpressure`, never silent. It coexists with the per-turn `/turn` stream.
+// An optional `workspaceId` scopes corpus and session events; global events (document, fleet) are
+// always delivered.
+//
+// GET /events
+func (UnimplementedHandler) GetEvents(ctx context.Context, params GetEventsParams, w http.ResponseWriter) error {
+	return ht.ErrNotImplemented
 }
 
 // GetFleet implements getFleet operation.
@@ -243,12 +272,37 @@ func (UnimplementedHandler) ListWorkspaces(ctx context.Context) (r []Workspace, 
 	return r, ht.ErrNotImplemented
 }
 
+// Open implements open operation.
+//
+// Resolves a path into everything a client needs to start, in one call: the workspace, and either a
+// bounded directory listing (a directory path) or the document, block tree, open-or-resumed session,
+// and prompt presets (a file path). The client performs no path arithmetic, listing probe, or
+// multi-call sequencing. A path outside ALLOWED_ROOTS is the typed `path-outside-allowed-roots`
+// refusal. `POST /documents` and `GET /directories` remain for composability.
+//
+// POST /open
+func (UnimplementedHandler) Open(ctx context.Context, req *OpenRequest) (r OpenRes, _ error) {
+	return r, ht.ErrNotImplemented
+}
+
 // OpenDocument implements openDocument operation.
 //
 // Open/create a document by path; returns its surrogate id.
 //
 // POST /documents
 func (UnimplementedHandler) OpenDocument(ctx context.Context, req *OpenDocumentRequest) (r *Document, _ error) {
+	return r, ht.ErrNotImplemented
+}
+
+// OpenDocumentSession implements openDocumentSession operation.
+//
+// Returns the session to use for a document: the anchor-keyed session when `anchorBlockId` is given,
+// otherwise the document's most recently updated session, creating one if none exists. The "newest"
+// policy and the create-or-resume semantics are engine data; the client never lists sessions to choose
+// one.
+//
+// POST /documents/{id}/session
+func (UnimplementedHandler) OpenDocumentSession(ctx context.Context, req OptOpenSessionRequest, params OpenDocumentSessionParams) (r *Session, _ error) {
 	return r, ht.ErrNotImplemented
 }
 

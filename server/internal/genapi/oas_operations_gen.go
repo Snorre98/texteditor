@@ -6,6 +6,7 @@ package genapi
 type OperationName = string
 
 const (
+	AcceptBlockOperation         OperationName = "AcceptBlock"
 	ApplyEditOperation           OperationName = "ApplyEdit"
 	CancelTurnOperation          OperationName = "CancelTurn"
 	CommitDocumentOperation      OperationName = "CommitDocument"
@@ -16,6 +17,7 @@ const (
 	GetCandidatesOperation       OperationName = "GetCandidates"
 	GetCorpusOperation           OperationName = "GetCorpus"
 	GetDiffOperation             OperationName = "GetDiff"
+	GetEventsOperation           OperationName = "GetEvents"
 	GetFleetOperation            OperationName = "GetFleet"
 	GetHealthOperation           OperationName = "GetHealth"
 	GetHistoryOperation          OperationName = "GetHistory"
@@ -31,7 +33,9 @@ const (
 	ListSessionsOperation        OperationName = "ListSessions"
 	ListToolsOperation           OperationName = "ListTools"
 	ListWorkspacesOperation      OperationName = "ListWorkspaces"
+	OpenOperation                OperationName = "Open"
 	OpenDocumentOperation        OperationName = "OpenDocument"
+	OpenDocumentSessionOperation OperationName = "OpenDocumentSession"
 	ProvisionModelOperation      OperationName = "ProvisionModel"
 	PutCorpusOperation           OperationName = "PutCorpus"
 	PutSessionContextOperation   OperationName = "PutSessionContext"

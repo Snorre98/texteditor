@@ -253,18 +253,27 @@ func shardDeps() (workspace.Interface, shard.Resolver) {
 
 // stubLoop is superseded by stubLoopEmitter; kept removed below.
 
-// fakeBus is an in-memory EventSource that both records Emit and fans to subscribers.
+// fakeBus is an in-memory EventSource that records Emit and fans to
+// subscribers, honoring each subscription's filter.
 type fakeBus struct {
 	mu   sync.Mutex
-	subs []chan dto.Event
+	subs []fakeSub
+}
+
+type fakeSub struct {
+	ch     chan dto.Event
+	filter func(dto.Event) bool
 }
 
 func (b *fakeBus) Emit(ev dto.Event) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	for _, ch := range b.subs {
+	for _, s := range b.subs {
+		if s.filter != nil && !s.filter(ev) {
+			continue
+		}
 		select {
-		case ch <- ev:
+		case s.ch <- ev:
 		default:
 		}
 	}
@@ -273,7 +282,7 @@ func (b *fakeBus) Emit(ev dto.Event) {
 func (b *fakeBus) Subscribe(filter func(dto.Event) bool) <-chan dto.Event {
 	ch := make(chan dto.Event, 256)
 	b.mu.Lock()
-	b.subs = append(b.subs, ch)
+	b.subs = append(b.subs, fakeSub{ch: ch, filter: filter})
 	b.mu.Unlock()
 	return ch
 }

@@ -11,6 +11,7 @@ package corpus
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -19,6 +20,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"texteditor/internal/document"
 	"texteditor/internal/filesystem"
@@ -46,11 +48,21 @@ type Interface interface {
 	NotifyChanged(path string)
 }
 
+// Emitter is the sealed subset of the SSE event bus the Corpus service needs:
+// fan-out of non-turn `corpus` feed events (ADR-0052 §4). The bus owns
+// subscription (interface.md §11).
+type Emitter interface {
+	Emit(dto.Event)
+}
+
 // Options configures the Corpus service.
 type Options struct {
 	Workspaces workspace.Interface
 	Filesystem filesystem.Interface
 	Shards     shard.Resolver
+	// Bus, when set, receives `corpus` feed events (job progress/completion,
+	// ADR-0052 §4). A nil bus disables emission.
+	Bus Emitter
 }
 
 // readCap bounds one corpus file read for hashing/indexing (4 MiB).
@@ -261,8 +273,21 @@ func (s *service) enqueue(ctx context.Context, workspaceID, kind string) (dto.Co
 	s.running[workspaceID] = job.ID
 	s.mu.Unlock()
 
+	s.emitJob(job)
 	go s.run(context.Background(), workspaceID, job.ID, kind, files)
 	return job, nil
+}
+
+// emitJob publishes one `corpus` feed event (ADR-0052 §4). A nil bus is a no-op.
+func (s *service) emitJob(job dto.CorpusJob) {
+	if s.opts.Bus == nil {
+		return
+	}
+	data, err := json.Marshal(dto.CorpusEventPayload{WorkspaceID: job.WorkspaceID, Job: job})
+	if err != nil {
+		return
+	}
+	s.opts.Bus.Emit(dto.Event{WorkspaceID: job.WorkspaceID, Type: dto.EventCorpus, Data: data})
 }
 
 // run indexes the given files, reconciles out-of-scope corpus rows on a
@@ -277,6 +302,7 @@ func (s *service) run(ctx context.Context, workspaceID, jobID, kind string, file
 	lease, err := s.opts.Shards.Services(ctx, workspaceID)
 	if err != nil {
 		s.finishJob(workspaceID, jobID, 0, "error", err.Error())
+		s.emitJob(dto.CorpusJob{ID: jobID, WorkspaceID: workspaceID, Kind: kind, State: "error", Total: len(files), Error: err.Error(), FinishedAt: time.Now().Unix()})
 		return
 	}
 	defer lease.Release()
@@ -295,6 +321,7 @@ func (s *service) run(ctx context.Context, workspaceID, jobID, kind string, file
 		}
 		completed++
 		_ = s.opts.Workspaces.UpdateJob(jobID, completed, "running", "")
+		s.emitJob(dto.CorpusJob{ID: jobID, WorkspaceID: workspaceID, Kind: kind, State: "running", Total: len(files), Completed: completed})
 	}
 
 	if kind == "reconcile" {
@@ -308,6 +335,7 @@ func (s *service) run(ctx context.Context, workspaceID, jobID, kind string, file
 		state = "error"
 	}
 	s.finishJob(workspaceID, jobID, completed, state, firstErr)
+	s.emitJob(dto.CorpusJob{ID: jobID, WorkspaceID: workspaceID, Kind: kind, State: state, Total: len(files), Completed: completed, Error: firstErr, FinishedAt: time.Now().Unix()})
 }
 
 // finishJob clears the single-flight entry before publishing the terminal job
@@ -506,38 +534,61 @@ func hiddenPath(rel string) bool {
 
 // DocHook decorates a Document store so successful Open/Commit/SaveTree
 // boundaries enqueue a corpus re-index when the canonical path is in a
-// workspace's corpus (ADR-0049 §4 lifecycle). It never blocks the write.
+// workspace's corpus (ADR-0049 §4 lifecycle) and emit a `document` feed event
+// (ADR-0052 §4). It never blocks the write.
 type DocHook struct {
 	document.Interface
 	Corpus Interface
+	// Bus, when set, receives `document` feed events (external-change/commit,
+	// ADR-0052 §4). A nil bus disables emission.
+	Bus Emitter
 }
 
-// Open wraps the document open and notifies the corpus on success.
+// Open wraps the document open and notifies the corpus on success. A re-read
+// caused by an external disk change is emitted as a `document` event.
 func (h *DocHook) Open(path string) (dto.OpenResult, error) {
 	res, err := h.Interface.Open(path)
 	if err == nil {
 		h.Corpus.NotifyChanged(res.Path)
+		if res.ExternalChange {
+			h.emitDocument("external-change", res.DocumentID, res.Path)
+		}
 	}
 	return res, err
 }
 
-// Commit wraps the commit (write-through) and notifies on success.
+// Commit wraps the commit (write-through) and notifies on success, emitting a
+// `document` commit event.
 func (h *DocHook) Commit(documentID string, opts dto.CommitOptions) (dto.WriteResult, error) {
 	res, err := h.Interface.Commit(documentID, opts)
 	if err == nil && res.Path != "" {
 		h.Corpus.NotifyChanged(res.Path)
+		h.emitDocument("commit", documentID, res.Path)
 	}
 	return res, err
 }
 
 // SaveTree wraps the manual save; only a write-through touches disk, so only
-// that boundary notifies.
+// that boundary notifies and emits.
 func (h *DocHook) SaveTree(documentID string, tree []dto.BlockWrite, opts dto.SaveOptions) (dto.WriteResult, error) {
 	res, err := h.Interface.SaveTree(documentID, tree, opts)
 	if err == nil && res.WrittenThrough && res.Path != "" {
 		h.Corpus.NotifyChanged(res.Path)
+		h.emitDocument("commit", documentID, res.Path)
 	}
 	return res, err
+}
+
+// emitDocument publishes one global `document` feed event (ADR-0052 §4).
+func (h *DocHook) emitDocument(kind, documentID, path string) {
+	if h.Bus == nil {
+		return
+	}
+	data, err := json.Marshal(dto.DocumentEventPayload{Kind: kind, DocumentID: documentID, Path: path})
+	if err != nil {
+		return
+	}
+	h.Bus.Emit(dto.Event{Type: dto.EventDocument, Data: data})
 }
 
 var _ document.Interface = (*DocHook)(nil)

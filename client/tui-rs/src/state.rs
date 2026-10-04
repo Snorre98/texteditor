@@ -7,8 +7,8 @@
 //! unit-tested without a terminal or a live engine.
 
 use crate::gen::{
-    ContextSnapshot, CorpusDocument, CorpusJob, CorpusState, DiffEvent, FleetState, LocateResult,
-    MeterEvent, Mode, PutCorpusRequest, Revision, Session,
+    ContextSnapshot, CorpusDocument, CorpusJob, CorpusState, DiffEvent, DocumentEvent, FleetState,
+    LocateResult, MeterEvent, Mode, PutCorpusRequest, Revision, Session, SessionEvent,
 };
 use crate::sse::SseEvent;
 
@@ -244,6 +244,10 @@ pub enum UiEvent {
     Fleet(FleetState),
     /// A fleet lifecycle verb failed (E3); rendered with the implied remediation.
     FleetError(FleetErrorInfo),
+    /// A `document` liveness-feed event (ADR-0052 §4): external change / commit.
+    FeedDocument(DocumentEvent),
+    /// A `session` liveness-feed event (ADR-0052 §4): create / rename.
+    FeedSession(SessionEvent),
     /// One typed SSE event.
     Turn(SseEvent),
     /// The turn stream ended (terminal event or disconnect).
@@ -317,6 +321,9 @@ pub struct AppState {
     pub mentions: Vec<String>,
     /// The opened document's block tree (reader view-model; ADR-0050 §4).
     pub blocks: Vec<crate::gen::Block>,
+    /// Set by a `document` feed event (external change / commit) so the render
+    /// loop issues one `GET /documents/{id}/blocks` refresh (never a poll).
+    pub needs_blocks_reload: bool,
     /// Reader pane visibility (ADR-0050 §4).
     pub reader_visible: bool,
     /// Inspector pane visibility (meter + context; ADR-0044).
@@ -514,6 +521,31 @@ impl AppState {
             }
             UiEvent::FleetError(error) => {
                 self.fleet_error = Some(error);
+            }
+            UiEvent::FeedDocument(event) => {
+                // Only react to the document this client has open.
+                if self.document_id.as_deref() == Some(event.document_id.as_str()) {
+                    match event.kind {
+                        crate::gen::DocumentEventKind::ExternalChange => {
+                            self.note("external-change: file changed on disk".to_string());
+                            self.needs_blocks_reload = true;
+                        }
+                        crate::gen::DocumentEventKind::Commit => {
+                            self.needs_blocks_reload = true;
+                        }
+                    }
+                }
+            }
+            UiEvent::FeedSession(event) => {
+                if let Some(pos) = self.sessions.iter().position(|s| s.id == event.session.id) {
+                    self.sessions[pos] = event.session.clone();
+                } else {
+                    self.sessions.insert(0, event.session.clone());
+                }
+                if self.session_id.as_deref() == Some(event.session.id.as_str()) {
+                    self.session_title = event.session.title.clone();
+                    self.session_policy = event.session.context_policy.clone();
+                }
             }
             UiEvent::Turn(SseEvent::Turn(turn)) => {
                 self.turn_id = Some(turn.turn_id.clone());

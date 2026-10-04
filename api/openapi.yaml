@@ -310,6 +310,44 @@ paths:
               schema:
                 $ref: '#/components/schemas/PathOutsideAllowedRoots'
 
+  /open:
+    post:
+      operationId: open
+      summary: Engine-owned bootstrap resolver (ADR-0052 §1)
+      description: >
+        Resolves a path into everything a client needs to start, in one call:
+        the workspace, and either a bounded directory listing (a directory
+        path) or the document, block tree, open-or-resumed session, and prompt
+        presets (a file path). The client performs no path arithmetic, listing
+        probe, or multi-call sequencing. A path outside ALLOWED_ROOTS is the
+        typed `path-outside-allowed-roots` refusal. `POST /documents` and
+        `GET /directories` remain for composability.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OpenRequest'
+      responses:
+        '200':
+          description: the resolved bootstrap context (discriminated by `kind`)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OpenResult'
+        '403':
+          description: the path lies outside ALLOWED_ROOTS
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PathOutsideAllowedRoots'
+        '404':
+          description: the path does not exist
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotFound'
+
   /documents:
     post:
       operationId: openDocument
@@ -342,6 +380,32 @@ paths:
                 type: array
                 items:
                   $ref: '#/components/schemas/Block'
+
+  /documents/{id}/session:
+    post:
+      operationId: openDocumentSession
+      summary: Open-or-resume a document's session (ADR-0052 §2)
+      description: >
+        Returns the session to use for a document: the anchor-keyed session when
+        `anchorBlockId` is given, otherwise the document's most recently updated
+        session, creating one if none exists. The "newest" policy and the
+        create-or-resume semantics are engine data; the client never lists
+        sessions to choose one.
+      parameters:
+        - $ref: '#/components/parameters/DocumentID'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OpenSessionRequest'
+      responses:
+        '200':
+          description: the session to use (created or resumed)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Session'
 
   /documents/{id}/edits:
     post:
@@ -497,6 +561,43 @@ paths:
                 items:
                   $ref: '#/components/schemas/Candidate'
 
+  /documents/{id}/blocks/{bid}/accept:
+    post:
+      operationId: acceptBlock
+      summary: Atomically accept the staged candidate for a block (ADR-0052 §3)
+      description: >
+        The approve write boundary as one server-side operation: validate the
+        staged candidate for the block, re-validate its base content hash,
+        format, commit, and mirror the canonical markdown to the opened file
+        (ADR-0047). The client supplies no candidate text. An externally changed
+        file is refused with the typed `file-changed-externally` (409) and no
+        bytes are written. The staged routes (`GET .../candidates`,
+        `POST /edits`, `POST /commits`) remain for compatibility.
+      parameters:
+        - $ref: '#/components/parameters/DocumentID'
+        - $ref: '#/components/parameters/BlockID'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CommitRequest'
+      responses:
+        '200':
+          description: committed (revision populated; write-through reported)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Revision'
+        '409':
+          description: >
+            The file at `documents.path` changed externally since the engine
+            last read it; no bytes were written. Retry with `overwrite: true`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FileChangedExternally'
+
   /turn:
     post:
       operationId: startTurn
@@ -523,6 +624,40 @@ paths:
               x-ogen-raw-response: true
               schema:
                 $ref: '#/components/schemas/Event'
+
+  /events:
+    get:
+      operationId: getEvents
+      summary: Non-turn liveness feed (SSE, ADR-0052 §4)
+      description: >
+        A long-lived SSE feed carrying non-turn engine events so clients stop
+        polling: `corpus` (job progress/done), `document`
+        (external-change/commit), `session` (create/rename), and `fleet` (a
+        daemon live-state change observed by the engine-side poller). Each
+        message is `event: <type>` followed by `data: <payload>` where <type>
+        is one of the FeedEvent.type enum values and <payload> is the matching
+        component schema (CorpusEvent, DocumentEvent, SessionEvent,
+        FleetEvent). The feed is bounded; a dropped event is labeled
+        `backpressure`, never silent. It coexists with the per-turn `/turn`
+        stream. An optional `workspaceId` scopes corpus and session events;
+        global events (document, fleet) are always delivered.
+      parameters:
+        - name: workspaceId
+          in: query
+          required: false
+          schema:
+            type: string
+      responses:
+        '200':
+          description: >
+            SSE feed. Each message is `event: <type>` + `data: <payload>` where
+            <type> is a FeedEvent.type value and <payload> is the matching
+            component schema.
+          content:
+            text/event-stream:
+              x-ogen-raw-response: true
+              schema:
+                $ref: '#/components/schemas/FeedEvent'
 
   /sessions:
     get:
@@ -966,6 +1101,65 @@ components:
             True when the file changed on disk since the engine last read it and
             was re-read into the worktree on this open (ADR-0047 §2). Aliases of
             the same file resolve to one document row.
+
+    OpenRequest:
+      type: object
+      description: The bootstrap request for `POST /open` (ADR-0052 §1).
+      required: [path]
+      properties:
+        path:
+          type: string
+          description: >
+            Absolute path to open; a directory returns a bounded listing, a file
+            opens as a document.
+        anchorBlockId:
+          type: string
+          description: >
+            Optional block anchor; selects the anchor-keyed session when given
+            (ADR-0052 §2).
+        modeType:
+          type: string
+          description: Optional preset persisted on a newly created session.
+
+    OpenResult:
+      type: object
+      description: >
+        The engine-owned bootstrap result (ADR-0052 §1). `kind` discriminates:
+        `workspace` is always present; `listing` is present for
+        kind=directory; `document`, `blocks`, `session`, and `modes` are present
+        for kind=document.
+      required: [kind, workspace]
+      properties:
+        kind:
+          type: string
+          enum: [directory, document]
+        workspace:
+          $ref: '#/components/schemas/Workspace'
+        listing:
+          $ref: '#/components/schemas/DirectoryListing'
+        document:
+          $ref: '#/components/schemas/Document'
+        blocks:
+          type: array
+          items:
+            $ref: '#/components/schemas/Block'
+        session:
+          $ref: '#/components/schemas/Session'
+        modes:
+          type: array
+          items:
+            $ref: '#/components/schemas/Mode'
+
+    OpenSessionRequest:
+      type: object
+      description: Body for `POST /documents/{id}/session` (ADR-0052 §2).
+      properties:
+        anchorBlockId:
+          type: string
+          description: >
+            Optional block anchor; when present the anchor-keyed session is
+            returned (created if none exists), otherwise the document's most
+            recently updated session.
 
     Entry:
       type: object
@@ -1473,7 +1667,7 @@ components:
           enum: [not-found]
         resource:
           type: string
-          enum: [turn, session]
+          enum: [turn, session, path, document]
         id:
           type: string
 
@@ -1602,6 +1796,76 @@ components:
         type:
           type: string
           enum: [turn, token, meter, candidate, diff, rag, context, locate, thinking, done, error, backpressure]
+
+    FeedEvent:
+      type: object
+      description: >
+        Framing marker for the `GET /events` liveness feed: the `event:` line
+        carries `type`; the `data:` line carries the payload schema matching
+        that type (ADR-0052 §4). The payload JSON itself has no `type` field.
+      required: [type]
+      properties:
+        type:
+          type: string
+          enum: [corpus, document, session, fleet]
+
+    CorpusEvent:
+      type: object
+      description: >
+        A corpus index job's progress or completion (ADR-0052 §4). Workspace
+        scoped: only delivered to a feed filtered to this workspace.
+      required: [workspaceId, job]
+      properties:
+        workspaceId:
+          type: string
+        job:
+          $ref: '#/components/schemas/CorpusJob'
+
+    DocumentEvent:
+      type: object
+      description: >
+        A document lifecycle change: an external disk change detected on open,
+        or a committed write-through (ADR-0052 §4). Global; always delivered.
+      required: [kind, documentId, path]
+      properties:
+        kind:
+          type: string
+          enum: [external-change, commit]
+        documentId:
+          type: string
+        path:
+          type: string
+
+    SessionEvent:
+      type: object
+      description: >
+        A session create or rename (ADR-0052 §4). Workspace scoped: only
+        delivered to a feed filtered to this workspace.
+      required: [kind, workspaceId, session]
+      properties:
+        kind:
+          type: string
+          enum: [created, renamed]
+        workspaceId:
+          type: string
+        session:
+          $ref: '#/components/schemas/Session'
+
+    FleetEvent:
+      type: object
+      description: >
+        A fleet live-state change observed by the engine's daemon poller
+        (ADR-0052 §4). Mirrors FleetState; `control` is `unreachable` during a
+        daemon outage. Global; always delivered.
+      required: [control, models]
+      properties:
+        control:
+          type: string
+          enum: [up, unreachable]
+        models:
+          type: array
+          items:
+            $ref: '#/components/schemas/FleetModel'
 
     TurnEvent:
       type: object

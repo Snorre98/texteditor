@@ -59,6 +59,7 @@ row: ADR-0001/0016 map to it and to §2/§5.2/§8.
 | 0049 | §4, §5.2, §8 | context-management | interface, data-model (precise contract: §7 `Task.context` + replace-when-present merge, §10 `Session.contextPolicy`/`SetContextPolicy`/`ContextPolicy`, §5 assembler `Pinned` + humanOverride labels, data-model §1.4 `sessions.context_policy`; Phase C4) | Q1, Q6 |
 | 0050 | §3, §7 | client-swap | module-boundaries | — |
 | 0051 | §4, §5.2, §8 | context-budgets | interface (§2 `Runner`/`Thinking`/`reasoning`, §5 window gate, §6 measurements/compaction, §8c policy fields), failure-semantics (typed `context-window-exceeded`/`session-budget-exceeded`/`thinking-truncated`/`no-outcome` + `thinking-*` labels), data-model (`meter_measurements`, `compaction` component, pipeline fields); Phase C5 | Q1, Q6 |
+| 0052 | §3, §4, §5.2, §8 | client-swap, context-management, fleet-observability | interface (`POST /open`, `POST /documents/{id}/session`, `POST /documents/{id}/blocks/{bid}/accept`, `GET /events` + its event schema), failure-semantics (feed `backpressure` label; typed conflict on `accept`), module-boundaries (an engine-owned lifecycle/feed seam); Phase E4 | Q1, Q5 |
 
 ## Behavior contract ↔ quality scenario coverage
 
@@ -79,16 +80,16 @@ row: ADR-0001/0016 map to it and to §2/§5.2/§8.
 | provider-hotswap.feature | 0005, 0009, 0015, 0016, 0019 |
 | token-metering.feature | 0011, 0016, 0022, 0024, 0036 |
 | versioning.feature | 0004, 0020, 0038, 0039 |
-| client-swap.feature | 0002, 0013, 0016, 0017, 0023, 0037, 0046, 0050 |
+| client-swap.feature | 0002, 0013, 0016, 0017, 0023, 0037, 0046, 0050, 0052 |
 | sessions.feature | 0026 |
 | tool-routing.feature | 0028 |
 | edit-integrity.feature | 0029 |
 | workspace.feature | 0035, 0036 |
-| fleet-observability.feature | 0040 |
+| fleet-observability.feature | 0040, 0052 |
 | chat-window.feature | 0041, 0042 |
 | context-inspector.feature | 0044, 0011, 0024, 0036 |
 | locate-anchor.feature | 0048, 0036, 0029, 0047 |
-| context-management.feature | 0049, 0011, 0036, 0044, 0048 |
+| context-management.feature | 0049, 0011, 0036, 0044, 0048, 0052 |
 | context-budgets.feature | 0051, 0011, 0024, 0045, 0049 |
 
 ## Supersession notes
@@ -179,6 +180,13 @@ row: ADR-0001/0016 map to it and to §2/§5.2/§8.
   workspace-scoped; sessions persist in the workspace shard), and ADR-0035 §3
   (workspaces become engine entities; the stateless filesystem leaf is renamed
   `Filesystem` at implementation).
+- ADR-0046 §4/§5/§8/§9 → *amended* by ADR-0052: bootstrap, session selection,
+  and approve move engine-side as single verbs (`POST /open`,
+  `POST /documents/{id}/session`, `POST /documents/{id}/blocks/{bid}/accept`),
+  and non-turn state is pushed on `GET /events` so clients stop polling; the
+  client becomes render-only. ADR-0002/0013 §3 are *completed* (not reversed),
+  ADR-0031 (typed SSE) and ADR-0047 (approve is the write boundary) are
+  *extended*, and the ADR-0040 recorded note is consumed by the fleet producer.
 
 Superseded ADRs remain in the log, untouched; supersession is recorded in the
 superseding ADR's header and in the §9 index.

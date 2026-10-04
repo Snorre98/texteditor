@@ -10,6 +10,37 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
+func encodeAcceptBlockResponse(response AcceptBlockRes, w http.ResponseWriter, span trace.Span) error {
+	switch response := response.(type) {
+	case *Revision:
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(200)
+
+		e := new(jx.Encoder)
+		response.Encode(e)
+		if _, err := e.WriteTo(w); err != nil {
+			return errors.Wrap(err, "write")
+		}
+
+		return nil
+
+	case *FileChangedExternally:
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(409)
+
+		e := new(jx.Encoder)
+		response.Encode(e)
+		if _, err := e.WriteTo(w); err != nil {
+			return errors.Wrap(err, "write")
+		}
+
+		return nil
+
+	default:
+		return errors.Errorf("unexpected response type: %T", response)
+	}
+}
+
 func encodeApplyEditResponse(response *Revision, w http.ResponseWriter, span trace.Span) error {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(200)
@@ -202,6 +233,13 @@ func encodeGetDiffResponse(response []WordEdit, w http.ResponseWriter, span trac
 	}
 
 	return nil
+}
+
+func encodeGetEventsResponse(response GetEventsRes, w http.ResponseWriter, span trace.Span) error {
+	switch response := response.(type) {
+	default:
+		return errors.Errorf("unexpected response type: %T", response)
+	}
 }
 
 func encodeGetFleetResponse(response *FleetState, w http.ResponseWriter, span trace.Span) error {
@@ -481,7 +519,63 @@ func encodeListWorkspacesResponse(response []Workspace, w http.ResponseWriter, s
 	return nil
 }
 
+func encodeOpenResponse(response OpenRes, w http.ResponseWriter, span trace.Span) error {
+	switch response := response.(type) {
+	case *OpenResult:
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(200)
+
+		e := new(jx.Encoder)
+		response.Encode(e)
+		if _, err := e.WriteTo(w); err != nil {
+			return errors.Wrap(err, "write")
+		}
+
+		return nil
+
+	case *PathOutsideAllowedRoots:
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(403)
+
+		e := new(jx.Encoder)
+		response.Encode(e)
+		if _, err := e.WriteTo(w); err != nil {
+			return errors.Wrap(err, "write")
+		}
+
+		return nil
+
+	case *NotFound:
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(404)
+
+		e := new(jx.Encoder)
+		response.Encode(e)
+		if _, err := e.WriteTo(w); err != nil {
+			return errors.Wrap(err, "write")
+		}
+
+		return nil
+
+	default:
+		return errors.Errorf("unexpected response type: %T", response)
+	}
+}
+
 func encodeOpenDocumentResponse(response *Document, w http.ResponseWriter, span trace.Span) error {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(200)
+
+	e := new(jx.Encoder)
+	response.Encode(e)
+	if _, err := e.WriteTo(w); err != nil {
+		return errors.Wrap(err, "write")
+	}
+
+	return nil
+}
+
+func encodeOpenDocumentSessionResponse(response *Session, w http.ResponseWriter, span trace.Span) error {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(200)
 

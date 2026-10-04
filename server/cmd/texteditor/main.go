@@ -31,6 +31,7 @@ import (
 	"texteditor/internal/eventbus"
 	"texteditor/internal/filesystem"
 	"texteditor/internal/fleet"
+	"texteditor/internal/liveness"
 	"texteditor/internal/loop"
 	"texteditor/internal/mode"
 	"texteditor/internal/pipeline"
@@ -57,6 +58,7 @@ func run() error {
 		daemonURL = flag.String("daemon", envOr("DAEMON_URL", "http://127.0.0.1:9300"), "control daemon base URL (ADR-0025)")
 		cors      = flag.String("cors-origins", envOr("ENGINE_CORS_ORIGINS", ""), "comma-separated CORS origin allowlist (empty = CORS disabled, ADR-0037)")
 		allowed   = flag.String("allowed-roots", envOr("ALLOWED_ROOTS", ""), "comma-separated allowlist bounding directory browsing and corpus indexing (default $HOME, ADR-0049 §6)")
+		fleetPoll = flag.Int("fleet-poll-seconds", envInt("ENGINE_FLEET_POLL_SECONDS", 10), "engine-side fleet ListStatus poll interval in seconds (0 disables; ADR-0052 §4)")
 	)
 	flag.Parse()
 
@@ -177,11 +179,13 @@ func run() error {
 		Workspaces: wsStore,
 		Filesystem: fsGW,
 		Shards:     shards,
+		Bus:        bus,
 	})
 	// The API's document store is decorated so a successful Open/Commit/
 	// write-through SaveTree enqueues a corpus re-index when the path is in a
-	// workspace's corpus; the write itself is never blocked.
-	docAPI := &corpus.DocHook{Interface: docStore, Corpus: corpusSvc}
+	// workspace's corpus and emits a `document` feed event; the write itself is
+	// never blocked.
+	docAPI := &corpus.DocHook{Interface: docStore, Corpus: corpusSvc, Bus: bus}
 
 	// --- Assembler + loop ---
 	assemblerGW := assembler.New()
@@ -238,6 +242,16 @@ func run() error {
 	// is SIGTERM then SIGKILL on timeout — the engine exits cleanly on SIGTERM).
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	// Engine-side fleet poller: the daemon is external (ADR-0025) with no
+	// webhook, so the engine polls its batch projection and emits `fleet` feed
+	// events on change (ADR-0052 §4).
+	fleetPoller := liveness.New(liveness.Options{
+		Fleet:    fleetGW,
+		Bus:      bus,
+		Interval: time.Duration(*fleetPoll) * time.Second,
+	})
+	go fleetPoller.Run(ctx)
 
 	errc := make(chan error, 1)
 	go func() { errc <- httpSrv.Serve(ln) }()

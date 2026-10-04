@@ -14,6 +14,124 @@ import (
 	"github.com/ogen-go/ogen/validate"
 )
 
+// AcceptBlockParams is parameters of acceptBlock operation.
+type AcceptBlockParams struct {
+	ID  string
+	Bid string
+}
+
+func unpackAcceptBlockParams(packed middleware.Parameters) (params AcceptBlockParams) {
+	{
+		key := middleware.ParameterKey{
+			Name: "id",
+			In:   "path",
+		}
+		params.ID = packed[key].(string)
+	}
+	{
+		key := middleware.ParameterKey{
+			Name: "bid",
+			In:   "path",
+		}
+		params.Bid = packed[key].(string)
+	}
+	return params
+}
+
+func decodeAcceptBlockParams(args [2]string, argsEscaped bool, r *http.Request) (params AcceptBlockParams, _ error) {
+	// Decode path: id.
+	if err := func() error {
+		param := args[0]
+		if argsEscaped {
+			unescaped, err := url.PathUnescape(args[0])
+			if err != nil {
+				return errors.Wrap(err, "unescape path")
+			}
+			param = unescaped
+		}
+		if len(param) > 0 {
+			d := uri.NewPathDecoder(uri.PathDecoderConfig{
+				Param:   "id",
+				Value:   param,
+				Style:   uri.PathStyleSimple,
+				Explode: false,
+			})
+
+			if err := func() error {
+				val, err := d.DecodeValue()
+				if err != nil {
+					return err
+				}
+
+				c, err := conv.ToString(val)
+				if err != nil {
+					return err
+				}
+
+				params.ID = c
+				return nil
+			}(); err != nil {
+				return err
+			}
+		} else {
+			return validate.ErrFieldRequired
+		}
+		return nil
+	}(); err != nil {
+		return params, &ogenerrors.DecodeParamError{
+			Name: "id",
+			In:   "path",
+			Err:  err,
+		}
+	}
+	// Decode path: bid.
+	if err := func() error {
+		param := args[1]
+		if argsEscaped {
+			unescaped, err := url.PathUnescape(args[1])
+			if err != nil {
+				return errors.Wrap(err, "unescape path")
+			}
+			param = unescaped
+		}
+		if len(param) > 0 {
+			d := uri.NewPathDecoder(uri.PathDecoderConfig{
+				Param:   "bid",
+				Value:   param,
+				Style:   uri.PathStyleSimple,
+				Explode: false,
+			})
+
+			if err := func() error {
+				val, err := d.DecodeValue()
+				if err != nil {
+					return err
+				}
+
+				c, err := conv.ToString(val)
+				if err != nil {
+					return err
+				}
+
+				params.Bid = c
+				return nil
+			}(); err != nil {
+				return err
+			}
+		} else {
+			return validate.ErrFieldRequired
+		}
+		return nil
+	}(); err != nil {
+		return params, &ogenerrors.DecodeParamError{
+			Name: "bid",
+			In:   "path",
+			Err:  err,
+		}
+	}
+	return params, nil
+}
+
 // ApplyEditParams is parameters of applyEdit operation.
 type ApplyEditParams struct {
 	ID string
@@ -714,6 +832,70 @@ func decodeGetDiffParams(args [1]string, argsEscaped bool, r *http.Request) (par
 	return params, nil
 }
 
+// GetEventsParams is parameters of getEvents operation.
+type GetEventsParams struct {
+	WorkspaceId OptString `json:",omitempty,omitzero"`
+}
+
+func unpackGetEventsParams(packed middleware.Parameters) (params GetEventsParams) {
+	{
+		key := middleware.ParameterKey{
+			Name: "workspaceId",
+			In:   "query",
+		}
+		if v, ok := packed[key]; ok {
+			params.WorkspaceId = v.(OptString)
+		}
+	}
+	return params
+}
+
+func decodeGetEventsParams(args [0]string, argsEscaped bool, r *http.Request) (params GetEventsParams, _ error) {
+	q := uri.NewQueryDecoder(r.URL.Query())
+	// Decode query: workspaceId.
+	if err := func() error {
+		cfg := uri.QueryParameterDecodingConfig{
+			Name:    "workspaceId",
+			Style:   uri.QueryStyleForm,
+			Explode: true,
+		}
+
+		if err := q.HasParam(cfg); err == nil {
+			if err := q.DecodeParam(cfg, func(d uri.Decoder) error {
+				var paramsDotWorkspaceIdVal string
+				if err := func() error {
+					val, err := d.DecodeValue()
+					if err != nil {
+						return err
+					}
+
+					c, err := conv.ToString(val)
+					if err != nil {
+						return err
+					}
+
+					paramsDotWorkspaceIdVal = c
+					return nil
+				}(); err != nil {
+					return err
+				}
+				params.WorkspaceId.SetTo(paramsDotWorkspaceIdVal)
+				return nil
+			}); err != nil {
+				return err
+			}
+		}
+		return nil
+	}(); err != nil {
+		return params, &ogenerrors.DecodeParamError{
+			Name: "workspaceId",
+			In:   "query",
+			Err:  err,
+		}
+	}
+	return params, nil
+}
+
 // GetHistoryParams is parameters of getHistory operation.
 type GetHistoryParams struct {
 	ID string
@@ -1271,6 +1453,71 @@ func decodeListSessionsParams(args [0]string, argsEscaped bool, r *http.Request)
 		return params, &ogenerrors.DecodeParamError{
 			Name: "documentId",
 			In:   "query",
+			Err:  err,
+		}
+	}
+	return params, nil
+}
+
+// OpenDocumentSessionParams is parameters of openDocumentSession operation.
+type OpenDocumentSessionParams struct {
+	ID string
+}
+
+func unpackOpenDocumentSessionParams(packed middleware.Parameters) (params OpenDocumentSessionParams) {
+	{
+		key := middleware.ParameterKey{
+			Name: "id",
+			In:   "path",
+		}
+		params.ID = packed[key].(string)
+	}
+	return params
+}
+
+func decodeOpenDocumentSessionParams(args [1]string, argsEscaped bool, r *http.Request) (params OpenDocumentSessionParams, _ error) {
+	// Decode path: id.
+	if err := func() error {
+		param := args[0]
+		if argsEscaped {
+			unescaped, err := url.PathUnescape(args[0])
+			if err != nil {
+				return errors.Wrap(err, "unescape path")
+			}
+			param = unescaped
+		}
+		if len(param) > 0 {
+			d := uri.NewPathDecoder(uri.PathDecoderConfig{
+				Param:   "id",
+				Value:   param,
+				Style:   uri.PathStyleSimple,
+				Explode: false,
+			})
+
+			if err := func() error {
+				val, err := d.DecodeValue()
+				if err != nil {
+					return err
+				}
+
+				c, err := conv.ToString(val)
+				if err != nil {
+					return err
+				}
+
+				params.ID = c
+				return nil
+			}(); err != nil {
+				return err
+			}
+		} else {
+			return validate.ErrFieldRequired
+		}
+		return nil
+	}(); err != nil {
+		return params, &ogenerrors.DecodeParamError{
+			Name: "id",
+			In:   "path",
 			Err:  err,
 		}
 	}

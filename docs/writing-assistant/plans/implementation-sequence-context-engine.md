@@ -12,7 +12,10 @@ storage); the reader pane is added by
 editor-extensible), and reasoning/context budgets by
 [ADR-0051](../adr/0051-reasoning-policy-context-window-budgets.md) (thinking
 policy + bounded escalation, per-turn window gate, session budget + compaction,
-exact thinking metering). Track 2 (deployment + Tauri editor) is **landed and frozen**
+exact thinking metering); and the engine-owned context lifecycle + liveness feed
+by [ADR-0052](../adr/0052-engine-owned-context-lifecycle-liveness-feed.md)
+(one-verb bootstrap/resume/accept, a non-turn event feed, no client polling or
+sequencing). Track 2 (deployment + Tauri editor) is **landed and frozen**
 ([`implementation-sequence-future.md`](implementation-sequence-future.md));
 nothing here resumes it.
 
@@ -28,11 +31,13 @@ trustworthy before the client is rebuilt, so the new TUI is written against a
 fixed engine.
 
 **Execution order (agreed 2026-10-04).** Phase D is in flight and E1 may run in
-parallel with it. The sequence is **D → E1 → C5 → E2 → E3**: E1 (transport +
+parallel with it. The sequence is **D → E1 → C5 → E2 → E3 → E4**: E1 (transport +
 walking skeleton) consumes neither D nor C5; C5 (ADR-0051) is an engine phase
 placed before E2 so the TUI renders its thinking/budget labels; E2/E3 consume
-D's locate surfaces and C5's thinking/budget surfaces. OpenTUI stays frozen
-in-tree throughout. Handoff prompts:
+D's locate surfaces and C5's thinking/budget surfaces; E4 (ADR-0052) makes the
+client render-only (engine-owned bootstrap/resume/accept + a liveness feed) and
+is sequenced after E3 so it consumes the engine-side fleet orchestration E3
+lands. OpenTUI stays frozen in-tree throughout. Handoff prompts:
 [`handoff-e1.md`](handoff-e1.md), [`handoff-c5.md`](handoff-c5.md),
 [`handoff-e2.md`](handoff-e2.md), [`handoff-e3.md`](handoff-e3.md).
 
@@ -303,6 +308,51 @@ approving an edit shows the written path or a conflict.
 
 ---
 
+## Phase E4 — Engine-owned context lifecycle + liveness feed (ADR-0052)
+
+Closes the "dumb client" gap: the TUI stops owning selection, sequencing, and
+liveness. Sequenced after E3 so it consumes the engine-side fleet orchestration.
+OpenAPI-first throughout (ADR-0017); Rust codegen regenerates; Tauri/TS trees
+stay untouched while frozen (ADR-0044).
+
+1. **Contract (E4.1).** Add to `api/openapi.yaml`: `POST /open` (bootstrap
+   resolver, discriminated directory/document result); `POST
+   /documents/{id}/session` (open-or-resume); `POST
+   /documents/{id}/blocks/{bid}/accept` (atomic approve); `GET /events` (non-turn
+   SSE feed + its event schema). Regenerate ogen + `openapi-to-rust`.
+2. **Lifecycle verbs (E4.2).** Handlers reusing existing primitives:
+   `apiserver.resolveWorkspaceFor` (`apiserver.go:559-587`),
+   `loop.resolveWorkspaceID` (`loop/loop.go:202-226`), session
+   create-or-resume + newest-first (`session/session.go:99-127,204-221`), and the
+   stage/commit path (`document/store.go:647-848`) for `accept`. No new mutable
+   state; the exact `/open` shape and the session-selection rule are pinned at
+   implementation.
+3. **Liveness feed (E4.3).** Expose the unfiltered bus at `GET /events`
+   (`eventbus/eventbus.go:64`); add producers for corpus job progress/completion
+   (`corpus/corpus.go:236-320`), `document` external-change/commit via the
+   `DocHook` (`corpus/corpus.go:510-543`), and `session` create/rename; add an
+   engine-side bounded fleet `ListStatus` poller that emits `fleet` on change.
+   Bounded channel; drops labeled `backpressure` (Q1).
+4. **Client rewrite (E4.4).** `client/tui-rs/src/bridge.rs`: replace
+   `bootstrap`/`resume_or_create`/`approve` choreography with the three verbs and
+   subscribe to `GET /events`; delete the corpus/fleet poll loops
+   (`ui.rs:56-75`); `state.rs` sheds pointer/flow fields. The reader
+   (`GET /documents/{id}/blocks`) and the turn stream are unchanged.
+5. **Docs + behaviors (E4.5).** `client-swap.feature` (client sends one verb and
+   renders events; accept is atomic; no client sequencing), `context-management.feature`
+   (feed progress, no polling), `fleet-observability.feature` (push not poll);
+   this plan's parity checklist and the traceability/architecture/status sets gain
+   ADR-0052.
+
+Gate: `cd server && CGO_ENABLED=0 go test ./... && go vet ./...` and `gofmt -l
+server/` clean; `cd client/tui-rs && cargo test` + `tools/build-tui-rs.sh` green;
+`client-swap.feature`/`context-management.feature`/`fleet-observability.feature`
+scenarios pass; a live-model run opens a vault path (one `/open`), chats,
+approves (one `accept`, file bytes change or a labeled conflict), and corpus
+index progress arrives over `/events` with no client poll loop.
+
+---
+
 ## Phase F — Decision layer (Laya) + thesis validation
 
 1. **Laya runner** in `macos-dev-config` (`serve-laya.sh`, manifest entry,
@@ -341,3 +391,8 @@ documented.
   labeled, never silent (ADR-0051).
 - Data over code: presets, pipeline policy, and decision policy are JSON
   config.
+- Dumb clients (ADR-0013 §3, completed by ADR-0052): the engine owns selection,
+  sequencing, and liveness — bootstrap/resume/accept are single engine verbs and
+  non-turn state arrives on the feed; the client sends a verb and renders events
+  (overlays, selections, input, pane visibility stay client-side as
+  presentation).

@@ -365,6 +365,8 @@ flowchart TB
 | Edit formatting | the engine owns the bytes: whole-block edits, `TextFormatter` normalize/validate/format, block-level guard, structured edit result — ADR-0029 |
 | Workspace navigation | engine-served shallow directory listing (Filesystem leaf, renamed by ADR-0049 §5) + turn-scoped, metered `@`-mentions that are read-only context, never versioned documents — ADR-0035, ADR-0036 |
 | Document reader | read-only rendered markdown over the engine block tree (`GET /documents/{id}/blocks`, joined fragments, `tui-markdown`); a toggleable pane shaped over a `Block[]` view-model to extend into an editor, with the `SaveTree` write path left unwired; approve stays the only write boundary — ADR-0050 |
+| Context lifecycle | engine-owned bootstrap/resume/accept: one `POST /open` resolves workspace + document + blocks + session + modes; `POST /documents/{id}/session` is open-or-resume; `POST /documents/{id}/blocks/{bid}/accept` performs the approve write boundary atomically — ADR-0052 (completes ADR-0013 §3) |
+| Liveness feed | a non-turn SSE feed (`GET /events`) carrying corpus/document/session/fleet events so clients render state changes without polling; bounded with labeled `backpressure` drops — ADR-0052 |
 | Inference control surface | a future `InferenceControl` interface *behind* the Provider seam (a sibling of `ProviderGateway`, not a change to it); the "knobs" (logprobs, grammar, KV, speculative decoding) are decoupled from the OpenAI-compatible contract for the MVP — `research/vision-native-local-llm-text-editing.md` |
 | Deployment/security | sidecar spawn dynamic-port-default; localhost bind; Tailscale deny-by-default — ADR-0021 |
 
@@ -425,6 +427,7 @@ Full records in [adr/](adr/). Index:
 | 0049 | Context management: workspaces, multi-root corpus, allowed-roots boundary, context tray | Accepted — amends 0016 (per-instance SQLite), 0026 (workspace-scoped sessions), 0035 §3 (workspace entity; leaf rename) |
 | 0050 | TUI reader pane: read-only rendered markdown over the engine block tree, editor-extensible | Accepted — amends 0046 §5/§9 |
 | 0051 | Reasoning policy and context-window budgets: thinking off/auto/on, window gate, session budget + compaction, exact thinking metering | Accepted — extends 0011/0024/0044/0045/0049; amends 0026 §5 |
+| 0052 | Engine-owned context lifecycle and liveness feed: one-verb bootstrap/resume/accept, a non-turn event feed, no client polling or sequencing | Accepted — completes 0013 §3; amends 0046 §4/§5/§8/§9; extends 0031/0040/0047/0049 |
 
 ## 10. Quality Requirements
 
@@ -461,16 +464,16 @@ Each is an SEI general scenario with a concrete response-measure (ADR-0022).
 | provider-hotswap.feature | fallback + citation floor | 0005, 0009, 0015, 0016, 0019 |
 | token-metering.feature | per-component attribution | 0011, 0016, 0022, 0024 |
 | versioning.feature | git + block IDs | 0004, 0020 |
-| client-swap.feature | dumb generated clients | 0002, 0013, 0016, 0017, 0023 |
+| client-swap.feature | dumb generated clients; one-verb lifecycle + liveness feed | 0002, 0013, 0016, 0017, 0023, 0046, 0050, 0052 |
 | sessions.feature | persisted sessions, per-session concurrency + budget | 0026 |
 | tool-routing.feature | writer-signals-router-decides, per-mode toggle, fail-fast gates | 0028 |
 | edit-integrity.feature | whole-block edits, engine-owned formatting, block-level guard, structured result | 0029 |
 | workspace.feature | engine-served directory listing, `@`-mentions as metered read-only context | 0035, 0036 |
 | context-inspector.feature | persisted turn snapshots: provenance, retrieval/decision outcomes, labeled drops | 0044, 0011, 0024, 0036 |
-| fleet-observability.feature | fleet state surface + last-good cache + remediation | 0040 |
+| fleet-observability.feature | fleet state surface + last-good cache + remediation + push feed | 0040, 0052 |
 | chat-window.feature | Tauri floating chat window (frozen) | 0041, 0042 |
 | locate-anchor.feature | `/locate` chunk anchoring: deterministic resolve, ambiguity, anchored guarded edit | 0048, 0036, 0029, 0047 |
-| context-management.feature | workspaces, multi-root corpus scope, allowed-roots boundary, context tray, pin-vs-gate | 0049, 0011, 0036, 0044, 0048 |
+| context-management.feature | workspaces, multi-root corpus scope, allowed-roots boundary, context tray, pin-vs-gate, feed progress | 0049, 0011, 0036, 0044, 0048, 0052 |
 | context-budgets.feature | thinking policy + bounded escalation, exact thinking metering, window gate + refusal, session soft/hard budget, metered compaction, turn measurements | 0051, 0011, 0024, 0045, 0049 |
 
 ### 10.3 Definition of done (documentation)
@@ -532,6 +535,8 @@ The documentation set is complete when:
 | Preset | a mode's minimal form — name + system prompt + default model; presented as TUI tabs (ADR-0045) |
 | Locate anchor | the document + block resolved from a pasted chunk by `/locate` (ADR-0048) |
 | Write-through conflict | `file-changed-externally`: the disk file changed since the engine last read it; the write is refused, never clobbered (ADR-0047) |
+| Context lifecycle | engine-owned selection and sequencing: bootstrap (`POST /open`), session open-or-resume, and atomic accept — the client sends one verb and renders events (ADR-0052) |
+| Liveness feed | the non-turn `GET /events` SSE stream carrying corpus/document/session/fleet state changes; clients subscribe instead of polling (ADR-0052) |
 
 ---
 

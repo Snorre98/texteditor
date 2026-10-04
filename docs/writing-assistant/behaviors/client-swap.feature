@@ -1,8 +1,9 @@
 # language: en
 Feature: Dumb clients
   Clients contain no domain logic; everything is generated from the OpenAPI
-  contract and routed to the engine.
-  Normative per ADR-0002, ADR-0013, ADR-0017, ADR-0046, ADR-0050.
+  contract and routed to the engine. Selection, sequencing, and liveness are
+  engine-owned: the client sends a single verb and renders typed events.
+  Normative per ADR-0002, ADR-0013, ADR-0017, ADR-0046, ADR-0050, ADR-0052.
 
   Scenario: A client is generated, not hand-coded
     Given the OpenAPI spec is updated with a new endpoint
@@ -36,3 +37,30 @@ Feature: Dumb clients
     When the reader pane renders
     Then it renders the canonical markdown joined from GET /documents/{id}/blocks
     And the client holds no document state of record and never writes
+
+  Scenario: Bootstrap is one engine verb
+    Given the client is launched with a path
+    When the client calls POST /open
+    Then the engine resolves the workspace, document, blocks, session, and modes
+    And a directory path returns a bounded listing while a file path returns the document context
+    And the client performs no path arithmetic, listing probe, or multi-call sequencing
+
+  Scenario: Session open-or-resume is engine policy
+    Given a document with existing sessions
+    When the client calls POST /documents/{id}/session
+    Then the engine returns the most recently updated session, or creates one
+    And the client never lists sessions to choose one
+
+  Scenario: Approve is one atomic engine operation
+    Given a staged candidate for a block
+    When the client calls POST /documents/{id}/blocks/{bid}/accept with the overwrite opt-in
+    Then the engine validates the base hash, formats, commits, and writes through
+    And an external change is refused with a typed file-changed-externally conflict and no partial write
+    And the client supplies no candidate text
+
+  Scenario: Non-turn state arrives on the liveness feed
+    Given the client is subscribed to GET /events
+    When corpus indexing progresses, the fleet live state changes, or a document changes on disk
+    Then the client receives typed events without polling
+    And a dropped feed event is labeled backpressure, never silent
+    And the per-turn stream is unchanged and can be held at the same time

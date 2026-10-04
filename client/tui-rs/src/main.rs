@@ -30,7 +30,7 @@ fn run(path: String) -> std::io::Result<()> {
     let mut terminal = ui::init()?;
 
     let bridge = bridge::spawn(EngineEnv::from_process_env());
-    bridge.send(Command::Bootstrap { path });
+    bridge.send(Command::Open { path });
 
     let mut app = AppState::default();
     let result = ui::run_loop(&mut terminal, &mut app, &bridge);

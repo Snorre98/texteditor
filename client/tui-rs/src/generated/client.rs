@@ -102,7 +102,9 @@ fn display_api_error_body(body: &str) -> std::borrow::Cow<'_, str> {
     let Some((end, _)) = body.char_indices().nth(API_ERROR_BODY_DISPLAY_LIMIT) else {
         return std::borrow::Cow::Borrowed(body);
     };
-    let mut displayed = String::with_capacity(end + API_ERROR_BODY_TRUNCATION_MARKER.len());
+    let mut displayed = String::with_capacity(
+        end + API_ERROR_BODY_TRUNCATION_MARKER.len(),
+    );
     displayed.push_str(&body[..end]);
     displayed.push_str(API_ERROR_BODY_TRUNCATION_MARKER);
     std::borrow::Cow::Owned(displayed)
@@ -145,12 +147,7 @@ impl<E> ApiError<E> {
 }
 impl<E: std::fmt::Debug> std::fmt::Display for ApiError<E> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "API error {}: {}",
-            self.status,
-            display_api_error_body(&self.body)
-        )?;
+        write!(f, "API error {}: {}", self.status, display_api_error_body(& self.body))?;
         if let Some(typed) = &self.typed {
             write!(f, "; typed: {typed:?}")?;
         }
@@ -224,7 +221,9 @@ async fn __read_bounded_response_body(
     while let Some(chunk) = response.chunk().await.map_err(HttpError::Network)? {
         let next_len = body.len().checked_add(chunk.len());
         if next_len.is_none_or(|next_len| next_len > limit) {
-            return Err(HttpError::ResponseTooLarge { limit });
+            return Err(HttpError::ResponseTooLarge {
+                limit,
+            });
         }
         body.extend_from_slice(&chunk);
     }
@@ -260,7 +259,11 @@ impl HttpClient {
         self
     }
     /// Add a custom header to all requests
-    pub fn with_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+    pub fn with_header(
+        mut self,
+        name: impl Into<String>,
+        value: impl Into<String>,
+    ) -> Self {
         self.custom_headers.insert(name.into(), value.into());
         self
     }
@@ -289,6 +292,11 @@ fn __pct_encode_path_segment(s: &str) -> String {
         }
     }
     out
+}
+///Typed error responses for `acceptBlock`. One variant per declared non-2xx response.
+#[derive(Debug, Clone)]
+pub enum AcceptBlockApiError {
+    Status409(FileChangedExternally),
 }
 ///Typed error responses for `cancelTurn`. One variant per declared non-2xx response.
 #[derive(Debug, Clone)]
@@ -321,6 +329,12 @@ pub enum GetTurnContextApiError {
 pub enum ListDirectoryApiError {
     Status403(PathOutsideAllowedRoots),
 }
+///Typed error responses for `open`. One variant per declared non-2xx response.
+#[derive(Debug, Clone)]
+pub enum OpenApiError {
+    Status403(PathOutsideAllowedRoots),
+    Status404(NotFound),
+}
 ///Typed error responses for `putCorpus`. One variant per declared non-2xx response.
 #[derive(Debug, Clone)]
 pub enum PutCorpusApiError {
@@ -348,6 +362,119 @@ pub enum SaveDocumentApiError {
     Status409(FileChangedExternally),
 }
 impl HttpClient {
+    /// Atomically accept the staged candidate for a block (ADR-0052 §3)
+    ///
+    /// The approve write boundary as one server-side operation: validate the staged candidate for the block, re-validate its base content hash, format, commit, and mirror the canonical markdown to the opened file (ADR-0047). The client supplies no candidate text. An externally changed file is refused with the typed `file-changed-externally` (409) and no bytes are written. The staged routes (`GET .../candidates`, `POST /edits`, `POST /commits`) remain for compatibility.
+    ///
+    /// `POST /documents/{id}/blocks/{bid}/accept`
+    pub async fn accept_block(
+        &self,
+        id: impl AsRef<str>,
+        bid: impl AsRef<str>,
+        request: Option<CommitRequest>,
+    ) -> Result<Revision, ApiOpError<AcceptBlockApiError>> {
+        let request_url = format!(
+            "{}{}", self.base_url, format!("/documents/{}/blocks/{}/accept",
+            __pct_encode_path_segment(id.as_ref()), __pct_encode_path_segment(bid
+            .as_ref()))
+        );
+        let mut req = self.http_client.post(request_url);
+        if let Some(request) = request {
+            req = req
+                .body(
+                    serde_json::to_vec(&request).map_err(HttpError::serialization_error)?,
+                )
+                .header("content-type", "application/json");
+        } else {
+            req = req.header(reqwest::header::CONTENT_LENGTH, "0");
+        }
+        if let Some(api_key) = &self.api_key {
+            req = req.bearer_auth(api_key);
+        }
+        for (name, value) in &self.custom_headers {
+            if !name.eq_ignore_ascii_case("accept") {
+                req = req.header(name, value);
+            }
+        }
+        req = req.header(reqwest::header::ACCEPT, "application/json");
+        let response = req.send().await?;
+        let status = response.status();
+        let status_code = status.as_u16();
+        let headers = response.headers().clone();
+        let body_bytes = __read_bounded_response_body(
+                response,
+                self.max_response_body_bytes,
+            )
+            .await?;
+        let raw_body = body_bytes;
+        let body_text = String::from_utf8_lossy(&raw_body).into_owned();
+        if false || status_code == 200u16 {
+            match serde_json::from_str(&body_text) {
+                Ok(body) => Ok(body),
+                Err(e) => {
+                    Err(
+                        ApiOpError::Api(ApiError {
+                            status: status_code,
+                            headers: headers,
+                            body: body_text,
+                            raw_body,
+                            typed: None,
+                            parse_error: Some(
+                                format!("failed to deserialize 2xx response body: {}", e),
+                            ),
+                        }),
+                    )
+                }
+            }
+        } else if status.is_success() {
+            Err(
+                ApiOpError::Api(ApiError {
+                    status: status_code,
+                    headers,
+                    body: body_text,
+                    raw_body,
+                    typed: None,
+                    parse_error: Some(
+                        format!(
+                            "unexpected successful status {}; generated return type selects `{}`",
+                            status_code, "200",
+                        ),
+                    ),
+                }),
+            )
+        } else {
+            let typed: Option<AcceptBlockApiError>;
+            let parse_error: Option<String>;
+            match status_code {
+                409u16 => {
+                    match serde_json::from_str::<FileChangedExternally>(&body_text) {
+                        Ok(v) => {
+                            typed = Some(AcceptBlockApiError::Status409(v));
+                            parse_error = None;
+                        }
+                        Err(e) => {
+                            typed = None;
+                            parse_error = Some(e.to_string());
+                        }
+                    }
+                }
+                _ => {
+                    typed = None;
+                    parse_error = None;
+                }
+            }
+            Err(
+                ApiOpError::Api(ApiError {
+                    status: status_code,
+                    headers,
+                    body: body_text,
+                    raw_body,
+                    typed,
+                    parse_error,
+                }),
+            )
+        }
+    }
     /// `POST /documents/{id}/edits`
     pub async fn apply_edit(
         &self,
@@ -355,12 +482,8 @@ impl HttpClient {
         request: BlockEdit,
     ) -> Result<Revision, ApiOpError<serde_json::Value>> {
         let request_url = format!(
-            "{}{}",
-            self.base_url,
-            format!(
-                "/documents/{}/edits",
-                __pct_encode_path_segment(id.as_ref())
-            )
+            "{}{}", self.base_url, format!("/documents/{}/edits",
+            __pct_encode_path_segment(id.as_ref()))
         );
         let mut req = self.http_client.post(request_url);
         req = req
@@ -379,57 +502,74 @@ impl HttpClient {
         let status = response.status();
         let status_code = status.as_u16();
         let headers = response.headers().clone();
-        let body_bytes =
-            __read_bounded_response_body(response, self.max_response_body_bytes).await?;
+        let body_bytes = __read_bounded_response_body(
+                response,
+                self.max_response_body_bytes,
+            )
+            .await?;
         let raw_body = body_bytes;
         let body_text = String::from_utf8_lossy(&raw_body).into_owned();
         if false || status_code == 200u16 {
             match serde_json::from_str(&body_text) {
                 Ok(body) => Ok(body),
-                Err(e) => Err(ApiOpError::Api(ApiError {
+                Err(e) => {
+                    Err(
+                        ApiOpError::Api(ApiError {
+                            status: status_code,
+                            headers: headers,
+                            body: body_text,
+                            raw_body,
+                            typed: None,
+                            parse_error: Some(
+                                format!("failed to deserialize 2xx response body: {}", e),
+                            ),
+                        }),
+                    )
+                }
+            }
+        } else if status.is_success() {
+            Err(
+                ApiOpError::Api(ApiError {
                     status: status_code,
-                    headers: headers,
+                    headers,
                     body: body_text,
                     raw_body,
                     typed: None,
-                    parse_error: Some(format!("failed to deserialize 2xx response body: {}", e)),
-                })),
-            }
-        } else if status.is_success() {
-            Err(ApiOpError::Api(ApiError {
-                status: status_code,
-                headers,
-                body: body_text,
-                raw_body,
-                typed: None,
-                parse_error: Some(format!(
-                    "unexpected successful status {}; generated return type selects `{}`",
-                    status_code, "200",
-                )),
-            }))
+                    parse_error: Some(
+                        format!(
+                            "unexpected successful status {}; generated return type selects `{}`",
+                            status_code, "200",
+                        ),
+                    ),
+                }),
+            )
         } else {
             let typed: Option<serde_json::Value>;
             let parse_error: Option<String>;
             match status_code {
-                _ => match serde_json::from_str::<serde_json::Value>(&body_text) {
-                    Ok(v) => {
-                        typed = Some(v);
-                        parse_error = None;
+                _ => {
+                    match serde_json::from_str::<serde_json::Value>(&body_text) {
+                        Ok(v) => {
+                            typed = Some(v);
+                            parse_error = None;
+                        }
+                        Err(e) => {
+                            typed = None;
+                            parse_error = Some(e.to_string());
+                        }
                     }
-                    Err(e) => {
-                        typed = None;
-                        parse_error = Some(e.to_string());
-                    }
-                },
+                }
             }
-            Err(ApiOpError::Api(ApiError {
-                status: status_code,
-                headers,
-                body: body_text,
-                raw_body,
-                typed,
-                parse_error,
-            }))
+            Err(
+                ApiOpError::Api(ApiError {
+                    status: status_code,
+                    headers,
+                    body: body_text,
+                    raw_body,
+                    typed,
+                    parse_error,
+                }),
+            )
         }
     }
     /// Cancel a running turn (user-initiated, labeled terminal outcome)
@@ -442,9 +582,8 @@ impl HttpClient {
         id: impl AsRef<str>,
     ) -> Result<(), ApiOpError<CancelTurnApiError>> {
         let request_url = format!(
-            "{}{}",
-            self.base_url,
-            format!("/turns/{}/cancel", __pct_encode_path_segment(id.as_ref()))
+            "{}{}", self.base_url, format!("/turns/{}/cancel",
+            __pct_encode_path_segment(id.as_ref()))
         );
         let mut req = self.http_client.post(request_url);
         req = req.header(reqwest::header::CONTENT_LENGTH, "0");
@@ -458,8 +597,11 @@ impl HttpClient {
         let status = response.status();
         let status_code = status.as_u16();
         let headers = response.headers().clone();
-        let body_bytes =
-            __read_bounded_response_body(response, self.max_response_body_bytes).await?;
+        let body_bytes = __read_bounded_response_body(
+                response,
+                self.max_response_body_bytes,
+            )
+            .await?;
         let raw_body = body_bytes;
         let body_text = String::from_utf8_lossy(&raw_body).into_owned();
         if false || status_code == 204u16 {
@@ -468,54 +610,64 @@ impl HttpClient {
             let _ = headers;
             Ok(())
         } else if status.is_success() {
-            Err(ApiOpError::Api(ApiError {
-                status: status_code,
-                headers,
-                body: body_text,
-                raw_body,
-                typed: None,
-                parse_error: Some(format!(
-                    "unexpected successful status {}; generated return type selects `{}`",
-                    status_code, "204",
-                )),
-            }))
+            Err(
+                ApiOpError::Api(ApiError {
+                    status: status_code,
+                    headers,
+                    body: body_text,
+                    raw_body,
+                    typed: None,
+                    parse_error: Some(
+                        format!(
+                            "unexpected successful status {}; generated return type selects `{}`",
+                            status_code, "204",
+                        ),
+                    ),
+                }),
+            )
         } else {
             let typed: Option<CancelTurnApiError>;
             let parse_error: Option<String>;
             match status_code {
-                404u16 => match serde_json::from_str::<NotFound>(&body_text) {
-                    Ok(v) => {
-                        typed = Some(CancelTurnApiError::Status404(v));
-                        parse_error = None;
+                404u16 => {
+                    match serde_json::from_str::<NotFound>(&body_text) {
+                        Ok(v) => {
+                            typed = Some(CancelTurnApiError::Status404(v));
+                            parse_error = None;
+                        }
+                        Err(e) => {
+                            typed = None;
+                            parse_error = Some(e.to_string());
+                        }
                     }
-                    Err(e) => {
-                        typed = None;
-                        parse_error = Some(e.to_string());
+                }
+                409u16 => {
+                    match serde_json::from_str::<TurnNotRunning>(&body_text) {
+                        Ok(v) => {
+                            typed = Some(CancelTurnApiError::Status409(v));
+                            parse_error = None;
+                        }
+                        Err(e) => {
+                            typed = None;
+                            parse_error = Some(e.to_string());
+                        }
                     }
-                },
-                409u16 => match serde_json::from_str::<TurnNotRunning>(&body_text) {
-                    Ok(v) => {
-                        typed = Some(CancelTurnApiError::Status409(v));
-                        parse_error = None;
-                    }
-                    Err(e) => {
-                        typed = None;
-                        parse_error = Some(e.to_string());
-                    }
-                },
+                }
                 _ => {
                     typed = None;
                     parse_error = None;
                 }
             }
-            Err(ApiOpError::Api(ApiError {
-                status: status_code,
-                headers,
-                body: body_text,
-                raw_body,
-                typed,
-                parse_error,
-            }))
+            Err(
+                ApiOpError::Api(ApiError {
+                    status: status_code,
+                    headers,
+                    body: body_text,
+                    raw_body,
+                    typed,
+                    parse_error,
+                }),
+            )
         }
     }
     /// Accept staged candidates (one commit, write-through)
@@ -529,17 +681,15 @@ impl HttpClient {
         request: Option<CommitRequest>,
     ) -> Result<Revision, ApiOpError<CommitDocumentApiError>> {
         let request_url = format!(
-            "{}{}",
-            self.base_url,
-            format!(
-                "/documents/{}/commits",
-                __pct_encode_path_segment(id.as_ref())
-            )
+            "{}{}", self.base_url, format!("/documents/{}/commits",
+            __pct_encode_path_segment(id.as_ref()))
         );
         let mut req = self.http_client.post(request_url);
         if let Some(request) = request {
             req = req
-                .body(serde_json::to_vec(&request).map_err(HttpError::serialization_error)?)
+                .body(
+                    serde_json::to_vec(&request).map_err(HttpError::serialization_error)?,
+                )
                 .header("content-type", "application/json");
         } else {
             req = req.header(reqwest::header::CONTENT_LENGTH, "0");
@@ -557,61 +707,78 @@ impl HttpClient {
         let status = response.status();
         let status_code = status.as_u16();
         let headers = response.headers().clone();
-        let body_bytes =
-            __read_bounded_response_body(response, self.max_response_body_bytes).await?;
+        let body_bytes = __read_bounded_response_body(
+                response,
+                self.max_response_body_bytes,
+            )
+            .await?;
         let raw_body = body_bytes;
         let body_text = String::from_utf8_lossy(&raw_body).into_owned();
         if false || status_code == 200u16 {
             match serde_json::from_str(&body_text) {
                 Ok(body) => Ok(body),
-                Err(e) => Err(ApiOpError::Api(ApiError {
+                Err(e) => {
+                    Err(
+                        ApiOpError::Api(ApiError {
+                            status: status_code,
+                            headers: headers,
+                            body: body_text,
+                            raw_body,
+                            typed: None,
+                            parse_error: Some(
+                                format!("failed to deserialize 2xx response body: {}", e),
+                            ),
+                        }),
+                    )
+                }
+            }
+        } else if status.is_success() {
+            Err(
+                ApiOpError::Api(ApiError {
                     status: status_code,
-                    headers: headers,
+                    headers,
                     body: body_text,
                     raw_body,
                     typed: None,
-                    parse_error: Some(format!("failed to deserialize 2xx response body: {}", e)),
-                })),
-            }
-        } else if status.is_success() {
-            Err(ApiOpError::Api(ApiError {
-                status: status_code,
-                headers,
-                body: body_text,
-                raw_body,
-                typed: None,
-                parse_error: Some(format!(
-                    "unexpected successful status {}; generated return type selects `{}`",
-                    status_code, "200",
-                )),
-            }))
+                    parse_error: Some(
+                        format!(
+                            "unexpected successful status {}; generated return type selects `{}`",
+                            status_code, "200",
+                        ),
+                    ),
+                }),
+            )
         } else {
             let typed: Option<CommitDocumentApiError>;
             let parse_error: Option<String>;
             match status_code {
-                409u16 => match serde_json::from_str::<FileChangedExternally>(&body_text) {
-                    Ok(v) => {
-                        typed = Some(CommitDocumentApiError::Status409(v));
-                        parse_error = None;
+                409u16 => {
+                    match serde_json::from_str::<FileChangedExternally>(&body_text) {
+                        Ok(v) => {
+                            typed = Some(CommitDocumentApiError::Status409(v));
+                            parse_error = None;
+                        }
+                        Err(e) => {
+                            typed = None;
+                            parse_error = Some(e.to_string());
+                        }
                     }
-                    Err(e) => {
-                        typed = None;
-                        parse_error = Some(e.to_string());
-                    }
-                },
+                }
                 _ => {
                     typed = None;
                     parse_error = None;
                 }
             }
-            Err(ApiOpError::Api(ApiError {
-                status: status_code,
-                headers,
-                body: body_text,
-                raw_body,
-                typed,
-                parse_error,
-            }))
+            Err(
+                ApiOpError::Api(ApiError {
+                    status: status_code,
+                    headers,
+                    body: body_text,
+                    raw_body,
+                    typed,
+                    parse_error,
+                }),
+            )
         }
     }
     /// `POST /sessions`
@@ -637,57 +804,74 @@ impl HttpClient {
         let status = response.status();
         let status_code = status.as_u16();
         let headers = response.headers().clone();
-        let body_bytes =
-            __read_bounded_response_body(response, self.max_response_body_bytes).await?;
+        let body_bytes = __read_bounded_response_body(
+                response,
+                self.max_response_body_bytes,
+            )
+            .await?;
         let raw_body = body_bytes;
         let body_text = String::from_utf8_lossy(&raw_body).into_owned();
         if false || status_code == 200u16 {
             match serde_json::from_str(&body_text) {
                 Ok(body) => Ok(body),
-                Err(e) => Err(ApiOpError::Api(ApiError {
+                Err(e) => {
+                    Err(
+                        ApiOpError::Api(ApiError {
+                            status: status_code,
+                            headers: headers,
+                            body: body_text,
+                            raw_body,
+                            typed: None,
+                            parse_error: Some(
+                                format!("failed to deserialize 2xx response body: {}", e),
+                            ),
+                        }),
+                    )
+                }
+            }
+        } else if status.is_success() {
+            Err(
+                ApiOpError::Api(ApiError {
                     status: status_code,
-                    headers: headers,
+                    headers,
                     body: body_text,
                     raw_body,
                     typed: None,
-                    parse_error: Some(format!("failed to deserialize 2xx response body: {}", e)),
-                })),
-            }
-        } else if status.is_success() {
-            Err(ApiOpError::Api(ApiError {
-                status: status_code,
-                headers,
-                body: body_text,
-                raw_body,
-                typed: None,
-                parse_error: Some(format!(
-                    "unexpected successful status {}; generated return type selects `{}`",
-                    status_code, "200",
-                )),
-            }))
+                    parse_error: Some(
+                        format!(
+                            "unexpected successful status {}; generated return type selects `{}`",
+                            status_code, "200",
+                        ),
+                    ),
+                }),
+            )
         } else {
             let typed: Option<serde_json::Value>;
             let parse_error: Option<String>;
             match status_code {
-                _ => match serde_json::from_str::<serde_json::Value>(&body_text) {
-                    Ok(v) => {
-                        typed = Some(v);
-                        parse_error = None;
+                _ => {
+                    match serde_json::from_str::<serde_json::Value>(&body_text) {
+                        Ok(v) => {
+                            typed = Some(v);
+                            parse_error = None;
+                        }
+                        Err(e) => {
+                            typed = None;
+                            parse_error = Some(e.to_string());
+                        }
                     }
-                    Err(e) => {
-                        typed = None;
-                        parse_error = Some(e.to_string());
-                    }
-                },
+                }
             }
-            Err(ApiOpError::Api(ApiError {
-                status: status_code,
-                headers,
-                body: body_text,
-                raw_body,
-                typed,
-                parse_error,
-            }))
+            Err(
+                ApiOpError::Api(ApiError {
+                    status: status_code,
+                    headers,
+                    body: body_text,
+                    raw_body,
+                    typed,
+                    parse_error,
+                }),
+            )
         }
     }
     /// Create-or-resume a workspace by absolute root (ADR-0049 §2)
@@ -717,57 +901,74 @@ impl HttpClient {
         let status = response.status();
         let status_code = status.as_u16();
         let headers = response.headers().clone();
-        let body_bytes =
-            __read_bounded_response_body(response, self.max_response_body_bytes).await?;
+        let body_bytes = __read_bounded_response_body(
+                response,
+                self.max_response_body_bytes,
+            )
+            .await?;
         let raw_body = body_bytes;
         let body_text = String::from_utf8_lossy(&raw_body).into_owned();
         if false || status_code == 200u16 {
             match serde_json::from_str(&body_text) {
                 Ok(body) => Ok(body),
-                Err(e) => Err(ApiOpError::Api(ApiError {
+                Err(e) => {
+                    Err(
+                        ApiOpError::Api(ApiError {
+                            status: status_code,
+                            headers: headers,
+                            body: body_text,
+                            raw_body,
+                            typed: None,
+                            parse_error: Some(
+                                format!("failed to deserialize 2xx response body: {}", e),
+                            ),
+                        }),
+                    )
+                }
+            }
+        } else if status.is_success() {
+            Err(
+                ApiOpError::Api(ApiError {
                     status: status_code,
-                    headers: headers,
+                    headers,
                     body: body_text,
                     raw_body,
                     typed: None,
-                    parse_error: Some(format!("failed to deserialize 2xx response body: {}", e)),
-                })),
-            }
-        } else if status.is_success() {
-            Err(ApiOpError::Api(ApiError {
-                status: status_code,
-                headers,
-                body: body_text,
-                raw_body,
-                typed: None,
-                parse_error: Some(format!(
-                    "unexpected successful status {}; generated return type selects `{}`",
-                    status_code, "200",
-                )),
-            }))
+                    parse_error: Some(
+                        format!(
+                            "unexpected successful status {}; generated return type selects `{}`",
+                            status_code, "200",
+                        ),
+                    ),
+                }),
+            )
         } else {
             let typed: Option<serde_json::Value>;
             let parse_error: Option<String>;
             match status_code {
-                _ => match serde_json::from_str::<serde_json::Value>(&body_text) {
-                    Ok(v) => {
-                        typed = Some(v);
-                        parse_error = None;
+                _ => {
+                    match serde_json::from_str::<serde_json::Value>(&body_text) {
+                        Ok(v) => {
+                            typed = Some(v);
+                            parse_error = None;
+                        }
+                        Err(e) => {
+                            typed = None;
+                            parse_error = Some(e.to_string());
+                        }
                     }
-                    Err(e) => {
-                        typed = None;
-                        parse_error = Some(e.to_string());
-                    }
-                },
+                }
             }
-            Err(ApiOpError::Api(ApiError {
-                status: status_code,
-                headers,
-                body: body_text,
-                raw_body,
-                typed,
-                parse_error,
-            }))
+            Err(
+                ApiOpError::Api(ApiError {
+                    status: status_code,
+                    headers,
+                    body: body_text,
+                    raw_body,
+                    typed,
+                    parse_error,
+                }),
+            )
         }
     }
     /// Evict one corpus document from retrieval; idempotent (ADR-0049 §4)
@@ -781,17 +982,14 @@ impl HttpClient {
         workspace_id: impl AsRef<str>,
     ) -> Result<(), ApiOpError<EvictCorpusDocumentApiError>> {
         let request_url = format!(
-            "{}{}",
-            self.base_url,
-            format!(
-                "/corpus/documents/{}",
-                __pct_encode_path_segment(id.as_ref())
-            )
+            "{}{}", self.base_url, format!("/corpus/documents/{}",
+            __pct_encode_path_segment(id.as_ref()))
         );
         let mut req = self.http_client.delete(request_url);
         {
             let mut query_params: Vec<(String, String)> = Vec::new();
-            query_params.push(("workspaceId".to_string(), workspace_id.as_ref().to_string()));
+            query_params
+                .push(("workspaceId".to_string(), workspace_id.as_ref().to_string()));
             if !query_params.is_empty() {
                 req = req.query(&query_params);
             }
@@ -806,8 +1004,11 @@ impl HttpClient {
         let status = response.status();
         let status_code = status.as_u16();
         let headers = response.headers().clone();
-        let body_bytes =
-            __read_bounded_response_body(response, self.max_response_body_bytes).await?;
+        let body_bytes = __read_bounded_response_body(
+                response,
+                self.max_response_body_bytes,
+            )
+            .await?;
         let raw_body = body_bytes;
         let body_text = String::from_utf8_lossy(&raw_body).into_owned();
         if false || status_code == 204u16 {
@@ -816,44 +1017,52 @@ impl HttpClient {
             let _ = headers;
             Ok(())
         } else if status.is_success() {
-            Err(ApiOpError::Api(ApiError {
-                status: status_code,
-                headers,
-                body: body_text,
-                raw_body,
-                typed: None,
-                parse_error: Some(format!(
-                    "unexpected successful status {}; generated return type selects `{}`",
-                    status_code, "204",
-                )),
-            }))
+            Err(
+                ApiOpError::Api(ApiError {
+                    status: status_code,
+                    headers,
+                    body: body_text,
+                    raw_body,
+                    typed: None,
+                    parse_error: Some(
+                        format!(
+                            "unexpected successful status {}; generated return type selects `{}`",
+                            status_code, "204",
+                        ),
+                    ),
+                }),
+            )
         } else {
             let typed: Option<EvictCorpusDocumentApiError>;
             let parse_error: Option<String>;
             match status_code {
-                403u16 => match serde_json::from_str::<PathOutsideAllowedRoots>(&body_text) {
-                    Ok(v) => {
-                        typed = Some(EvictCorpusDocumentApiError::Status403(v));
-                        parse_error = None;
+                403u16 => {
+                    match serde_json::from_str::<PathOutsideAllowedRoots>(&body_text) {
+                        Ok(v) => {
+                            typed = Some(EvictCorpusDocumentApiError::Status403(v));
+                            parse_error = None;
+                        }
+                        Err(e) => {
+                            typed = None;
+                            parse_error = Some(e.to_string());
+                        }
                     }
-                    Err(e) => {
-                        typed = None;
-                        parse_error = Some(e.to_string());
-                    }
-                },
+                }
                 _ => {
                     typed = None;
                     parse_error = None;
                 }
             }
-            Err(ApiOpError::Api(ApiError {
-                status: status_code,
-                headers,
-                body: body_text,
-                raw_body,
-                typed,
-                parse_error,
-            }))
+            Err(
+                ApiOpError::Api(ApiError {
+                    status: status_code,
+                    headers,
+                    body: body_text,
+                    raw_body,
+                    typed,
+                    parse_error,
+                }),
+            )
         }
     }
     /// `GET /documents/{id}/blocks`
@@ -862,12 +1071,8 @@ impl HttpClient {
         id: impl AsRef<str>,
     ) -> Result<GetBlocksResponse, ApiOpError<serde_json::Value>> {
         let request_url = format!(
-            "{}{}",
-            self.base_url,
-            format!(
-                "/documents/{}/blocks",
-                __pct_encode_path_segment(id.as_ref())
-            )
+            "{}{}", self.base_url, format!("/documents/{}/blocks",
+            __pct_encode_path_segment(id.as_ref()))
         );
         let mut req = self.http_client.get(request_url);
         if let Some(api_key) = &self.api_key {
@@ -883,57 +1088,74 @@ impl HttpClient {
         let status = response.status();
         let status_code = status.as_u16();
         let headers = response.headers().clone();
-        let body_bytes =
-            __read_bounded_response_body(response, self.max_response_body_bytes).await?;
+        let body_bytes = __read_bounded_response_body(
+                response,
+                self.max_response_body_bytes,
+            )
+            .await?;
         let raw_body = body_bytes;
         let body_text = String::from_utf8_lossy(&raw_body).into_owned();
         if false || status_code == 200u16 {
             match serde_json::from_str(&body_text) {
                 Ok(body) => Ok(body),
-                Err(e) => Err(ApiOpError::Api(ApiError {
+                Err(e) => {
+                    Err(
+                        ApiOpError::Api(ApiError {
+                            status: status_code,
+                            headers: headers,
+                            body: body_text,
+                            raw_body,
+                            typed: None,
+                            parse_error: Some(
+                                format!("failed to deserialize 2xx response body: {}", e),
+                            ),
+                        }),
+                    )
+                }
+            }
+        } else if status.is_success() {
+            Err(
+                ApiOpError::Api(ApiError {
                     status: status_code,
-                    headers: headers,
+                    headers,
                     body: body_text,
                     raw_body,
                     typed: None,
-                    parse_error: Some(format!("failed to deserialize 2xx response body: {}", e)),
-                })),
-            }
-        } else if status.is_success() {
-            Err(ApiOpError::Api(ApiError {
-                status: status_code,
-                headers,
-                body: body_text,
-                raw_body,
-                typed: None,
-                parse_error: Some(format!(
-                    "unexpected successful status {}; generated return type selects `{}`",
-                    status_code, "200",
-                )),
-            }))
+                    parse_error: Some(
+                        format!(
+                            "unexpected successful status {}; generated return type selects `{}`",
+                            status_code, "200",
+                        ),
+                    ),
+                }),
+            )
         } else {
             let typed: Option<serde_json::Value>;
             let parse_error: Option<String>;
             match status_code {
-                _ => match serde_json::from_str::<serde_json::Value>(&body_text) {
-                    Ok(v) => {
-                        typed = Some(v);
-                        parse_error = None;
+                _ => {
+                    match serde_json::from_str::<serde_json::Value>(&body_text) {
+                        Ok(v) => {
+                            typed = Some(v);
+                            parse_error = None;
+                        }
+                        Err(e) => {
+                            typed = None;
+                            parse_error = Some(e.to_string());
+                        }
                     }
-                    Err(e) => {
-                        typed = None;
-                        parse_error = Some(e.to_string());
-                    }
-                },
+                }
             }
-            Err(ApiOpError::Api(ApiError {
-                status: status_code,
-                headers,
-                body: body_text,
-                raw_body,
-                typed,
-                parse_error,
-            }))
+            Err(
+                ApiOpError::Api(ApiError {
+                    status: status_code,
+                    headers,
+                    body: body_text,
+                    raw_body,
+                    typed,
+                    parse_error,
+                }),
+            )
         }
     }
     /// `GET /documents/{id}/blocks/{bid}/candidates`
@@ -943,13 +1165,9 @@ impl HttpClient {
         bid: impl AsRef<str>,
     ) -> Result<GetCandidatesResponse, ApiOpError<serde_json::Value>> {
         let request_url = format!(
-            "{}{}",
-            self.base_url,
-            format!(
-                "/documents/{}/blocks/{}/candidates",
-                __pct_encode_path_segment(id.as_ref()),
-                __pct_encode_path_segment(bid.as_ref())
-            )
+            "{}{}", self.base_url, format!("/documents/{}/blocks/{}/candidates",
+            __pct_encode_path_segment(id.as_ref()), __pct_encode_path_segment(bid
+            .as_ref()))
         );
         let mut req = self.http_client.get(request_url);
         if let Some(api_key) = &self.api_key {
@@ -965,57 +1183,74 @@ impl HttpClient {
         let status = response.status();
         let status_code = status.as_u16();
         let headers = response.headers().clone();
-        let body_bytes =
-            __read_bounded_response_body(response, self.max_response_body_bytes).await?;
+        let body_bytes = __read_bounded_response_body(
+                response,
+                self.max_response_body_bytes,
+            )
+            .await?;
         let raw_body = body_bytes;
         let body_text = String::from_utf8_lossy(&raw_body).into_owned();
         if false || status_code == 200u16 {
             match serde_json::from_str(&body_text) {
                 Ok(body) => Ok(body),
-                Err(e) => Err(ApiOpError::Api(ApiError {
+                Err(e) => {
+                    Err(
+                        ApiOpError::Api(ApiError {
+                            status: status_code,
+                            headers: headers,
+                            body: body_text,
+                            raw_body,
+                            typed: None,
+                            parse_error: Some(
+                                format!("failed to deserialize 2xx response body: {}", e),
+                            ),
+                        }),
+                    )
+                }
+            }
+        } else if status.is_success() {
+            Err(
+                ApiOpError::Api(ApiError {
                     status: status_code,
-                    headers: headers,
+                    headers,
                     body: body_text,
                     raw_body,
                     typed: None,
-                    parse_error: Some(format!("failed to deserialize 2xx response body: {}", e)),
-                })),
-            }
-        } else if status.is_success() {
-            Err(ApiOpError::Api(ApiError {
-                status: status_code,
-                headers,
-                body: body_text,
-                raw_body,
-                typed: None,
-                parse_error: Some(format!(
-                    "unexpected successful status {}; generated return type selects `{}`",
-                    status_code, "200",
-                )),
-            }))
+                    parse_error: Some(
+                        format!(
+                            "unexpected successful status {}; generated return type selects `{}`",
+                            status_code, "200",
+                        ),
+                    ),
+                }),
+            )
         } else {
             let typed: Option<serde_json::Value>;
             let parse_error: Option<String>;
             match status_code {
-                _ => match serde_json::from_str::<serde_json::Value>(&body_text) {
-                    Ok(v) => {
-                        typed = Some(v);
-                        parse_error = None;
+                _ => {
+                    match serde_json::from_str::<serde_json::Value>(&body_text) {
+                        Ok(v) => {
+                            typed = Some(v);
+                            parse_error = None;
+                        }
+                        Err(e) => {
+                            typed = None;
+                            parse_error = Some(e.to_string());
+                        }
                     }
-                    Err(e) => {
-                        typed = None;
-                        parse_error = Some(e.to_string());
-                    }
-                },
+                }
             }
-            Err(ApiOpError::Api(ApiError {
-                status: status_code,
-                headers,
-                body: body_text,
-                raw_body,
-                typed,
-                parse_error,
-            }))
+            Err(
+                ApiOpError::Api(ApiError {
+                    status: status_code,
+                    headers,
+                    body: body_text,
+                    raw_body,
+                    typed,
+                    parse_error,
+                }),
+            )
         }
     }
     /// Read a workspace's corpus scope, per-document status, and job progress (ADR-0049 §4)
@@ -1029,7 +1264,8 @@ impl HttpClient {
         let mut req = self.http_client.get(request_url);
         {
             let mut query_params: Vec<(String, String)> = Vec::new();
-            query_params.push(("workspaceId".to_string(), workspace_id.as_ref().to_string()));
+            query_params
+                .push(("workspaceId".to_string(), workspace_id.as_ref().to_string()));
             if !query_params.is_empty() {
                 req = req.query(&query_params);
             }
@@ -1047,57 +1283,74 @@ impl HttpClient {
         let status = response.status();
         let status_code = status.as_u16();
         let headers = response.headers().clone();
-        let body_bytes =
-            __read_bounded_response_body(response, self.max_response_body_bytes).await?;
+        let body_bytes = __read_bounded_response_body(
+                response,
+                self.max_response_body_bytes,
+            )
+            .await?;
         let raw_body = body_bytes;
         let body_text = String::from_utf8_lossy(&raw_body).into_owned();
         if false || status_code == 200u16 {
             match serde_json::from_str(&body_text) {
                 Ok(body) => Ok(body),
-                Err(e) => Err(ApiOpError::Api(ApiError {
+                Err(e) => {
+                    Err(
+                        ApiOpError::Api(ApiError {
+                            status: status_code,
+                            headers: headers,
+                            body: body_text,
+                            raw_body,
+                            typed: None,
+                            parse_error: Some(
+                                format!("failed to deserialize 2xx response body: {}", e),
+                            ),
+                        }),
+                    )
+                }
+            }
+        } else if status.is_success() {
+            Err(
+                ApiOpError::Api(ApiError {
                     status: status_code,
-                    headers: headers,
+                    headers,
                     body: body_text,
                     raw_body,
                     typed: None,
-                    parse_error: Some(format!("failed to deserialize 2xx response body: {}", e)),
-                })),
-            }
-        } else if status.is_success() {
-            Err(ApiOpError::Api(ApiError {
-                status: status_code,
-                headers,
-                body: body_text,
-                raw_body,
-                typed: None,
-                parse_error: Some(format!(
-                    "unexpected successful status {}; generated return type selects `{}`",
-                    status_code, "200",
-                )),
-            }))
+                    parse_error: Some(
+                        format!(
+                            "unexpected successful status {}; generated return type selects `{}`",
+                            status_code, "200",
+                        ),
+                    ),
+                }),
+            )
         } else {
             let typed: Option<serde_json::Value>;
             let parse_error: Option<String>;
             match status_code {
-                _ => match serde_json::from_str::<serde_json::Value>(&body_text) {
-                    Ok(v) => {
-                        typed = Some(v);
-                        parse_error = None;
+                _ => {
+                    match serde_json::from_str::<serde_json::Value>(&body_text) {
+                        Ok(v) => {
+                            typed = Some(v);
+                            parse_error = None;
+                        }
+                        Err(e) => {
+                            typed = None;
+                            parse_error = Some(e.to_string());
+                        }
                     }
-                    Err(e) => {
-                        typed = None;
-                        parse_error = Some(e.to_string());
-                    }
-                },
+                }
             }
-            Err(ApiOpError::Api(ApiError {
-                status: status_code,
-                headers,
-                body: body_text,
-                raw_body,
-                typed,
-                parse_error,
-            }))
+            Err(
+                ApiOpError::Api(ApiError {
+                    status: status_code,
+                    headers,
+                    body: body_text,
+                    raw_body,
+                    typed,
+                    parse_error,
+                }),
+            )
         }
     }
     /// `GET /documents/{id}/diff`
@@ -1108,9 +1361,8 @@ impl HttpClient {
         rev: impl AsRef<str>,
     ) -> Result<GetDiffResponse, ApiOpError<serde_json::Value>> {
         let request_url = format!(
-            "{}{}",
-            self.base_url,
-            format!("/documents/{}/diff", __pct_encode_path_segment(id.as_ref()))
+            "{}{}", self.base_url, format!("/documents/{}/diff",
+            __pct_encode_path_segment(id.as_ref()))
         );
         let mut req = self.http_client.get(request_url);
         {
@@ -1134,57 +1386,165 @@ impl HttpClient {
         let status = response.status();
         let status_code = status.as_u16();
         let headers = response.headers().clone();
-        let body_bytes =
-            __read_bounded_response_body(response, self.max_response_body_bytes).await?;
+        let body_bytes = __read_bounded_response_body(
+                response,
+                self.max_response_body_bytes,
+            )
+            .await?;
         let raw_body = body_bytes;
         let body_text = String::from_utf8_lossy(&raw_body).into_owned();
         if false || status_code == 200u16 {
             match serde_json::from_str(&body_text) {
                 Ok(body) => Ok(body),
-                Err(e) => Err(ApiOpError::Api(ApiError {
+                Err(e) => {
+                    Err(
+                        ApiOpError::Api(ApiError {
+                            status: status_code,
+                            headers: headers,
+                            body: body_text,
+                            raw_body,
+                            typed: None,
+                            parse_error: Some(
+                                format!("failed to deserialize 2xx response body: {}", e),
+                            ),
+                        }),
+                    )
+                }
+            }
+        } else if status.is_success() {
+            Err(
+                ApiOpError::Api(ApiError {
                     status: status_code,
-                    headers: headers,
+                    headers,
                     body: body_text,
                     raw_body,
                     typed: None,
-                    parse_error: Some(format!("failed to deserialize 2xx response body: {}", e)),
-                })),
-            }
-        } else if status.is_success() {
-            Err(ApiOpError::Api(ApiError {
-                status: status_code,
-                headers,
-                body: body_text,
-                raw_body,
-                typed: None,
-                parse_error: Some(format!(
-                    "unexpected successful status {}; generated return type selects `{}`",
-                    status_code, "200",
-                )),
-            }))
+                    parse_error: Some(
+                        format!(
+                            "unexpected successful status {}; generated return type selects `{}`",
+                            status_code, "200",
+                        ),
+                    ),
+                }),
+            )
         } else {
             let typed: Option<serde_json::Value>;
             let parse_error: Option<String>;
             match status_code {
-                _ => match serde_json::from_str::<serde_json::Value>(&body_text) {
-                    Ok(v) => {
-                        typed = Some(v);
-                        parse_error = None;
+                _ => {
+                    match serde_json::from_str::<serde_json::Value>(&body_text) {
+                        Ok(v) => {
+                            typed = Some(v);
+                            parse_error = None;
+                        }
+                        Err(e) => {
+                            typed = None;
+                            parse_error = Some(e.to_string());
+                        }
                     }
-                    Err(e) => {
-                        typed = None;
-                        parse_error = Some(e.to_string());
-                    }
-                },
+                }
             }
-            Err(ApiOpError::Api(ApiError {
-                status: status_code,
-                headers,
-                body: body_text,
-                raw_body,
-                typed,
-                parse_error,
-            }))
+            Err(
+                ApiOpError::Api(ApiError {
+                    status: status_code,
+                    headers,
+                    body: body_text,
+                    raw_body,
+                    typed,
+                    parse_error,
+                }),
+            )
+        }
+    }
+    /// Non-turn liveness feed (SSE, ADR-0052 §4)
+    ///
+    /// A long-lived SSE feed carrying non-turn engine events so clients stop polling: `corpus` (job progress/done), `document` (external-change/commit), `session` (create/rename), and `fleet` (a daemon live-state change observed by the engine-side poller). Each message is `event: <type>` followed by `data: <payload>` where <type> is one of the FeedEvent.type enum values and <payload> is the matching component schema (CorpusEvent, DocumentEvent, SessionEvent, FleetEvent). The feed is bounded; a dropped event is labeled `backpressure`, never silent. It coexists with the per-turn `/turn` stream. An optional `workspaceId` scopes corpus and session events; global events (document, fleet) are always delivered.
+    ///
+    /// `GET /events`
+    pub async fn get_events(
+        &self,
+        workspace_id: Option<impl AsRef<str>>,
+    ) -> Result<
+        impl futures_util::Stream<Item = Result<bytes::Bytes, reqwest::Error>>,
+        ApiOpError<serde_json::Value>,
+    > {
+        let request_url = format!("{}{}", self.base_url, "/events");
+        let mut req = self.http_client.get(request_url);
+        {
+            let mut query_params: Vec<(String, String)> = Vec::new();
+            if let Some(v) = workspace_id {
+                query_params.push(("workspaceId".to_string(), v.as_ref().to_string()));
+            }
+            if !query_params.is_empty() {
+                req = req.query(&query_params);
+            }
+        }
+        if let Some(api_key) = &self.api_key {
+            req = req.bearer_auth(api_key);
+        }
+        for (name, value) in &self.custom_headers {
+            if !name.eq_ignore_ascii_case("accept") {
+                req = req.header(name, value);
+            }
+        }
+        req = req.header(reqwest::header::ACCEPT, "text/event-stream");
+        let response = req.send().await?;
+        let status = response.status();
+        let status_code = status.as_u16();
+        let headers = response.headers().clone();
+        if false || status_code == 200u16 {
+            Ok(response.bytes_stream())
+        } else {
+            if status.is_success() {
+                return Err(
+                    ApiOpError::Api(ApiError {
+                        status: status_code,
+                        headers,
+                        body: String::new(),
+                        raw_body: Vec::new(),
+                        typed: None,
+                        parse_error: Some(
+                            format!(
+                                "unexpected successful status {}; generated return type selects `{}`; live response body was not buffered",
+                                status_code, "200",
+                            ),
+                        ),
+                    }),
+                );
+            }
+            let body_bytes = __read_bounded_response_body(
+                    response,
+                    self.max_response_body_bytes,
+                )
+                .await?;
+            let raw_body = body_bytes;
+            let body_text = String::from_utf8_lossy(&raw_body).into_owned();
+            let typed: Option<serde_json::Value>;
+            let parse_error: Option<String>;
+            match status_code {
+                _ => {
+                    match serde_json::from_str::<serde_json::Value>(&body_text) {
+                        Ok(v) => {
+                            typed = Some(v);
+                            parse_error = None;
+                        }
+                        Err(e) => {
+                            typed = None;
+                            parse_error = Some(e.to_string());
+                        }
+                    }
+                }
+            }
+            Err(
+                ApiOpError::Api(ApiError {
+                    status: status_code,
+                    headers,
+                    body: body_text,
+                    raw_body,
+                    typed,
+                    parse_error,
+                }),
+            )
         }
     }
     /// Serving observability — models + live state + control-plane reachability (ADR-0040)
@@ -1208,57 +1568,74 @@ impl HttpClient {
         let status = response.status();
         let status_code = status.as_u16();
         let headers = response.headers().clone();
-        let body_bytes =
-            __read_bounded_response_body(response, self.max_response_body_bytes).await?;
+        let body_bytes = __read_bounded_response_body(
+                response,
+                self.max_response_body_bytes,
+            )
+            .await?;
         let raw_body = body_bytes;
         let body_text = String::from_utf8_lossy(&raw_body).into_owned();
         if false || status_code == 200u16 {
             match serde_json::from_str(&body_text) {
                 Ok(body) => Ok(body),
-                Err(e) => Err(ApiOpError::Api(ApiError {
+                Err(e) => {
+                    Err(
+                        ApiOpError::Api(ApiError {
+                            status: status_code,
+                            headers: headers,
+                            body: body_text,
+                            raw_body,
+                            typed: None,
+                            parse_error: Some(
+                                format!("failed to deserialize 2xx response body: {}", e),
+                            ),
+                        }),
+                    )
+                }
+            }
+        } else if status.is_success() {
+            Err(
+                ApiOpError::Api(ApiError {
                     status: status_code,
-                    headers: headers,
+                    headers,
                     body: body_text,
                     raw_body,
                     typed: None,
-                    parse_error: Some(format!("failed to deserialize 2xx response body: {}", e)),
-                })),
-            }
-        } else if status.is_success() {
-            Err(ApiOpError::Api(ApiError {
-                status: status_code,
-                headers,
-                body: body_text,
-                raw_body,
-                typed: None,
-                parse_error: Some(format!(
-                    "unexpected successful status {}; generated return type selects `{}`",
-                    status_code, "200",
-                )),
-            }))
+                    parse_error: Some(
+                        format!(
+                            "unexpected successful status {}; generated return type selects `{}`",
+                            status_code, "200",
+                        ),
+                    ),
+                }),
+            )
         } else {
             let typed: Option<serde_json::Value>;
             let parse_error: Option<String>;
             match status_code {
-                _ => match serde_json::from_str::<serde_json::Value>(&body_text) {
-                    Ok(v) => {
-                        typed = Some(v);
-                        parse_error = None;
+                _ => {
+                    match serde_json::from_str::<serde_json::Value>(&body_text) {
+                        Ok(v) => {
+                            typed = Some(v);
+                            parse_error = None;
+                        }
+                        Err(e) => {
+                            typed = None;
+                            parse_error = Some(e.to_string());
+                        }
                     }
-                    Err(e) => {
-                        typed = None;
-                        parse_error = Some(e.to_string());
-                    }
-                },
+                }
             }
-            Err(ApiOpError::Api(ApiError {
-                status: status_code,
-                headers,
-                body: body_text,
-                raw_body,
-                typed,
-                parse_error,
-            }))
+            Err(
+                ApiOpError::Api(ApiError {
+                    status: status_code,
+                    headers,
+                    body: body_text,
+                    raw_body,
+                    typed,
+                    parse_error,
+                }),
+            )
         }
     }
     /// Liveness check
@@ -1280,57 +1657,74 @@ impl HttpClient {
         let status = response.status();
         let status_code = status.as_u16();
         let headers = response.headers().clone();
-        let body_bytes =
-            __read_bounded_response_body(response, self.max_response_body_bytes).await?;
+        let body_bytes = __read_bounded_response_body(
+                response,
+                self.max_response_body_bytes,
+            )
+            .await?;
         let raw_body = body_bytes;
         let body_text = String::from_utf8_lossy(&raw_body).into_owned();
         if false || status_code == 200u16 {
             match serde_json::from_str(&body_text) {
                 Ok(body) => Ok(body),
-                Err(e) => Err(ApiOpError::Api(ApiError {
+                Err(e) => {
+                    Err(
+                        ApiOpError::Api(ApiError {
+                            status: status_code,
+                            headers: headers,
+                            body: body_text,
+                            raw_body,
+                            typed: None,
+                            parse_error: Some(
+                                format!("failed to deserialize 2xx response body: {}", e),
+                            ),
+                        }),
+                    )
+                }
+            }
+        } else if status.is_success() {
+            Err(
+                ApiOpError::Api(ApiError {
                     status: status_code,
-                    headers: headers,
+                    headers,
                     body: body_text,
                     raw_body,
                     typed: None,
-                    parse_error: Some(format!("failed to deserialize 2xx response body: {}", e)),
-                })),
-            }
-        } else if status.is_success() {
-            Err(ApiOpError::Api(ApiError {
-                status: status_code,
-                headers,
-                body: body_text,
-                raw_body,
-                typed: None,
-                parse_error: Some(format!(
-                    "unexpected successful status {}; generated return type selects `{}`",
-                    status_code, "200",
-                )),
-            }))
+                    parse_error: Some(
+                        format!(
+                            "unexpected successful status {}; generated return type selects `{}`",
+                            status_code, "200",
+                        ),
+                    ),
+                }),
+            )
         } else {
             let typed: Option<serde_json::Value>;
             let parse_error: Option<String>;
             match status_code {
-                _ => match serde_json::from_str::<serde_json::Value>(&body_text) {
-                    Ok(v) => {
-                        typed = Some(v);
-                        parse_error = None;
+                _ => {
+                    match serde_json::from_str::<serde_json::Value>(&body_text) {
+                        Ok(v) => {
+                            typed = Some(v);
+                            parse_error = None;
+                        }
+                        Err(e) => {
+                            typed = None;
+                            parse_error = Some(e.to_string());
+                        }
                     }
-                    Err(e) => {
-                        typed = None;
-                        parse_error = Some(e.to_string());
-                    }
-                },
+                }
             }
-            Err(ApiOpError::Api(ApiError {
-                status: status_code,
-                headers,
-                body: body_text,
-                raw_body,
-                typed,
-                parse_error,
-            }))
+            Err(
+                ApiOpError::Api(ApiError {
+                    status: status_code,
+                    headers,
+                    body: body_text,
+                    raw_body,
+                    typed,
+                    parse_error,
+                }),
+            )
         }
     }
     /// `GET /documents/{id}/history`
@@ -1339,12 +1733,8 @@ impl HttpClient {
         id: impl AsRef<str>,
     ) -> Result<GetHistoryResponse, ApiOpError<serde_json::Value>> {
         let request_url = format!(
-            "{}{}",
-            self.base_url,
-            format!(
-                "/documents/{}/history",
-                __pct_encode_path_segment(id.as_ref())
-            )
+            "{}{}", self.base_url, format!("/documents/{}/history",
+            __pct_encode_path_segment(id.as_ref()))
         );
         let mut req = self.http_client.get(request_url);
         if let Some(api_key) = &self.api_key {
@@ -1360,57 +1750,74 @@ impl HttpClient {
         let status = response.status();
         let status_code = status.as_u16();
         let headers = response.headers().clone();
-        let body_bytes =
-            __read_bounded_response_body(response, self.max_response_body_bytes).await?;
+        let body_bytes = __read_bounded_response_body(
+                response,
+                self.max_response_body_bytes,
+            )
+            .await?;
         let raw_body = body_bytes;
         let body_text = String::from_utf8_lossy(&raw_body).into_owned();
         if false || status_code == 200u16 {
             match serde_json::from_str(&body_text) {
                 Ok(body) => Ok(body),
-                Err(e) => Err(ApiOpError::Api(ApiError {
+                Err(e) => {
+                    Err(
+                        ApiOpError::Api(ApiError {
+                            status: status_code,
+                            headers: headers,
+                            body: body_text,
+                            raw_body,
+                            typed: None,
+                            parse_error: Some(
+                                format!("failed to deserialize 2xx response body: {}", e),
+                            ),
+                        }),
+                    )
+                }
+            }
+        } else if status.is_success() {
+            Err(
+                ApiOpError::Api(ApiError {
                     status: status_code,
-                    headers: headers,
+                    headers,
                     body: body_text,
                     raw_body,
                     typed: None,
-                    parse_error: Some(format!("failed to deserialize 2xx response body: {}", e)),
-                })),
-            }
-        } else if status.is_success() {
-            Err(ApiOpError::Api(ApiError {
-                status: status_code,
-                headers,
-                body: body_text,
-                raw_body,
-                typed: None,
-                parse_error: Some(format!(
-                    "unexpected successful status {}; generated return type selects `{}`",
-                    status_code, "200",
-                )),
-            }))
+                    parse_error: Some(
+                        format!(
+                            "unexpected successful status {}; generated return type selects `{}`",
+                            status_code, "200",
+                        ),
+                    ),
+                }),
+            )
         } else {
             let typed: Option<serde_json::Value>;
             let parse_error: Option<String>;
             match status_code {
-                _ => match serde_json::from_str::<serde_json::Value>(&body_text) {
-                    Ok(v) => {
-                        typed = Some(v);
-                        parse_error = None;
+                _ => {
+                    match serde_json::from_str::<serde_json::Value>(&body_text) {
+                        Ok(v) => {
+                            typed = Some(v);
+                            parse_error = None;
+                        }
+                        Err(e) => {
+                            typed = None;
+                            parse_error = Some(e.to_string());
+                        }
                     }
-                    Err(e) => {
-                        typed = None;
-                        parse_error = Some(e.to_string());
-                    }
-                },
+                }
             }
-            Err(ApiOpError::Api(ApiError {
-                status: status_code,
-                headers,
-                body: body_text,
-                raw_body,
-                typed,
-                parse_error,
-            }))
+            Err(
+                ApiOpError::Api(ApiError {
+                    status: status_code,
+                    headers,
+                    body: body_text,
+                    raw_body,
+                    typed,
+                    parse_error,
+                }),
+            )
         }
     }
     /// `GET /models/{name}/status`
@@ -1419,12 +1826,8 @@ impl HttpClient {
         name: impl AsRef<str>,
     ) -> Result<LiveStateResponse, ApiOpError<serde_json::Value>> {
         let request_url = format!(
-            "{}{}",
-            self.base_url,
-            format!(
-                "/models/{}/status",
-                __pct_encode_path_segment(name.as_ref())
-            )
+            "{}{}", self.base_url, format!("/models/{}/status",
+            __pct_encode_path_segment(name.as_ref()))
         );
         let mut req = self.http_client.get(request_url);
         if let Some(api_key) = &self.api_key {
@@ -1440,57 +1843,74 @@ impl HttpClient {
         let status = response.status();
         let status_code = status.as_u16();
         let headers = response.headers().clone();
-        let body_bytes =
-            __read_bounded_response_body(response, self.max_response_body_bytes).await?;
+        let body_bytes = __read_bounded_response_body(
+                response,
+                self.max_response_body_bytes,
+            )
+            .await?;
         let raw_body = body_bytes;
         let body_text = String::from_utf8_lossy(&raw_body).into_owned();
         if false || status_code == 200u16 {
             match serde_json::from_str(&body_text) {
                 Ok(body) => Ok(body),
-                Err(e) => Err(ApiOpError::Api(ApiError {
+                Err(e) => {
+                    Err(
+                        ApiOpError::Api(ApiError {
+                            status: status_code,
+                            headers: headers,
+                            body: body_text,
+                            raw_body,
+                            typed: None,
+                            parse_error: Some(
+                                format!("failed to deserialize 2xx response body: {}", e),
+                            ),
+                        }),
+                    )
+                }
+            }
+        } else if status.is_success() {
+            Err(
+                ApiOpError::Api(ApiError {
                     status: status_code,
-                    headers: headers,
+                    headers,
                     body: body_text,
                     raw_body,
                     typed: None,
-                    parse_error: Some(format!("failed to deserialize 2xx response body: {}", e)),
-                })),
-            }
-        } else if status.is_success() {
-            Err(ApiOpError::Api(ApiError {
-                status: status_code,
-                headers,
-                body: body_text,
-                raw_body,
-                typed: None,
-                parse_error: Some(format!(
-                    "unexpected successful status {}; generated return type selects `{}`",
-                    status_code, "200",
-                )),
-            }))
+                    parse_error: Some(
+                        format!(
+                            "unexpected successful status {}; generated return type selects `{}`",
+                            status_code, "200",
+                        ),
+                    ),
+                }),
+            )
         } else {
             let typed: Option<serde_json::Value>;
             let parse_error: Option<String>;
             match status_code {
-                _ => match serde_json::from_str::<serde_json::Value>(&body_text) {
-                    Ok(v) => {
-                        typed = Some(v);
-                        parse_error = None;
+                _ => {
+                    match serde_json::from_str::<serde_json::Value>(&body_text) {
+                        Ok(v) => {
+                            typed = Some(v);
+                            parse_error = None;
+                        }
+                        Err(e) => {
+                            typed = None;
+                            parse_error = Some(e.to_string());
+                        }
                     }
-                    Err(e) => {
-                        typed = None;
-                        parse_error = Some(e.to_string());
-                    }
-                },
+                }
             }
-            Err(ApiOpError::Api(ApiError {
-                status: status_code,
-                headers,
-                body: body_text,
-                raw_body,
-                typed,
-                parse_error,
-            }))
+            Err(
+                ApiOpError::Api(ApiError {
+                    status: status_code,
+                    headers,
+                    body: body_text,
+                    raw_body,
+                    typed,
+                    parse_error,
+                }),
+            )
         }
     }
     /// `GET /sessions/{id}/messages`
@@ -1499,12 +1919,8 @@ impl HttpClient {
         id: impl AsRef<str>,
     ) -> Result<GetSessionMessagesResponse, ApiOpError<serde_json::Value>> {
         let request_url = format!(
-            "{}{}",
-            self.base_url,
-            format!(
-                "/sessions/{}/messages",
-                __pct_encode_path_segment(id.as_ref())
-            )
+            "{}{}", self.base_url, format!("/sessions/{}/messages",
+            __pct_encode_path_segment(id.as_ref()))
         );
         let mut req = self.http_client.get(request_url);
         if let Some(api_key) = &self.api_key {
@@ -1520,57 +1936,74 @@ impl HttpClient {
         let status = response.status();
         let status_code = status.as_u16();
         let headers = response.headers().clone();
-        let body_bytes =
-            __read_bounded_response_body(response, self.max_response_body_bytes).await?;
+        let body_bytes = __read_bounded_response_body(
+                response,
+                self.max_response_body_bytes,
+            )
+            .await?;
         let raw_body = body_bytes;
         let body_text = String::from_utf8_lossy(&raw_body).into_owned();
         if false || status_code == 200u16 {
             match serde_json::from_str(&body_text) {
                 Ok(body) => Ok(body),
-                Err(e) => Err(ApiOpError::Api(ApiError {
+                Err(e) => {
+                    Err(
+                        ApiOpError::Api(ApiError {
+                            status: status_code,
+                            headers: headers,
+                            body: body_text,
+                            raw_body,
+                            typed: None,
+                            parse_error: Some(
+                                format!("failed to deserialize 2xx response body: {}", e),
+                            ),
+                        }),
+                    )
+                }
+            }
+        } else if status.is_success() {
+            Err(
+                ApiOpError::Api(ApiError {
                     status: status_code,
-                    headers: headers,
+                    headers,
                     body: body_text,
                     raw_body,
                     typed: None,
-                    parse_error: Some(format!("failed to deserialize 2xx response body: {}", e)),
-                })),
-            }
-        } else if status.is_success() {
-            Err(ApiOpError::Api(ApiError {
-                status: status_code,
-                headers,
-                body: body_text,
-                raw_body,
-                typed: None,
-                parse_error: Some(format!(
-                    "unexpected successful status {}; generated return type selects `{}`",
-                    status_code, "200",
-                )),
-            }))
+                    parse_error: Some(
+                        format!(
+                            "unexpected successful status {}; generated return type selects `{}`",
+                            status_code, "200",
+                        ),
+                    ),
+                }),
+            )
         } else {
             let typed: Option<serde_json::Value>;
             let parse_error: Option<String>;
             match status_code {
-                _ => match serde_json::from_str::<serde_json::Value>(&body_text) {
-                    Ok(v) => {
-                        typed = Some(v);
-                        parse_error = None;
+                _ => {
+                    match serde_json::from_str::<serde_json::Value>(&body_text) {
+                        Ok(v) => {
+                            typed = Some(v);
+                            parse_error = None;
+                        }
+                        Err(e) => {
+                            typed = None;
+                            parse_error = Some(e.to_string());
+                        }
                     }
-                    Err(e) => {
-                        typed = None;
-                        parse_error = Some(e.to_string());
-                    }
-                },
+                }
             }
-            Err(ApiOpError::Api(ApiError {
-                status: status_code,
-                headers,
-                body: body_text,
-                raw_body,
-                typed,
-                parse_error,
-            }))
+            Err(
+                ApiOpError::Api(ApiError {
+                    status: status_code,
+                    headers,
+                    body: body_text,
+                    raw_body,
+                    typed,
+                    parse_error,
+                }),
+            )
         }
     }
     /// Read a session's cumulative per-component token meter (ADR-0026, ADR-0044)
@@ -1583,9 +2016,8 @@ impl HttpClient {
         id: impl AsRef<str>,
     ) -> Result<SessionMeter, ApiOpError<GetSessionMeterApiError>> {
         let request_url = format!(
-            "{}{}",
-            self.base_url,
-            format!("/sessions/{}/meter", __pct_encode_path_segment(id.as_ref()))
+            "{}{}", self.base_url, format!("/sessions/{}/meter",
+            __pct_encode_path_segment(id.as_ref()))
         );
         let mut req = self.http_client.get(request_url);
         if let Some(api_key) = &self.api_key {
@@ -1601,61 +2033,78 @@ impl HttpClient {
         let status = response.status();
         let status_code = status.as_u16();
         let headers = response.headers().clone();
-        let body_bytes =
-            __read_bounded_response_body(response, self.max_response_body_bytes).await?;
+        let body_bytes = __read_bounded_response_body(
+                response,
+                self.max_response_body_bytes,
+            )
+            .await?;
         let raw_body = body_bytes;
         let body_text = String::from_utf8_lossy(&raw_body).into_owned();
         if false || status_code == 200u16 {
             match serde_json::from_str(&body_text) {
                 Ok(body) => Ok(body),
-                Err(e) => Err(ApiOpError::Api(ApiError {
+                Err(e) => {
+                    Err(
+                        ApiOpError::Api(ApiError {
+                            status: status_code,
+                            headers: headers,
+                            body: body_text,
+                            raw_body,
+                            typed: None,
+                            parse_error: Some(
+                                format!("failed to deserialize 2xx response body: {}", e),
+                            ),
+                        }),
+                    )
+                }
+            }
+        } else if status.is_success() {
+            Err(
+                ApiOpError::Api(ApiError {
                     status: status_code,
-                    headers: headers,
+                    headers,
                     body: body_text,
                     raw_body,
                     typed: None,
-                    parse_error: Some(format!("failed to deserialize 2xx response body: {}", e)),
-                })),
-            }
-        } else if status.is_success() {
-            Err(ApiOpError::Api(ApiError {
-                status: status_code,
-                headers,
-                body: body_text,
-                raw_body,
-                typed: None,
-                parse_error: Some(format!(
-                    "unexpected successful status {}; generated return type selects `{}`",
-                    status_code, "200",
-                )),
-            }))
+                    parse_error: Some(
+                        format!(
+                            "unexpected successful status {}; generated return type selects `{}`",
+                            status_code, "200",
+                        ),
+                    ),
+                }),
+            )
         } else {
             let typed: Option<GetSessionMeterApiError>;
             let parse_error: Option<String>;
             match status_code {
-                404u16 => match serde_json::from_str::<NotFound>(&body_text) {
-                    Ok(v) => {
-                        typed = Some(GetSessionMeterApiError::Status404(v));
-                        parse_error = None;
+                404u16 => {
+                    match serde_json::from_str::<NotFound>(&body_text) {
+                        Ok(v) => {
+                            typed = Some(GetSessionMeterApiError::Status404(v));
+                            parse_error = None;
+                        }
+                        Err(e) => {
+                            typed = None;
+                            parse_error = Some(e.to_string());
+                        }
                     }
-                    Err(e) => {
-                        typed = None;
-                        parse_error = Some(e.to_string());
-                    }
-                },
+                }
                 _ => {
                     typed = None;
                     parse_error = None;
                 }
             }
-            Err(ApiOpError::Api(ApiError {
-                status: status_code,
-                headers,
-                body: body_text,
-                raw_body,
-                typed,
-                parse_error,
-            }))
+            Err(
+                ApiOpError::Api(ApiError {
+                    status: status_code,
+                    headers,
+                    body: body_text,
+                    raw_body,
+                    typed,
+                    parse_error,
+                }),
+            )
         }
     }
     /// Read a completed turn's persisted context snapshot (ADR-0044 §4)
@@ -1668,9 +2117,8 @@ impl HttpClient {
         id: impl AsRef<str>,
     ) -> Result<ContextSnapshot, ApiOpError<GetTurnContextApiError>> {
         let request_url = format!(
-            "{}{}",
-            self.base_url,
-            format!("/turns/{}/context", __pct_encode_path_segment(id.as_ref()))
+            "{}{}", self.base_url, format!("/turns/{}/context",
+            __pct_encode_path_segment(id.as_ref()))
         );
         let mut req = self.http_client.get(request_url);
         if let Some(api_key) = &self.api_key {
@@ -1686,61 +2134,78 @@ impl HttpClient {
         let status = response.status();
         let status_code = status.as_u16();
         let headers = response.headers().clone();
-        let body_bytes =
-            __read_bounded_response_body(response, self.max_response_body_bytes).await?;
+        let body_bytes = __read_bounded_response_body(
+                response,
+                self.max_response_body_bytes,
+            )
+            .await?;
         let raw_body = body_bytes;
         let body_text = String::from_utf8_lossy(&raw_body).into_owned();
         if false || status_code == 200u16 {
             match serde_json::from_str(&body_text) {
                 Ok(body) => Ok(body),
-                Err(e) => Err(ApiOpError::Api(ApiError {
+                Err(e) => {
+                    Err(
+                        ApiOpError::Api(ApiError {
+                            status: status_code,
+                            headers: headers,
+                            body: body_text,
+                            raw_body,
+                            typed: None,
+                            parse_error: Some(
+                                format!("failed to deserialize 2xx response body: {}", e),
+                            ),
+                        }),
+                    )
+                }
+            }
+        } else if status.is_success() {
+            Err(
+                ApiOpError::Api(ApiError {
                     status: status_code,
-                    headers: headers,
+                    headers,
                     body: body_text,
                     raw_body,
                     typed: None,
-                    parse_error: Some(format!("failed to deserialize 2xx response body: {}", e)),
-                })),
-            }
-        } else if status.is_success() {
-            Err(ApiOpError::Api(ApiError {
-                status: status_code,
-                headers,
-                body: body_text,
-                raw_body,
-                typed: None,
-                parse_error: Some(format!(
-                    "unexpected successful status {}; generated return type selects `{}`",
-                    status_code, "200",
-                )),
-            }))
+                    parse_error: Some(
+                        format!(
+                            "unexpected successful status {}; generated return type selects `{}`",
+                            status_code, "200",
+                        ),
+                    ),
+                }),
+            )
         } else {
             let typed: Option<GetTurnContextApiError>;
             let parse_error: Option<String>;
             match status_code {
-                404u16 => match serde_json::from_str::<NotFound>(&body_text) {
-                    Ok(v) => {
-                        typed = Some(GetTurnContextApiError::Status404(v));
-                        parse_error = None;
+                404u16 => {
+                    match serde_json::from_str::<NotFound>(&body_text) {
+                        Ok(v) => {
+                            typed = Some(GetTurnContextApiError::Status404(v));
+                            parse_error = None;
+                        }
+                        Err(e) => {
+                            typed = None;
+                            parse_error = Some(e.to_string());
+                        }
                     }
-                    Err(e) => {
-                        typed = None;
-                        parse_error = Some(e.to_string());
-                    }
-                },
+                }
                 _ => {
                     typed = None;
                     parse_error = None;
                 }
             }
-            Err(ApiOpError::Api(ApiError {
-                status: status_code,
-                headers,
-                body: body_text,
-                raw_body,
-                typed,
-                parse_error,
-            }))
+            Err(
+                ApiOpError::Api(ApiError {
+                    status: status_code,
+                    headers,
+                    body: body_text,
+                    raw_body,
+                    typed,
+                    parse_error,
+                }),
+            )
         }
     }
     /// Read one workspace record
@@ -1751,9 +2216,8 @@ impl HttpClient {
         id: impl AsRef<str>,
     ) -> Result<Workspace, ApiOpError<serde_json::Value>> {
         let request_url = format!(
-            "{}{}",
-            self.base_url,
-            format!("/workspaces/{}", __pct_encode_path_segment(id.as_ref()))
+            "{}{}", self.base_url, format!("/workspaces/{}", __pct_encode_path_segment(id
+            .as_ref()))
         );
         let mut req = self.http_client.get(request_url);
         if let Some(api_key) = &self.api_key {
@@ -1769,57 +2233,74 @@ impl HttpClient {
         let status = response.status();
         let status_code = status.as_u16();
         let headers = response.headers().clone();
-        let body_bytes =
-            __read_bounded_response_body(response, self.max_response_body_bytes).await?;
+        let body_bytes = __read_bounded_response_body(
+                response,
+                self.max_response_body_bytes,
+            )
+            .await?;
         let raw_body = body_bytes;
         let body_text = String::from_utf8_lossy(&raw_body).into_owned();
         if false || status_code == 200u16 {
             match serde_json::from_str(&body_text) {
                 Ok(body) => Ok(body),
-                Err(e) => Err(ApiOpError::Api(ApiError {
+                Err(e) => {
+                    Err(
+                        ApiOpError::Api(ApiError {
+                            status: status_code,
+                            headers: headers,
+                            body: body_text,
+                            raw_body,
+                            typed: None,
+                            parse_error: Some(
+                                format!("failed to deserialize 2xx response body: {}", e),
+                            ),
+                        }),
+                    )
+                }
+            }
+        } else if status.is_success() {
+            Err(
+                ApiOpError::Api(ApiError {
                     status: status_code,
-                    headers: headers,
+                    headers,
                     body: body_text,
                     raw_body,
                     typed: None,
-                    parse_error: Some(format!("failed to deserialize 2xx response body: {}", e)),
-                })),
-            }
-        } else if status.is_success() {
-            Err(ApiOpError::Api(ApiError {
-                status: status_code,
-                headers,
-                body: body_text,
-                raw_body,
-                typed: None,
-                parse_error: Some(format!(
-                    "unexpected successful status {}; generated return type selects `{}`",
-                    status_code, "200",
-                )),
-            }))
+                    parse_error: Some(
+                        format!(
+                            "unexpected successful status {}; generated return type selects `{}`",
+                            status_code, "200",
+                        ),
+                    ),
+                }),
+            )
         } else {
             let typed: Option<serde_json::Value>;
             let parse_error: Option<String>;
             match status_code {
-                _ => match serde_json::from_str::<serde_json::Value>(&body_text) {
-                    Ok(v) => {
-                        typed = Some(v);
-                        parse_error = None;
+                _ => {
+                    match serde_json::from_str::<serde_json::Value>(&body_text) {
+                        Ok(v) => {
+                            typed = Some(v);
+                            parse_error = None;
+                        }
+                        Err(e) => {
+                            typed = None;
+                            parse_error = Some(e.to_string());
+                        }
                     }
-                    Err(e) => {
-                        typed = None;
-                        parse_error = Some(e.to_string());
-                    }
-                },
+                }
             }
-            Err(ApiOpError::Api(ApiError {
-                status: status_code,
-                headers,
-                body: body_text,
-                raw_body,
-                typed,
-                parse_error,
-            }))
+            Err(
+                ApiOpError::Api(ApiError {
+                    status: status_code,
+                    headers,
+                    body: body_text,
+                    raw_body,
+                    typed,
+                    parse_error,
+                }),
+            )
         }
     }
     /// Bulk (re)index the current scope; async, idempotent per unchanged content (ADR-0049 §4)
@@ -1847,57 +2328,74 @@ impl HttpClient {
         let status = response.status();
         let status_code = status.as_u16();
         let headers = response.headers().clone();
-        let body_bytes =
-            __read_bounded_response_body(response, self.max_response_body_bytes).await?;
+        let body_bytes = __read_bounded_response_body(
+                response,
+                self.max_response_body_bytes,
+            )
+            .await?;
         let raw_body = body_bytes;
         let body_text = String::from_utf8_lossy(&raw_body).into_owned();
         if false || status_code == 202u16 {
             match serde_json::from_str(&body_text) {
                 Ok(body) => Ok(body),
-                Err(e) => Err(ApiOpError::Api(ApiError {
+                Err(e) => {
+                    Err(
+                        ApiOpError::Api(ApiError {
+                            status: status_code,
+                            headers: headers,
+                            body: body_text,
+                            raw_body,
+                            typed: None,
+                            parse_error: Some(
+                                format!("failed to deserialize 2xx response body: {}", e),
+                            ),
+                        }),
+                    )
+                }
+            }
+        } else if status.is_success() {
+            Err(
+                ApiOpError::Api(ApiError {
                     status: status_code,
-                    headers: headers,
+                    headers,
                     body: body_text,
                     raw_body,
                     typed: None,
-                    parse_error: Some(format!("failed to deserialize 2xx response body: {}", e)),
-                })),
-            }
-        } else if status.is_success() {
-            Err(ApiOpError::Api(ApiError {
-                status: status_code,
-                headers,
-                body: body_text,
-                raw_body,
-                typed: None,
-                parse_error: Some(format!(
-                    "unexpected successful status {}; generated return type selects `{}`",
-                    status_code, "202",
-                )),
-            }))
+                    parse_error: Some(
+                        format!(
+                            "unexpected successful status {}; generated return type selects `{}`",
+                            status_code, "202",
+                        ),
+                    ),
+                }),
+            )
         } else {
             let typed: Option<serde_json::Value>;
             let parse_error: Option<String>;
             match status_code {
-                _ => match serde_json::from_str::<serde_json::Value>(&body_text) {
-                    Ok(v) => {
-                        typed = Some(v);
-                        parse_error = None;
+                _ => {
+                    match serde_json::from_str::<serde_json::Value>(&body_text) {
+                        Ok(v) => {
+                            typed = Some(v);
+                            parse_error = None;
+                        }
+                        Err(e) => {
+                            typed = None;
+                            parse_error = Some(e.to_string());
+                        }
                     }
-                    Err(e) => {
-                        typed = None;
-                        parse_error = Some(e.to_string());
-                    }
-                },
+                }
             }
-            Err(ApiOpError::Api(ApiError {
-                status: status_code,
-                headers,
-                body: body_text,
-                raw_body,
-                typed,
-                parse_error,
-            }))
+            Err(
+                ApiOpError::Api(ApiError {
+                    status: status_code,
+                    headers,
+                    body: body_text,
+                    raw_body,
+                    typed,
+                    parse_error,
+                }),
+            )
         }
     }
     /// List one directory's direct, non-recursive entries (ADR-0035)
@@ -1931,61 +2429,78 @@ impl HttpClient {
         let status = response.status();
         let status_code = status.as_u16();
         let headers = response.headers().clone();
-        let body_bytes =
-            __read_bounded_response_body(response, self.max_response_body_bytes).await?;
+        let body_bytes = __read_bounded_response_body(
+                response,
+                self.max_response_body_bytes,
+            )
+            .await?;
         let raw_body = body_bytes;
         let body_text = String::from_utf8_lossy(&raw_body).into_owned();
         if false || status_code == 200u16 {
             match serde_json::from_str(&body_text) {
                 Ok(body) => Ok(body),
-                Err(e) => Err(ApiOpError::Api(ApiError {
+                Err(e) => {
+                    Err(
+                        ApiOpError::Api(ApiError {
+                            status: status_code,
+                            headers: headers,
+                            body: body_text,
+                            raw_body,
+                            typed: None,
+                            parse_error: Some(
+                                format!("failed to deserialize 2xx response body: {}", e),
+                            ),
+                        }),
+                    )
+                }
+            }
+        } else if status.is_success() {
+            Err(
+                ApiOpError::Api(ApiError {
                     status: status_code,
-                    headers: headers,
+                    headers,
                     body: body_text,
                     raw_body,
                     typed: None,
-                    parse_error: Some(format!("failed to deserialize 2xx response body: {}", e)),
-                })),
-            }
-        } else if status.is_success() {
-            Err(ApiOpError::Api(ApiError {
-                status: status_code,
-                headers,
-                body: body_text,
-                raw_body,
-                typed: None,
-                parse_error: Some(format!(
-                    "unexpected successful status {}; generated return type selects `{}`",
-                    status_code, "200",
-                )),
-            }))
+                    parse_error: Some(
+                        format!(
+                            "unexpected successful status {}; generated return type selects `{}`",
+                            status_code, "200",
+                        ),
+                    ),
+                }),
+            )
         } else {
             let typed: Option<ListDirectoryApiError>;
             let parse_error: Option<String>;
             match status_code {
-                403u16 => match serde_json::from_str::<PathOutsideAllowedRoots>(&body_text) {
-                    Ok(v) => {
-                        typed = Some(ListDirectoryApiError::Status403(v));
-                        parse_error = None;
+                403u16 => {
+                    match serde_json::from_str::<PathOutsideAllowedRoots>(&body_text) {
+                        Ok(v) => {
+                            typed = Some(ListDirectoryApiError::Status403(v));
+                            parse_error = None;
+                        }
+                        Err(e) => {
+                            typed = None;
+                            parse_error = Some(e.to_string());
+                        }
                     }
-                    Err(e) => {
-                        typed = None;
-                        parse_error = Some(e.to_string());
-                    }
-                },
+                }
                 _ => {
                     typed = None;
                     parse_error = None;
                 }
             }
-            Err(ApiOpError::Api(ApiError {
-                status: status_code,
-                headers,
-                body: body_text,
-                raw_body,
-                typed,
-                parse_error,
-            }))
+            Err(
+                ApiOpError::Api(ApiError {
+                    status: status_code,
+                    headers,
+                    body: body_text,
+                    raw_body,
+                    typed,
+                    parse_error,
+                }),
+            )
         }
     }
     /// Discover the servable fleet (ADR-0018)
@@ -1993,7 +2508,9 @@ impl HttpClient {
     /// Deprecated for clients — use /fleet (ADR-0040). Retained for compatibility.
     ///
     /// `GET /models`
-    pub async fn list_models(&self) -> Result<ListModelsResponse, ApiOpError<serde_json::Value>> {
+    pub async fn list_models(
+        &self,
+    ) -> Result<ListModelsResponse, ApiOpError<serde_json::Value>> {
         let request_url = format!("{}{}", self.base_url, "/models");
         let mut req = self.http_client.get(request_url);
         if let Some(api_key) = &self.api_key {
@@ -2009,61 +2526,80 @@ impl HttpClient {
         let status = response.status();
         let status_code = status.as_u16();
         let headers = response.headers().clone();
-        let body_bytes =
-            __read_bounded_response_body(response, self.max_response_body_bytes).await?;
+        let body_bytes = __read_bounded_response_body(
+                response,
+                self.max_response_body_bytes,
+            )
+            .await?;
         let raw_body = body_bytes;
         let body_text = String::from_utf8_lossy(&raw_body).into_owned();
         if false || status_code == 200u16 {
             match serde_json::from_str(&body_text) {
                 Ok(body) => Ok(body),
-                Err(e) => Err(ApiOpError::Api(ApiError {
+                Err(e) => {
+                    Err(
+                        ApiOpError::Api(ApiError {
+                            status: status_code,
+                            headers: headers,
+                            body: body_text,
+                            raw_body,
+                            typed: None,
+                            parse_error: Some(
+                                format!("failed to deserialize 2xx response body: {}", e),
+                            ),
+                        }),
+                    )
+                }
+            }
+        } else if status.is_success() {
+            Err(
+                ApiOpError::Api(ApiError {
                     status: status_code,
-                    headers: headers,
+                    headers,
                     body: body_text,
                     raw_body,
                     typed: None,
-                    parse_error: Some(format!("failed to deserialize 2xx response body: {}", e)),
-                })),
-            }
-        } else if status.is_success() {
-            Err(ApiOpError::Api(ApiError {
-                status: status_code,
-                headers,
-                body: body_text,
-                raw_body,
-                typed: None,
-                parse_error: Some(format!(
-                    "unexpected successful status {}; generated return type selects `{}`",
-                    status_code, "200",
-                )),
-            }))
+                    parse_error: Some(
+                        format!(
+                            "unexpected successful status {}; generated return type selects `{}`",
+                            status_code, "200",
+                        ),
+                    ),
+                }),
+            )
         } else {
             let typed: Option<serde_json::Value>;
             let parse_error: Option<String>;
             match status_code {
-                _ => match serde_json::from_str::<serde_json::Value>(&body_text) {
-                    Ok(v) => {
-                        typed = Some(v);
-                        parse_error = None;
+                _ => {
+                    match serde_json::from_str::<serde_json::Value>(&body_text) {
+                        Ok(v) => {
+                            typed = Some(v);
+                            parse_error = None;
+                        }
+                        Err(e) => {
+                            typed = None;
+                            parse_error = Some(e.to_string());
+                        }
                     }
-                    Err(e) => {
-                        typed = None;
-                        parse_error = Some(e.to_string());
-                    }
-                },
+                }
             }
-            Err(ApiOpError::Api(ApiError {
-                status: status_code,
-                headers,
-                body: body_text,
-                raw_body,
-                typed,
-                parse_error,
-            }))
+            Err(
+                ApiOpError::Api(ApiError {
+                    status: status_code,
+                    headers,
+                    body: body_text,
+                    raw_body,
+                    typed,
+                    parse_error,
+                }),
+            )
         }
     }
     /// `GET /modes`
-    pub async fn list_modes(&self) -> Result<ListModesResponse, ApiOpError<serde_json::Value>> {
+    pub async fn list_modes(
+        &self,
+    ) -> Result<ListModesResponse, ApiOpError<serde_json::Value>> {
         let request_url = format!("{}{}", self.base_url, "/modes");
         let mut req = self.http_client.get(request_url);
         if let Some(api_key) = &self.api_key {
@@ -2079,57 +2615,74 @@ impl HttpClient {
         let status = response.status();
         let status_code = status.as_u16();
         let headers = response.headers().clone();
-        let body_bytes =
-            __read_bounded_response_body(response, self.max_response_body_bytes).await?;
+        let body_bytes = __read_bounded_response_body(
+                response,
+                self.max_response_body_bytes,
+            )
+            .await?;
         let raw_body = body_bytes;
         let body_text = String::from_utf8_lossy(&raw_body).into_owned();
         if false || status_code == 200u16 {
             match serde_json::from_str(&body_text) {
                 Ok(body) => Ok(body),
-                Err(e) => Err(ApiOpError::Api(ApiError {
+                Err(e) => {
+                    Err(
+                        ApiOpError::Api(ApiError {
+                            status: status_code,
+                            headers: headers,
+                            body: body_text,
+                            raw_body,
+                            typed: None,
+                            parse_error: Some(
+                                format!("failed to deserialize 2xx response body: {}", e),
+                            ),
+                        }),
+                    )
+                }
+            }
+        } else if status.is_success() {
+            Err(
+                ApiOpError::Api(ApiError {
                     status: status_code,
-                    headers: headers,
+                    headers,
                     body: body_text,
                     raw_body,
                     typed: None,
-                    parse_error: Some(format!("failed to deserialize 2xx response body: {}", e)),
-                })),
-            }
-        } else if status.is_success() {
-            Err(ApiOpError::Api(ApiError {
-                status: status_code,
-                headers,
-                body: body_text,
-                raw_body,
-                typed: None,
-                parse_error: Some(format!(
-                    "unexpected successful status {}; generated return type selects `{}`",
-                    status_code, "200",
-                )),
-            }))
+                    parse_error: Some(
+                        format!(
+                            "unexpected successful status {}; generated return type selects `{}`",
+                            status_code, "200",
+                        ),
+                    ),
+                }),
+            )
         } else {
             let typed: Option<serde_json::Value>;
             let parse_error: Option<String>;
             match status_code {
-                _ => match serde_json::from_str::<serde_json::Value>(&body_text) {
-                    Ok(v) => {
-                        typed = Some(v);
-                        parse_error = None;
+                _ => {
+                    match serde_json::from_str::<serde_json::Value>(&body_text) {
+                        Ok(v) => {
+                            typed = Some(v);
+                            parse_error = None;
+                        }
+                        Err(e) => {
+                            typed = None;
+                            parse_error = Some(e.to_string());
+                        }
                     }
-                    Err(e) => {
-                        typed = None;
-                        parse_error = Some(e.to_string());
-                    }
-                },
+                }
             }
-            Err(ApiOpError::Api(ApiError {
-                status: status_code,
-                headers,
-                body: body_text,
-                raw_body,
-                typed,
-                parse_error,
-            }))
+            Err(
+                ApiOpError::Api(ApiError {
+                    status: status_code,
+                    headers,
+                    body: body_text,
+                    raw_body,
+                    typed,
+                    parse_error,
+                }),
+            )
         }
     }
     /// Workspace-scoped session list (ADR-0049)
@@ -2169,61 +2722,80 @@ impl HttpClient {
         let status = response.status();
         let status_code = status.as_u16();
         let headers = response.headers().clone();
-        let body_bytes =
-            __read_bounded_response_body(response, self.max_response_body_bytes).await?;
+        let body_bytes = __read_bounded_response_body(
+                response,
+                self.max_response_body_bytes,
+            )
+            .await?;
         let raw_body = body_bytes;
         let body_text = String::from_utf8_lossy(&raw_body).into_owned();
         if false || status_code == 200u16 {
             match serde_json::from_str(&body_text) {
                 Ok(body) => Ok(body),
-                Err(e) => Err(ApiOpError::Api(ApiError {
+                Err(e) => {
+                    Err(
+                        ApiOpError::Api(ApiError {
+                            status: status_code,
+                            headers: headers,
+                            body: body_text,
+                            raw_body,
+                            typed: None,
+                            parse_error: Some(
+                                format!("failed to deserialize 2xx response body: {}", e),
+                            ),
+                        }),
+                    )
+                }
+            }
+        } else if status.is_success() {
+            Err(
+                ApiOpError::Api(ApiError {
                     status: status_code,
-                    headers: headers,
+                    headers,
                     body: body_text,
                     raw_body,
                     typed: None,
-                    parse_error: Some(format!("failed to deserialize 2xx response body: {}", e)),
-                })),
-            }
-        } else if status.is_success() {
-            Err(ApiOpError::Api(ApiError {
-                status: status_code,
-                headers,
-                body: body_text,
-                raw_body,
-                typed: None,
-                parse_error: Some(format!(
-                    "unexpected successful status {}; generated return type selects `{}`",
-                    status_code, "200",
-                )),
-            }))
+                    parse_error: Some(
+                        format!(
+                            "unexpected successful status {}; generated return type selects `{}`",
+                            status_code, "200",
+                        ),
+                    ),
+                }),
+            )
         } else {
             let typed: Option<serde_json::Value>;
             let parse_error: Option<String>;
             match status_code {
-                _ => match serde_json::from_str::<serde_json::Value>(&body_text) {
-                    Ok(v) => {
-                        typed = Some(v);
-                        parse_error = None;
+                _ => {
+                    match serde_json::from_str::<serde_json::Value>(&body_text) {
+                        Ok(v) => {
+                            typed = Some(v);
+                            parse_error = None;
+                        }
+                        Err(e) => {
+                            typed = None;
+                            parse_error = Some(e.to_string());
+                        }
                     }
-                    Err(e) => {
-                        typed = None;
-                        parse_error = Some(e.to_string());
-                    }
-                },
+                }
             }
-            Err(ApiOpError::Api(ApiError {
-                status: status_code,
-                headers,
-                body: body_text,
-                raw_body,
-                typed,
-                parse_error,
-            }))
+            Err(
+                ApiOpError::Api(ApiError {
+                    status: status_code,
+                    headers,
+                    body: body_text,
+                    raw_body,
+                    typed,
+                    parse_error,
+                }),
+            )
         }
     }
     /// `GET /tools`
-    pub async fn list_tools(&self) -> Result<ListToolsResponse, ApiOpError<serde_json::Value>> {
+    pub async fn list_tools(
+        &self,
+    ) -> Result<ListToolsResponse, ApiOpError<serde_json::Value>> {
         let request_url = format!("{}{}", self.base_url, "/tools");
         let mut req = self.http_client.get(request_url);
         if let Some(api_key) = &self.api_key {
@@ -2239,57 +2811,74 @@ impl HttpClient {
         let status = response.status();
         let status_code = status.as_u16();
         let headers = response.headers().clone();
-        let body_bytes =
-            __read_bounded_response_body(response, self.max_response_body_bytes).await?;
+        let body_bytes = __read_bounded_response_body(
+                response,
+                self.max_response_body_bytes,
+            )
+            .await?;
         let raw_body = body_bytes;
         let body_text = String::from_utf8_lossy(&raw_body).into_owned();
         if false || status_code == 200u16 {
             match serde_json::from_str(&body_text) {
                 Ok(body) => Ok(body),
-                Err(e) => Err(ApiOpError::Api(ApiError {
+                Err(e) => {
+                    Err(
+                        ApiOpError::Api(ApiError {
+                            status: status_code,
+                            headers: headers,
+                            body: body_text,
+                            raw_body,
+                            typed: None,
+                            parse_error: Some(
+                                format!("failed to deserialize 2xx response body: {}", e),
+                            ),
+                        }),
+                    )
+                }
+            }
+        } else if status.is_success() {
+            Err(
+                ApiOpError::Api(ApiError {
                     status: status_code,
-                    headers: headers,
+                    headers,
                     body: body_text,
                     raw_body,
                     typed: None,
-                    parse_error: Some(format!("failed to deserialize 2xx response body: {}", e)),
-                })),
-            }
-        } else if status.is_success() {
-            Err(ApiOpError::Api(ApiError {
-                status: status_code,
-                headers,
-                body: body_text,
-                raw_body,
-                typed: None,
-                parse_error: Some(format!(
-                    "unexpected successful status {}; generated return type selects `{}`",
-                    status_code, "200",
-                )),
-            }))
+                    parse_error: Some(
+                        format!(
+                            "unexpected successful status {}; generated return type selects `{}`",
+                            status_code, "200",
+                        ),
+                    ),
+                }),
+            )
         } else {
             let typed: Option<serde_json::Value>;
             let parse_error: Option<String>;
             match status_code {
-                _ => match serde_json::from_str::<serde_json::Value>(&body_text) {
-                    Ok(v) => {
-                        typed = Some(v);
-                        parse_error = None;
+                _ => {
+                    match serde_json::from_str::<serde_json::Value>(&body_text) {
+                        Ok(v) => {
+                            typed = Some(v);
+                            parse_error = None;
+                        }
+                        Err(e) => {
+                            typed = None;
+                            parse_error = Some(e.to_string());
+                        }
                     }
-                    Err(e) => {
-                        typed = None;
-                        parse_error = Some(e.to_string());
-                    }
-                },
+                }
             }
-            Err(ApiOpError::Api(ApiError {
-                status: status_code,
-                headers,
-                body: body_text,
-                raw_body,
-                typed,
-                parse_error,
-            }))
+            Err(
+                ApiOpError::Api(ApiError {
+                    status: status_code,
+                    headers,
+                    body: body_text,
+                    raw_body,
+                    typed,
+                    parse_error,
+                }),
+            )
         }
     }
     /// List the workspace registry (ADR-0049 §2)
@@ -2313,57 +2902,187 @@ impl HttpClient {
         let status = response.status();
         let status_code = status.as_u16();
         let headers = response.headers().clone();
-        let body_bytes =
-            __read_bounded_response_body(response, self.max_response_body_bytes).await?;
+        let body_bytes = __read_bounded_response_body(
+                response,
+                self.max_response_body_bytes,
+            )
+            .await?;
         let raw_body = body_bytes;
         let body_text = String::from_utf8_lossy(&raw_body).into_owned();
         if false || status_code == 200u16 {
             match serde_json::from_str(&body_text) {
                 Ok(body) => Ok(body),
-                Err(e) => Err(ApiOpError::Api(ApiError {
+                Err(e) => {
+                    Err(
+                        ApiOpError::Api(ApiError {
+                            status: status_code,
+                            headers: headers,
+                            body: body_text,
+                            raw_body,
+                            typed: None,
+                            parse_error: Some(
+                                format!("failed to deserialize 2xx response body: {}", e),
+                            ),
+                        }),
+                    )
+                }
+            }
+        } else if status.is_success() {
+            Err(
+                ApiOpError::Api(ApiError {
                     status: status_code,
-                    headers: headers,
+                    headers,
                     body: body_text,
                     raw_body,
                     typed: None,
-                    parse_error: Some(format!("failed to deserialize 2xx response body: {}", e)),
-                })),
-            }
-        } else if status.is_success() {
-            Err(ApiOpError::Api(ApiError {
-                status: status_code,
-                headers,
-                body: body_text,
-                raw_body,
-                typed: None,
-                parse_error: Some(format!(
-                    "unexpected successful status {}; generated return type selects `{}`",
-                    status_code, "200",
-                )),
-            }))
+                    parse_error: Some(
+                        format!(
+                            "unexpected successful status {}; generated return type selects `{}`",
+                            status_code, "200",
+                        ),
+                    ),
+                }),
+            )
         } else {
             let typed: Option<serde_json::Value>;
             let parse_error: Option<String>;
             match status_code {
-                _ => match serde_json::from_str::<serde_json::Value>(&body_text) {
-                    Ok(v) => {
-                        typed = Some(v);
-                        parse_error = None;
+                _ => {
+                    match serde_json::from_str::<serde_json::Value>(&body_text) {
+                        Ok(v) => {
+                            typed = Some(v);
+                            parse_error = None;
+                        }
+                        Err(e) => {
+                            typed = None;
+                            parse_error = Some(e.to_string());
+                        }
                     }
-                    Err(e) => {
-                        typed = None;
-                        parse_error = Some(e.to_string());
-                    }
-                },
+                }
             }
-            Err(ApiOpError::Api(ApiError {
-                status: status_code,
-                headers,
-                body: body_text,
-                raw_body,
-                typed,
-                parse_error,
-            }))
+            Err(
+                ApiOpError::Api(ApiError {
+                    status: status_code,
+                    headers,
+                    body: body_text,
+                    raw_body,
+                    typed,
+                    parse_error,
+                }),
+            )
+        }
+    }
+    /// Engine-owned bootstrap resolver (ADR-0052 §1)
+    ///
+    /// Resolves a path into everything a client needs to start, in one call: the workspace, and either a bounded directory listing (a directory path) or the document, block tree, open-or-resumed session, and prompt presets (a file path). The client performs no path arithmetic, listing probe, or multi-call sequencing. A path outside ALLOWED_ROOTS is the typed `path-outside-allowed-roots` refusal. `POST /documents` and `GET /directories` remain for composability.
+    ///
+    /// `POST /open`
+    pub async fn open(
+        &self,
+        request: OpenRequest,
+    ) -> Result<OpenResult, ApiOpError<OpenApiError>> {
+        let request_url = format!("{}{}", self.base_url, "/open");
+        let mut req = self.http_client.post(request_url);
+        req = req
+            .body(serde_json::to_vec(&request).map_err(HttpError::serialization_error)?)
+            .header("content-type", "application/json");
+        if let Some(api_key) = &self.api_key {
+            req = req.bearer_auth(api_key);
+        }
+        for (name, value) in &self.custom_headers {
+            if !name.eq_ignore_ascii_case("accept") {
+                req = req.header(name, value);
+            }
+        }
+        req = req.header(reqwest::header::ACCEPT, "application/json");
+        let response = req.send().await?;
+        let status = response.status();
+        let status_code = status.as_u16();
+        let headers = response.headers().clone();
+        let body_bytes = __read_bounded_response_body(
+                response,
+                self.max_response_body_bytes,
+            )
+            .await?;
+        let raw_body = body_bytes;
+        let body_text = String::from_utf8_lossy(&raw_body).into_owned();
+        if false || status_code == 200u16 {
+            match serde_json::from_str(&body_text) {
+                Ok(body) => Ok(body),
+                Err(e) => {
+                    Err(
+                        ApiOpError::Api(ApiError {
+                            status: status_code,
+                            headers: headers,
+                            body: body_text,
+                            raw_body,
+                            typed: None,
+                            parse_error: Some(
+                                format!("failed to deserialize 2xx response body: {}", e),
+                            ),
+                        }),
+                    )
+                }
+            }
+        } else if status.is_success() {
+            Err(
+                ApiOpError::Api(ApiError {
+                    status: status_code,
+                    headers,
+                    body: body_text,
+                    raw_body,
+                    typed: None,
+                    parse_error: Some(
+                        format!(
+                            "unexpected successful status {}; generated return type selects `{}`",
+                            status_code, "200",
+                        ),
+                    ),
+                }),
+            )
+        } else {
+            let typed: Option<OpenApiError>;
+            let parse_error: Option<String>;
+            match status_code {
+                403u16 => {
+                    match serde_json::from_str::<PathOutsideAllowedRoots>(&body_text) {
+                        Ok(v) => {
+                            typed = Some(OpenApiError::Status403(v));
+                            parse_error = None;
+                        }
+                        Err(e) => {
+                            typed = None;
+                            parse_error = Some(e.to_string());
+                        }
+                    }
+                }
+                404u16 => {
+                    match serde_json::from_str::<NotFound>(&body_text) {
+                        Ok(v) => {
+                            typed = Some(OpenApiError::Status404(v));
+                            parse_error = None;
+                        }
+                        Err(e) => {
+                            typed = None;
+                            parse_error = Some(e.to_string());
+                        }
+                    }
+                }
+                _ => {
+                    typed = None;
+                    parse_error = None;
+                }
+            }
+            Err(
+                ApiOpError::Api(ApiError {
+                    status: status_code,
+                    headers,
+                    body: body_text,
+                    raw_body,
+                    typed,
+                    parse_error,
+                }),
+            )
         }
     }
     /// Open/create a document by path; returns its surrogate id
@@ -2391,57 +3110,181 @@ impl HttpClient {
         let status = response.status();
         let status_code = status.as_u16();
         let headers = response.headers().clone();
-        let body_bytes =
-            __read_bounded_response_body(response, self.max_response_body_bytes).await?;
+        let body_bytes = __read_bounded_response_body(
+                response,
+                self.max_response_body_bytes,
+            )
+            .await?;
         let raw_body = body_bytes;
         let body_text = String::from_utf8_lossy(&raw_body).into_owned();
         if false || status_code == 200u16 {
             match serde_json::from_str(&body_text) {
                 Ok(body) => Ok(body),
-                Err(e) => Err(ApiOpError::Api(ApiError {
+                Err(e) => {
+                    Err(
+                        ApiOpError::Api(ApiError {
+                            status: status_code,
+                            headers: headers,
+                            body: body_text,
+                            raw_body,
+                            typed: None,
+                            parse_error: Some(
+                                format!("failed to deserialize 2xx response body: {}", e),
+                            ),
+                        }),
+                    )
+                }
+            }
+        } else if status.is_success() {
+            Err(
+                ApiOpError::Api(ApiError {
                     status: status_code,
-                    headers: headers,
+                    headers,
                     body: body_text,
                     raw_body,
                     typed: None,
-                    parse_error: Some(format!("failed to deserialize 2xx response body: {}", e)),
-                })),
-            }
-        } else if status.is_success() {
-            Err(ApiOpError::Api(ApiError {
-                status: status_code,
-                headers,
-                body: body_text,
-                raw_body,
-                typed: None,
-                parse_error: Some(format!(
-                    "unexpected successful status {}; generated return type selects `{}`",
-                    status_code, "200",
-                )),
-            }))
+                    parse_error: Some(
+                        format!(
+                            "unexpected successful status {}; generated return type selects `{}`",
+                            status_code, "200",
+                        ),
+                    ),
+                }),
+            )
         } else {
             let typed: Option<serde_json::Value>;
             let parse_error: Option<String>;
             match status_code {
-                _ => match serde_json::from_str::<serde_json::Value>(&body_text) {
-                    Ok(v) => {
-                        typed = Some(v);
-                        parse_error = None;
+                _ => {
+                    match serde_json::from_str::<serde_json::Value>(&body_text) {
+                        Ok(v) => {
+                            typed = Some(v);
+                            parse_error = None;
+                        }
+                        Err(e) => {
+                            typed = None;
+                            parse_error = Some(e.to_string());
+                        }
                     }
-                    Err(e) => {
-                        typed = None;
-                        parse_error = Some(e.to_string());
-                    }
-                },
+                }
             }
-            Err(ApiOpError::Api(ApiError {
-                status: status_code,
-                headers,
-                body: body_text,
-                raw_body,
-                typed,
-                parse_error,
-            }))
+            Err(
+                ApiOpError::Api(ApiError {
+                    status: status_code,
+                    headers,
+                    body: body_text,
+                    raw_body,
+                    typed,
+                    parse_error,
+                }),
+            )
+        }
+    }
+    /// Open-or-resume a document's session (ADR-0052 §2)
+    ///
+    /// Returns the session to use for a document: the anchor-keyed session when `anchorBlockId` is given, otherwise the document's most recently updated session, creating one if none exists. The "newest" policy and the create-or-resume semantics are engine data; the client never lists sessions to choose one.
+    ///
+    /// `POST /documents/{id}/session`
+    pub async fn open_document_session(
+        &self,
+        id: impl AsRef<str>,
+        request: Option<OpenSessionRequest>,
+    ) -> Result<Session, ApiOpError<serde_json::Value>> {
+        let request_url = format!(
+            "{}{}", self.base_url, format!("/documents/{}/session",
+            __pct_encode_path_segment(id.as_ref()))
+        );
+        let mut req = self.http_client.post(request_url);
+        if let Some(request) = request {
+            req = req
+                .body(
+                    serde_json::to_vec(&request).map_err(HttpError::serialization_error)?,
+                )
+                .header("content-type", "application/json");
+        } else {
+            req = req.header(reqwest::header::CONTENT_LENGTH, "0");
+        }
+        if let Some(api_key) = &self.api_key {
+            req = req.bearer_auth(api_key);
+        }
+        for (name, value) in &self.custom_headers {
+            if !name.eq_ignore_ascii_case("accept") {
+                req = req.header(name, value);
+            }
+        }
+        req = req.header(reqwest::header::ACCEPT, "application/json");
+        let response = req.send().await?;
+        let status = response.status();
+        let status_code = status.as_u16();
+        let headers = response.headers().clone();
+        let body_bytes = __read_bounded_response_body(
+                response,
+                self.max_response_body_bytes,
+            )
+            .await?;
+        let raw_body = body_bytes;
+        let body_text = String::from_utf8_lossy(&raw_body).into_owned();
+        if false || status_code == 200u16 {
+            match serde_json::from_str(&body_text) {
+                Ok(body) => Ok(body),
+                Err(e) => {
+                    Err(
+                        ApiOpError::Api(ApiError {
+                            status: status_code,
+                            headers: headers,
+                            body: body_text,
+                            raw_body,
+                            typed: None,
+                            parse_error: Some(
+                                format!("failed to deserialize 2xx response body: {}", e),
+                            ),
+                        }),
+                    )
+                }
+            }
+        } else if status.is_success() {
+            Err(
+                ApiOpError::Api(ApiError {
+                    status: status_code,
+                    headers,
+                    body: body_text,
+                    raw_body,
+                    typed: None,
+                    parse_error: Some(
+                        format!(
+                            "unexpected successful status {}; generated return type selects `{}`",
+                            status_code, "200",
+                        ),
+                    ),
+                }),
+            )
+        } else {
+            let typed: Option<serde_json::Value>;
+            let parse_error: Option<String>;
+            match status_code {
+                _ => {
+                    match serde_json::from_str::<serde_json::Value>(&body_text) {
+                        Ok(v) => {
+                            typed = Some(v);
+                            parse_error = None;
+                        }
+                        Err(e) => {
+                            typed = None;
+                            parse_error = Some(e.to_string());
+                        }
+                    }
+                }
+            }
+            Err(
+                ApiOpError::Api(ApiError {
+                    status: status_code,
+                    headers,
+                    body: body_text,
+                    raw_body,
+                    typed,
+                    parse_error,
+                }),
+            )
         }
     }
     /// `POST /models/{name}/provision`
@@ -2450,12 +3293,8 @@ impl HttpClient {
         name: impl AsRef<str>,
     ) -> Result<ProvisionResponse, ApiOpError<serde_json::Value>> {
         let request_url = format!(
-            "{}{}",
-            self.base_url,
-            format!(
-                "/models/{}/provision",
-                __pct_encode_path_segment(name.as_ref())
-            )
+            "{}{}", self.base_url, format!("/models/{}/provision",
+            __pct_encode_path_segment(name.as_ref()))
         );
         let mut req = self.http_client.post(request_url);
         req = req.header(reqwest::header::CONTENT_LENGTH, "0");
@@ -2472,57 +3311,74 @@ impl HttpClient {
         let status = response.status();
         let status_code = status.as_u16();
         let headers = response.headers().clone();
-        let body_bytes =
-            __read_bounded_response_body(response, self.max_response_body_bytes).await?;
+        let body_bytes = __read_bounded_response_body(
+                response,
+                self.max_response_body_bytes,
+            )
+            .await?;
         let raw_body = body_bytes;
         let body_text = String::from_utf8_lossy(&raw_body).into_owned();
         if false || status_code == 202u16 {
             match serde_json::from_str(&body_text) {
                 Ok(body) => Ok(body),
-                Err(e) => Err(ApiOpError::Api(ApiError {
+                Err(e) => {
+                    Err(
+                        ApiOpError::Api(ApiError {
+                            status: status_code,
+                            headers: headers,
+                            body: body_text,
+                            raw_body,
+                            typed: None,
+                            parse_error: Some(
+                                format!("failed to deserialize 2xx response body: {}", e),
+                            ),
+                        }),
+                    )
+                }
+            }
+        } else if status.is_success() {
+            Err(
+                ApiOpError::Api(ApiError {
                     status: status_code,
-                    headers: headers,
+                    headers,
                     body: body_text,
                     raw_body,
                     typed: None,
-                    parse_error: Some(format!("failed to deserialize 2xx response body: {}", e)),
-                })),
-            }
-        } else if status.is_success() {
-            Err(ApiOpError::Api(ApiError {
-                status: status_code,
-                headers,
-                body: body_text,
-                raw_body,
-                typed: None,
-                parse_error: Some(format!(
-                    "unexpected successful status {}; generated return type selects `{}`",
-                    status_code, "202",
-                )),
-            }))
+                    parse_error: Some(
+                        format!(
+                            "unexpected successful status {}; generated return type selects `{}`",
+                            status_code, "202",
+                        ),
+                    ),
+                }),
+            )
         } else {
             let typed: Option<serde_json::Value>;
             let parse_error: Option<String>;
             match status_code {
-                _ => match serde_json::from_str::<serde_json::Value>(&body_text) {
-                    Ok(v) => {
-                        typed = Some(v);
-                        parse_error = None;
+                _ => {
+                    match serde_json::from_str::<serde_json::Value>(&body_text) {
+                        Ok(v) => {
+                            typed = Some(v);
+                            parse_error = None;
+                        }
+                        Err(e) => {
+                            typed = None;
+                            parse_error = Some(e.to_string());
+                        }
                     }
-                    Err(e) => {
-                        typed = None;
-                        parse_error = Some(e.to_string());
-                    }
-                },
+                }
             }
-            Err(ApiOpError::Api(ApiError {
-                status: status_code,
-                headers,
-                body: body_text,
-                raw_body,
-                typed,
-                parse_error,
-            }))
+            Err(
+                ApiOpError::Api(ApiError {
+                    status: status_code,
+                    headers,
+                    body: body_text,
+                    raw_body,
+                    typed,
+                    parse_error,
+                }),
+            )
         }
     }
     /// Set a workspace's corpus scope; idempotent, index-only (ADR-0049 §3/§4)
@@ -2552,61 +3408,78 @@ impl HttpClient {
         let status = response.status();
         let status_code = status.as_u16();
         let headers = response.headers().clone();
-        let body_bytes =
-            __read_bounded_response_body(response, self.max_response_body_bytes).await?;
+        let body_bytes = __read_bounded_response_body(
+                response,
+                self.max_response_body_bytes,
+            )
+            .await?;
         let raw_body = body_bytes;
         let body_text = String::from_utf8_lossy(&raw_body).into_owned();
         if false || status_code == 200u16 {
             match serde_json::from_str(&body_text) {
                 Ok(body) => Ok(body),
-                Err(e) => Err(ApiOpError::Api(ApiError {
+                Err(e) => {
+                    Err(
+                        ApiOpError::Api(ApiError {
+                            status: status_code,
+                            headers: headers,
+                            body: body_text,
+                            raw_body,
+                            typed: None,
+                            parse_error: Some(
+                                format!("failed to deserialize 2xx response body: {}", e),
+                            ),
+                        }),
+                    )
+                }
+            }
+        } else if status.is_success() {
+            Err(
+                ApiOpError::Api(ApiError {
                     status: status_code,
-                    headers: headers,
+                    headers,
                     body: body_text,
                     raw_body,
                     typed: None,
-                    parse_error: Some(format!("failed to deserialize 2xx response body: {}", e)),
-                })),
-            }
-        } else if status.is_success() {
-            Err(ApiOpError::Api(ApiError {
-                status: status_code,
-                headers,
-                body: body_text,
-                raw_body,
-                typed: None,
-                parse_error: Some(format!(
-                    "unexpected successful status {}; generated return type selects `{}`",
-                    status_code, "200",
-                )),
-            }))
+                    parse_error: Some(
+                        format!(
+                            "unexpected successful status {}; generated return type selects `{}`",
+                            status_code, "200",
+                        ),
+                    ),
+                }),
+            )
         } else {
             let typed: Option<PutCorpusApiError>;
             let parse_error: Option<String>;
             match status_code {
-                403u16 => match serde_json::from_str::<PathOutsideAllowedRoots>(&body_text) {
-                    Ok(v) => {
-                        typed = Some(PutCorpusApiError::Status403(v));
-                        parse_error = None;
+                403u16 => {
+                    match serde_json::from_str::<PathOutsideAllowedRoots>(&body_text) {
+                        Ok(v) => {
+                            typed = Some(PutCorpusApiError::Status403(v));
+                            parse_error = None;
+                        }
+                        Err(e) => {
+                            typed = None;
+                            parse_error = Some(e.to_string());
+                        }
                     }
-                    Err(e) => {
-                        typed = None;
-                        parse_error = Some(e.to_string());
-                    }
-                },
+                }
                 _ => {
                     typed = None;
                     parse_error = None;
                 }
             }
-            Err(ApiOpError::Api(ApiError {
-                status: status_code,
-                headers,
-                body: body_text,
-                raw_body,
-                typed,
-                parse_error,
-            }))
+            Err(
+                ApiOpError::Api(ApiError {
+                    status: status_code,
+                    headers,
+                    body: body_text,
+                    raw_body,
+                    typed,
+                    parse_error,
+                }),
+            )
         }
     }
     /// Persist a session's context policy (ADR-0049 §8)
@@ -2620,12 +3493,8 @@ impl HttpClient {
         request: ContextPolicy,
     ) -> Result<Session, ApiOpError<PutSessionContextApiError>> {
         let request_url = format!(
-            "{}{}",
-            self.base_url,
-            format!(
-                "/sessions/{}/context",
-                __pct_encode_path_segment(id.as_ref())
-            )
+            "{}{}", self.base_url, format!("/sessions/{}/context",
+            __pct_encode_path_segment(id.as_ref()))
         );
         let mut req = self.http_client.put(request_url);
         req = req
@@ -2644,61 +3513,78 @@ impl HttpClient {
         let status = response.status();
         let status_code = status.as_u16();
         let headers = response.headers().clone();
-        let body_bytes =
-            __read_bounded_response_body(response, self.max_response_body_bytes).await?;
+        let body_bytes = __read_bounded_response_body(
+                response,
+                self.max_response_body_bytes,
+            )
+            .await?;
         let raw_body = body_bytes;
         let body_text = String::from_utf8_lossy(&raw_body).into_owned();
         if false || status_code == 200u16 {
             match serde_json::from_str(&body_text) {
                 Ok(body) => Ok(body),
-                Err(e) => Err(ApiOpError::Api(ApiError {
+                Err(e) => {
+                    Err(
+                        ApiOpError::Api(ApiError {
+                            status: status_code,
+                            headers: headers,
+                            body: body_text,
+                            raw_body,
+                            typed: None,
+                            parse_error: Some(
+                                format!("failed to deserialize 2xx response body: {}", e),
+                            ),
+                        }),
+                    )
+                }
+            }
+        } else if status.is_success() {
+            Err(
+                ApiOpError::Api(ApiError {
                     status: status_code,
-                    headers: headers,
+                    headers,
                     body: body_text,
                     raw_body,
                     typed: None,
-                    parse_error: Some(format!("failed to deserialize 2xx response body: {}", e)),
-                })),
-            }
-        } else if status.is_success() {
-            Err(ApiOpError::Api(ApiError {
-                status: status_code,
-                headers,
-                body: body_text,
-                raw_body,
-                typed: None,
-                parse_error: Some(format!(
-                    "unexpected successful status {}; generated return type selects `{}`",
-                    status_code, "200",
-                )),
-            }))
+                    parse_error: Some(
+                        format!(
+                            "unexpected successful status {}; generated return type selects `{}`",
+                            status_code, "200",
+                        ),
+                    ),
+                }),
+            )
         } else {
             let typed: Option<PutSessionContextApiError>;
             let parse_error: Option<String>;
             match status_code {
-                404u16 => match serde_json::from_str::<NotFound>(&body_text) {
-                    Ok(v) => {
-                        typed = Some(PutSessionContextApiError::Status404(v));
-                        parse_error = None;
+                404u16 => {
+                    match serde_json::from_str::<NotFound>(&body_text) {
+                        Ok(v) => {
+                            typed = Some(PutSessionContextApiError::Status404(v));
+                            parse_error = None;
+                        }
+                        Err(e) => {
+                            typed = None;
+                            parse_error = Some(e.to_string());
+                        }
                     }
-                    Err(e) => {
-                        typed = None;
-                        parse_error = Some(e.to_string());
-                    }
-                },
+                }
                 _ => {
                     typed = None;
                     parse_error = None;
                 }
             }
-            Err(ApiOpError::Api(ApiError {
-                status: status_code,
-                headers,
-                body: body_text,
-                raw_body,
-                typed,
-                parse_error,
-            }))
+            Err(
+                ApiOpError::Api(ApiError {
+                    status: status_code,
+                    headers,
+                    body: body_text,
+                    raw_body,
+                    typed,
+                    parse_error,
+                }),
+            )
         }
     }
     /// Rename a session (set its human title)
@@ -2712,9 +3598,8 @@ impl HttpClient {
         request: RenameSessionRequest,
     ) -> Result<Session, ApiOpError<RenameSessionApiError>> {
         let request_url = format!(
-            "{}{}",
-            self.base_url,
-            format!("/sessions/{}", __pct_encode_path_segment(id.as_ref()))
+            "{}{}", self.base_url, format!("/sessions/{}", __pct_encode_path_segment(id
+            .as_ref()))
         );
         let mut req = self.http_client.put(request_url);
         req = req
@@ -2733,61 +3618,78 @@ impl HttpClient {
         let status = response.status();
         let status_code = status.as_u16();
         let headers = response.headers().clone();
-        let body_bytes =
-            __read_bounded_response_body(response, self.max_response_body_bytes).await?;
+        let body_bytes = __read_bounded_response_body(
+                response,
+                self.max_response_body_bytes,
+            )
+            .await?;
         let raw_body = body_bytes;
         let body_text = String::from_utf8_lossy(&raw_body).into_owned();
         if false || status_code == 200u16 {
             match serde_json::from_str(&body_text) {
                 Ok(body) => Ok(body),
-                Err(e) => Err(ApiOpError::Api(ApiError {
+                Err(e) => {
+                    Err(
+                        ApiOpError::Api(ApiError {
+                            status: status_code,
+                            headers: headers,
+                            body: body_text,
+                            raw_body,
+                            typed: None,
+                            parse_error: Some(
+                                format!("failed to deserialize 2xx response body: {}", e),
+                            ),
+                        }),
+                    )
+                }
+            }
+        } else if status.is_success() {
+            Err(
+                ApiOpError::Api(ApiError {
                     status: status_code,
-                    headers: headers,
+                    headers,
                     body: body_text,
                     raw_body,
                     typed: None,
-                    parse_error: Some(format!("failed to deserialize 2xx response body: {}", e)),
-                })),
-            }
-        } else if status.is_success() {
-            Err(ApiOpError::Api(ApiError {
-                status: status_code,
-                headers,
-                body: body_text,
-                raw_body,
-                typed: None,
-                parse_error: Some(format!(
-                    "unexpected successful status {}; generated return type selects `{}`",
-                    status_code, "200",
-                )),
-            }))
+                    parse_error: Some(
+                        format!(
+                            "unexpected successful status {}; generated return type selects `{}`",
+                            status_code, "200",
+                        ),
+                    ),
+                }),
+            )
         } else {
             let typed: Option<RenameSessionApiError>;
             let parse_error: Option<String>;
             match status_code {
-                404u16 => match serde_json::from_str::<NotFound>(&body_text) {
-                    Ok(v) => {
-                        typed = Some(RenameSessionApiError::Status404(v));
-                        parse_error = None;
+                404u16 => {
+                    match serde_json::from_str::<NotFound>(&body_text) {
+                        Ok(v) => {
+                            typed = Some(RenameSessionApiError::Status404(v));
+                            parse_error = None;
+                        }
+                        Err(e) => {
+                            typed = None;
+                            parse_error = Some(e.to_string());
+                        }
                     }
-                    Err(e) => {
-                        typed = None;
-                        parse_error = Some(e.to_string());
-                    }
-                },
+                }
                 _ => {
                     typed = None;
                     parse_error = None;
                 }
             }
-            Err(ApiOpError::Api(ApiError {
-                status: status_code,
-                headers,
-                body: body_text,
-                raw_body,
-                typed,
-                parse_error,
-            }))
+            Err(
+                ApiOpError::Api(ApiError {
+                    status: status_code,
+                    headers,
+                    body: body_text,
+                    raw_body,
+                    typed,
+                    parse_error,
+                }),
+            )
         }
     }
     /// Answer a waiting turn's `/locate` ambiguity picker (ADR-0048 §4)
@@ -2801,9 +3703,8 @@ impl HttpClient {
         request: LocateChoice,
     ) -> Result<(), ApiOpError<ResolveLocateApiError>> {
         let request_url = format!(
-            "{}{}",
-            self.base_url,
-            format!("/turns/{}/locate", __pct_encode_path_segment(id.as_ref()))
+            "{}{}", self.base_url, format!("/turns/{}/locate",
+            __pct_encode_path_segment(id.as_ref()))
         );
         let mut req = self.http_client.post(request_url);
         req = req
@@ -2819,8 +3720,11 @@ impl HttpClient {
         let status = response.status();
         let status_code = status.as_u16();
         let headers = response.headers().clone();
-        let body_bytes =
-            __read_bounded_response_body(response, self.max_response_body_bytes).await?;
+        let body_bytes = __read_bounded_response_body(
+                response,
+                self.max_response_body_bytes,
+            )
+            .await?;
         let raw_body = body_bytes;
         let body_text = String::from_utf8_lossy(&raw_body).into_owned();
         if false || status_code == 204u16 {
@@ -2829,54 +3733,64 @@ impl HttpClient {
             let _ = headers;
             Ok(())
         } else if status.is_success() {
-            Err(ApiOpError::Api(ApiError {
-                status: status_code,
-                headers,
-                body: body_text,
-                raw_body,
-                typed: None,
-                parse_error: Some(format!(
-                    "unexpected successful status {}; generated return type selects `{}`",
-                    status_code, "204",
-                )),
-            }))
+            Err(
+                ApiOpError::Api(ApiError {
+                    status: status_code,
+                    headers,
+                    body: body_text,
+                    raw_body,
+                    typed: None,
+                    parse_error: Some(
+                        format!(
+                            "unexpected successful status {}; generated return type selects `{}`",
+                            status_code, "204",
+                        ),
+                    ),
+                }),
+            )
         } else {
             let typed: Option<ResolveLocateApiError>;
             let parse_error: Option<String>;
             match status_code {
-                404u16 => match serde_json::from_str::<NotFound>(&body_text) {
-                    Ok(v) => {
-                        typed = Some(ResolveLocateApiError::Status404(v));
-                        parse_error = None;
+                404u16 => {
+                    match serde_json::from_str::<NotFound>(&body_text) {
+                        Ok(v) => {
+                            typed = Some(ResolveLocateApiError::Status404(v));
+                            parse_error = None;
+                        }
+                        Err(e) => {
+                            typed = None;
+                            parse_error = Some(e.to_string());
+                        }
                     }
-                    Err(e) => {
-                        typed = None;
-                        parse_error = Some(e.to_string());
+                }
+                409u16 => {
+                    match serde_json::from_str::<NoPendingLocate>(&body_text) {
+                        Ok(v) => {
+                            typed = Some(ResolveLocateApiError::Status409(v));
+                            parse_error = None;
+                        }
+                        Err(e) => {
+                            typed = None;
+                            parse_error = Some(e.to_string());
+                        }
                     }
-                },
-                409u16 => match serde_json::from_str::<NoPendingLocate>(&body_text) {
-                    Ok(v) => {
-                        typed = Some(ResolveLocateApiError::Status409(v));
-                        parse_error = None;
-                    }
-                    Err(e) => {
-                        typed = None;
-                        parse_error = Some(e.to_string());
-                    }
-                },
+                }
                 _ => {
                     typed = None;
                     parse_error = None;
                 }
             }
-            Err(ApiOpError::Api(ApiError {
-                status: status_code,
-                headers,
-                body: body_text,
-                raw_body,
-                typed,
-                parse_error,
-            }))
+            Err(
+                ApiOpError::Api(ApiError {
+                    status: status_code,
+                    headers,
+                    body: body_text,
+                    raw_body,
+                    typed,
+                    parse_error,
+                }),
+            )
         }
     }
     /// Replace the document's block tree (manual autosave, ADR-0038)
@@ -2890,9 +3804,8 @@ impl HttpClient {
         request: SaveTreeRequest,
     ) -> Result<Revision, ApiOpError<SaveDocumentApiError>> {
         let request_url = format!(
-            "{}{}",
-            self.base_url,
-            format!("/documents/{}/tree", __pct_encode_path_segment(id.as_ref()))
+            "{}{}", self.base_url, format!("/documents/{}/tree",
+            __pct_encode_path_segment(id.as_ref()))
         );
         let mut req = self.http_client.put(request_url);
         req = req
@@ -2911,61 +3824,78 @@ impl HttpClient {
         let status = response.status();
         let status_code = status.as_u16();
         let headers = response.headers().clone();
-        let body_bytes =
-            __read_bounded_response_body(response, self.max_response_body_bytes).await?;
+        let body_bytes = __read_bounded_response_body(
+                response,
+                self.max_response_body_bytes,
+            )
+            .await?;
         let raw_body = body_bytes;
         let body_text = String::from_utf8_lossy(&raw_body).into_owned();
         if false || status_code == 200u16 {
             match serde_json::from_str(&body_text) {
                 Ok(body) => Ok(body),
-                Err(e) => Err(ApiOpError::Api(ApiError {
+                Err(e) => {
+                    Err(
+                        ApiOpError::Api(ApiError {
+                            status: status_code,
+                            headers: headers,
+                            body: body_text,
+                            raw_body,
+                            typed: None,
+                            parse_error: Some(
+                                format!("failed to deserialize 2xx response body: {}", e),
+                            ),
+                        }),
+                    )
+                }
+            }
+        } else if status.is_success() {
+            Err(
+                ApiOpError::Api(ApiError {
                     status: status_code,
-                    headers: headers,
+                    headers,
                     body: body_text,
                     raw_body,
                     typed: None,
-                    parse_error: Some(format!("failed to deserialize 2xx response body: {}", e)),
-                })),
-            }
-        } else if status.is_success() {
-            Err(ApiOpError::Api(ApiError {
-                status: status_code,
-                headers,
-                body: body_text,
-                raw_body,
-                typed: None,
-                parse_error: Some(format!(
-                    "unexpected successful status {}; generated return type selects `{}`",
-                    status_code, "200",
-                )),
-            }))
+                    parse_error: Some(
+                        format!(
+                            "unexpected successful status {}; generated return type selects `{}`",
+                            status_code, "200",
+                        ),
+                    ),
+                }),
+            )
         } else {
             let typed: Option<SaveDocumentApiError>;
             let parse_error: Option<String>;
             match status_code {
-                409u16 => match serde_json::from_str::<FileChangedExternally>(&body_text) {
-                    Ok(v) => {
-                        typed = Some(SaveDocumentApiError::Status409(v));
-                        parse_error = None;
+                409u16 => {
+                    match serde_json::from_str::<FileChangedExternally>(&body_text) {
+                        Ok(v) => {
+                            typed = Some(SaveDocumentApiError::Status409(v));
+                            parse_error = None;
+                        }
+                        Err(e) => {
+                            typed = None;
+                            parse_error = Some(e.to_string());
+                        }
                     }
-                    Err(e) => {
-                        typed = None;
-                        parse_error = Some(e.to_string());
-                    }
-                },
+                }
                 _ => {
                     typed = None;
                     parse_error = None;
                 }
             }
-            Err(ApiOpError::Api(ApiError {
-                status: status_code,
-                headers,
-                body: body_text,
-                raw_body,
-                typed,
-                parse_error,
-            }))
+            Err(
+                ApiOpError::Api(ApiError {
+                    status: status_code,
+                    headers,
+                    body: body_text,
+                    raw_body,
+                    typed,
+                    parse_error,
+                }),
+            )
         }
     }
     /// `POST /models/{name}/start`
@@ -2974,9 +3904,8 @@ impl HttpClient {
         name: impl AsRef<str>,
     ) -> Result<LiveStateResponse, ApiOpError<serde_json::Value>> {
         let request_url = format!(
-            "{}{}",
-            self.base_url,
-            format!("/models/{}/start", __pct_encode_path_segment(name.as_ref()))
+            "{}{}", self.base_url, format!("/models/{}/start",
+            __pct_encode_path_segment(name.as_ref()))
         );
         let mut req = self.http_client.post(request_url);
         req = req.header(reqwest::header::CONTENT_LENGTH, "0");
@@ -2993,57 +3922,74 @@ impl HttpClient {
         let status = response.status();
         let status_code = status.as_u16();
         let headers = response.headers().clone();
-        let body_bytes =
-            __read_bounded_response_body(response, self.max_response_body_bytes).await?;
+        let body_bytes = __read_bounded_response_body(
+                response,
+                self.max_response_body_bytes,
+            )
+            .await?;
         let raw_body = body_bytes;
         let body_text = String::from_utf8_lossy(&raw_body).into_owned();
         if false || status_code == 200u16 {
             match serde_json::from_str(&body_text) {
                 Ok(body) => Ok(body),
-                Err(e) => Err(ApiOpError::Api(ApiError {
+                Err(e) => {
+                    Err(
+                        ApiOpError::Api(ApiError {
+                            status: status_code,
+                            headers: headers,
+                            body: body_text,
+                            raw_body,
+                            typed: None,
+                            parse_error: Some(
+                                format!("failed to deserialize 2xx response body: {}", e),
+                            ),
+                        }),
+                    )
+                }
+            }
+        } else if status.is_success() {
+            Err(
+                ApiOpError::Api(ApiError {
                     status: status_code,
-                    headers: headers,
+                    headers,
                     body: body_text,
                     raw_body,
                     typed: None,
-                    parse_error: Some(format!("failed to deserialize 2xx response body: {}", e)),
-                })),
-            }
-        } else if status.is_success() {
-            Err(ApiOpError::Api(ApiError {
-                status: status_code,
-                headers,
-                body: body_text,
-                raw_body,
-                typed: None,
-                parse_error: Some(format!(
-                    "unexpected successful status {}; generated return type selects `{}`",
-                    status_code, "200",
-                )),
-            }))
+                    parse_error: Some(
+                        format!(
+                            "unexpected successful status {}; generated return type selects `{}`",
+                            status_code, "200",
+                        ),
+                    ),
+                }),
+            )
         } else {
             let typed: Option<serde_json::Value>;
             let parse_error: Option<String>;
             match status_code {
-                _ => match serde_json::from_str::<serde_json::Value>(&body_text) {
-                    Ok(v) => {
-                        typed = Some(v);
-                        parse_error = None;
+                _ => {
+                    match serde_json::from_str::<serde_json::Value>(&body_text) {
+                        Ok(v) => {
+                            typed = Some(v);
+                            parse_error = None;
+                        }
+                        Err(e) => {
+                            typed = None;
+                            parse_error = Some(e.to_string());
+                        }
                     }
-                    Err(e) => {
-                        typed = None;
-                        parse_error = Some(e.to_string());
-                    }
-                },
+                }
             }
-            Err(ApiOpError::Api(ApiError {
-                status: status_code,
-                headers,
-                body: body_text,
-                raw_body,
-                typed,
-                parse_error,
-            }))
+            Err(
+                ApiOpError::Api(ApiError {
+                    status: status_code,
+                    headers,
+                    body: body_text,
+                    raw_body,
+                    typed,
+                    parse_error,
+                }),
+            )
         }
     }
     /// Run one agent turn (SSE stream)
@@ -3094,32 +4040,39 @@ impl HttpClient {
                     }),
                 );
             }
-            let body_bytes =
-                __read_bounded_response_body(response, self.max_response_body_bytes).await?;
+            let body_bytes = __read_bounded_response_body(
+                    response,
+                    self.max_response_body_bytes,
+                )
+                .await?;
             let raw_body = body_bytes;
             let body_text = String::from_utf8_lossy(&raw_body).into_owned();
             let typed: Option<serde_json::Value>;
             let parse_error: Option<String>;
             match status_code {
-                _ => match serde_json::from_str::<serde_json::Value>(&body_text) {
-                    Ok(v) => {
-                        typed = Some(v);
-                        parse_error = None;
+                _ => {
+                    match serde_json::from_str::<serde_json::Value>(&body_text) {
+                        Ok(v) => {
+                            typed = Some(v);
+                            parse_error = None;
+                        }
+                        Err(e) => {
+                            typed = None;
+                            parse_error = Some(e.to_string());
+                        }
                     }
-                    Err(e) => {
-                        typed = None;
-                        parse_error = Some(e.to_string());
-                    }
-                },
+                }
             }
-            Err(ApiOpError::Api(ApiError {
-                status: status_code,
-                headers,
-                body: body_text,
-                raw_body,
-                typed,
-                parse_error,
-            }))
+            Err(
+                ApiOpError::Api(ApiError {
+                    status: status_code,
+                    headers,
+                    body: body_text,
+                    raw_body,
+                    typed,
+                    parse_error,
+                }),
+            )
         }
     }
     /// `POST /models/{name}/stop`
@@ -3128,9 +4081,8 @@ impl HttpClient {
         name: impl AsRef<str>,
     ) -> Result<LiveStateResponse, ApiOpError<serde_json::Value>> {
         let request_url = format!(
-            "{}{}",
-            self.base_url,
-            format!("/models/{}/stop", __pct_encode_path_segment(name.as_ref()))
+            "{}{}", self.base_url, format!("/models/{}/stop",
+            __pct_encode_path_segment(name.as_ref()))
         );
         let mut req = self.http_client.post(request_url);
         req = req.header(reqwest::header::CONTENT_LENGTH, "0");
@@ -3147,57 +4099,74 @@ impl HttpClient {
         let status = response.status();
         let status_code = status.as_u16();
         let headers = response.headers().clone();
-        let body_bytes =
-            __read_bounded_response_body(response, self.max_response_body_bytes).await?;
+        let body_bytes = __read_bounded_response_body(
+                response,
+                self.max_response_body_bytes,
+            )
+            .await?;
         let raw_body = body_bytes;
         let body_text = String::from_utf8_lossy(&raw_body).into_owned();
         if false || status_code == 200u16 {
             match serde_json::from_str(&body_text) {
                 Ok(body) => Ok(body),
-                Err(e) => Err(ApiOpError::Api(ApiError {
+                Err(e) => {
+                    Err(
+                        ApiOpError::Api(ApiError {
+                            status: status_code,
+                            headers: headers,
+                            body: body_text,
+                            raw_body,
+                            typed: None,
+                            parse_error: Some(
+                                format!("failed to deserialize 2xx response body: {}", e),
+                            ),
+                        }),
+                    )
+                }
+            }
+        } else if status.is_success() {
+            Err(
+                ApiOpError::Api(ApiError {
                     status: status_code,
-                    headers: headers,
+                    headers,
                     body: body_text,
                     raw_body,
                     typed: None,
-                    parse_error: Some(format!("failed to deserialize 2xx response body: {}", e)),
-                })),
-            }
-        } else if status.is_success() {
-            Err(ApiOpError::Api(ApiError {
-                status: status_code,
-                headers,
-                body: body_text,
-                raw_body,
-                typed: None,
-                parse_error: Some(format!(
-                    "unexpected successful status {}; generated return type selects `{}`",
-                    status_code, "200",
-                )),
-            }))
+                    parse_error: Some(
+                        format!(
+                            "unexpected successful status {}; generated return type selects `{}`",
+                            status_code, "200",
+                        ),
+                    ),
+                }),
+            )
         } else {
             let typed: Option<serde_json::Value>;
             let parse_error: Option<String>;
             match status_code {
-                _ => match serde_json::from_str::<serde_json::Value>(&body_text) {
-                    Ok(v) => {
-                        typed = Some(v);
-                        parse_error = None;
+                _ => {
+                    match serde_json::from_str::<serde_json::Value>(&body_text) {
+                        Ok(v) => {
+                            typed = Some(v);
+                            parse_error = None;
+                        }
+                        Err(e) => {
+                            typed = None;
+                            parse_error = Some(e.to_string());
+                        }
                     }
-                    Err(e) => {
-                        typed = None;
-                        parse_error = Some(e.to_string());
-                    }
-                },
+                }
             }
-            Err(ApiOpError::Api(ApiError {
-                status: status_code,
-                headers,
-                body: body_text,
-                raw_body,
-                typed,
-                parse_error,
-            }))
+            Err(
+                ApiOpError::Api(ApiError {
+                    status: status_code,
+                    headers,
+                    body: body_text,
+                    raw_body,
+                    typed,
+                    parse_error,
+                }),
+            )
         }
     }
 }

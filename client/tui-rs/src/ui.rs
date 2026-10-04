@@ -57,21 +57,17 @@ pub fn install_panic_hook() {
 pub fn run_loop(terminal: &mut Tui, app: &mut AppState, bridge: &Bridge) -> io::Result<()> {
     let mut scroll: u16 = 0;
     let mut follow = true;
-    let mut last_corpus_poll = std::time::Instant::now();
 
     while !app.should_quit {
         while let Ok(event) = bridge.event_rx.try_recv() {
             app.reduce(event);
         }
 
-        // Corpus job progress is polled via GET /corpus (the Phase C pinned
-        // transport) while the overlay shows a running job (E2c).
-        if app.overlay == Overlay::Corpus
-            && corpus_job_running(app)
-            && last_corpus_poll.elapsed() >= Duration::from_secs(1)
-        {
-            bridge.send(Command::RefreshCorpus);
-            last_corpus_poll = std::time::Instant::now();
+        // A `document` liveness-feed event (external change / commit) requests
+        // exactly one reader refresh — there is no client poll loop (ADR-0052 §4).
+        if app.needs_blocks_reload {
+            app.needs_blocks_reload = false;
+            bridge.send(Command::LoadBlocks);
         }
 
         let desired = if follow { u16::MAX } else { scroll };
@@ -233,8 +229,9 @@ fn handle_key(
         KeyCode::Char('a') if ctrl => {
             if let Some(candidate) = &app.candidate {
                 if !candidate.block_id.is_empty() {
-                    bridge.send(Command::Approve {
+                    bridge.send(Command::Accept {
                         block_id: candidate.block_id.clone(),
+                        overwrite: false,
                     });
                 }
             }
@@ -242,8 +239,9 @@ fn handle_key(
         KeyCode::Char('o') if ctrl => {
             if let Some(candidate) = &app.candidate {
                 if !candidate.block_id.is_empty() {
-                    bridge.send(Command::Overwrite {
+                    bridge.send(Command::Accept {
                         block_id: candidate.block_id.clone(),
+                        overwrite: true,
                     });
                 }
             }
@@ -1468,7 +1466,9 @@ fn open_corpus(app: &mut AppState, bridge: &Bridge) {
     app.scope_edit = None;
 }
 
-/// Whether the corpus overlay should keep polling `GET /corpus` (E2c).
+/// Whether the corpus overlay's job is still running (tests only; the client
+/// no longer polls — progress arrives on the liveness feed, ADR-0052 §4).
+#[cfg(test)]
 fn corpus_job_running(app: &AppState) -> bool {
     app.corpus
         .as_ref()
@@ -1489,7 +1489,7 @@ fn handle_corpus_key(key: KeyEvent, app: &mut AppState, bridge: &Bridge) {
             }
         }
         KeyCode::Char('i') => bridge.send(Command::IndexCorpus),
-        KeyCode::Char('r') => bridge.send(Command::RefreshCorpus),
+        KeyCode::Char('r') => bridge.send(Command::GetCorpus),
         KeyCode::Char('s') => {
             app.scope_edit = Some(ScopeEdit::from_scope(app.corpus.as_ref()));
         }

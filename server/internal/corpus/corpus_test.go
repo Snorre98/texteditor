@@ -370,16 +370,17 @@ func TestCorpusFilesAreNeverDocuments(t *testing.T) {
 // lifecycle notification can be asserted.
 type stubDocStore struct {
 	document.Interface
-	opened   []string
-	commits  []string
-	saves    []string
-	savePath string
-	writeThr bool
+	opened         []string
+	commits        []string
+	saves          []string
+	savePath       string
+	writeThr       bool
+	externalChange bool
 }
 
 func (s *stubDocStore) Open(path string) (dto.OpenResult, error) {
 	s.opened = append(s.opened, path)
-	return dto.OpenResult{DocumentID: "d1", Path: path}, nil
+	return dto.OpenResult{DocumentID: "d1", Path: path, ExternalChange: s.externalChange}, nil
 }
 func (s *stubDocStore) Commit(documentID string, _ dto.CommitOptions) (dto.WriteResult, error) {
 	s.commits = append(s.commits, documentID)

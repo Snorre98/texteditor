@@ -34,17 +34,19 @@ type CorpusDocumentStatus struct {
 }
 
 // CorpusJob is one observable indexing job (ADR-0049 §16; polling via
-// GET /corpus per the Phase C pin).
+// GET /corpus per the Phase C pin, and pushed as a `corpus` feed event by
+// ADR-0052 §4). JSON tags are camelCase because the job crosses the wire both
+// in the /corpus payload and in the liveness feed.
 type CorpusJob struct {
-	ID          string
-	WorkspaceID string
-	Kind        string // reconcile | index | path
-	State       string // running | done | error
-	Total       int
-	Completed   int
-	Error       string
-	StartedAt   int64
-	FinishedAt  int64
+	ID          string `json:"id"`
+	WorkspaceID string `json:"workspaceId"`
+	Kind        string `json:"kind"`  // reconcile | index | path
+	State       string `json:"state"` // running | done | error
+	Total       int    `json:"total"`
+	Completed   int    `json:"completed"`
+	Error       string `json:"error,omitempty"`
+	StartedAt   int64  `json:"startedAt,omitempty"`
+	FinishedAt  int64  `json:"finishedAt,omitempty"`
 }
 
 // CorpusState is a workspace's corpus scope plus per-document status and the

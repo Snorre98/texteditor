@@ -2,8 +2,8 @@
 Feature: Fleet observability
   The model selectors in every client show what serving services are available,
   with the state the daemon reports and the remediation the state implies.
-  Normative per ADR-0040 (engine surface) and macos-dev-config ADR-0007
-  (daemon batch verb).
+  Normative per ADR-0040 (engine surface), ADR-0052 (liveness feed), and
+  macos-dev-config ADR-0007 (daemon batch verb).
 
   Scenario: One observability read joins the projection with batch states
     Given the daemon serves "mistral-24b" up and "phi-4" down
@@ -37,8 +37,9 @@ Feature: Fleet observability
     Then the selector refreshes from /fleet without waiting for the poll
     And gemma4-26b renders "up" only after the daemon reports it
 
-  Scenario: Polling keeps the selector fresh without user action
-    Given the selector polls /fleet every 10 seconds while visible
-    When an external process stops a model between polls
-    Then the next poll renders the daemon's "down" state
-    And polling pauses while the window is hidden
+  Scenario: Fleet changes arrive on the liveness feed without client polling
+    Given the client is subscribed to GET /events and renders the fleet
+    When the engine's daemon poller observes a model change
+    Then a typed fleet event updates the selector without a client poll loop
+    And lifecycle actions still refresh from /fleet on request
+    And a daemon outage is reported as control "unreachable" in the next fleet event

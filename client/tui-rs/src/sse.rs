@@ -173,25 +173,29 @@ pub fn decode_block(block: &str) -> Option<Decoded> {
     parse_message(block).as_ref().map(dispatch)
 }
 
-/// A streaming decoder over byte chunks. Bytes are buffered until a `\n\n`
-/// separator is seen; the final partial block is flushed with [`SseDecoder::finish`].
+/// A byte-buffered SSE frame splitter. Bytes are buffered until a `\n\n`
+/// separator is seen; the final partial block is flushed with
+/// [`FrameDecoder::finish`]. It yields raw [`RawMessage`]s so both the `/turn`
+/// decoder ([`SseDecoder`]) and the `/events` feed decoder
+/// ([`crate::feed::FeedDecoder`]) share one framing implementation (ADR-0031,
+/// ADR-0052 §4).
 ///
 /// The buffer stays as **bytes**: the `\n\n` separator is ASCII, so it can never
 /// occur inside a multi-byte UTF-8 sequence, and a message block before it is
 /// therefore always complete UTF-8. This makes chunk boundaries that split a
 /// multi-byte character safe (a per-chunk `from_utf8_lossy` would corrupt it).
 #[derive(Debug, Default)]
-pub struct SseDecoder {
+pub struct FrameDecoder {
     buffer: Vec<u8>,
 }
 
-impl SseDecoder {
+impl FrameDecoder {
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Feed one byte chunk; returns every complete block's decode outcome.
-    pub fn push(&mut self, chunk: &[u8]) -> Vec<Decoded> {
+    /// Feed one byte chunk; returns every complete block's parsed message.
+    pub fn push(&mut self, chunk: &[u8]) -> Vec<RawMessage> {
         // Drop raw CR as we buffer so a CRLF stream frames the same as LF (raw
         // CR never appears inside a JSON payload — control characters are
         // escaped by the encoder).
@@ -202,8 +206,8 @@ impl SseDecoder {
             let block_bytes: Vec<u8> = self.buffer[..sep].to_vec();
             self.buffer.drain(..sep + 2);
             let block = String::from_utf8_lossy(&block_bytes);
-            if let Some(decoded) = decode_block(&block) {
-                out.push(decoded);
+            if let Some(msg) = parse_message(&block) {
+                out.push(msg);
             }
         }
         out
@@ -211,13 +215,37 @@ impl SseDecoder {
 
     /// Flush any trailing partial block (a stream that ended without a final
     /// blank line).
-    pub fn finish(&mut self) -> Option<Decoded> {
+    pub fn finish(&mut self) -> Option<RawMessage> {
         let tail = std::mem::take(&mut self.buffer);
         if tail.iter().all(u8::is_ascii_whitespace) {
             None
         } else {
-            decode_block(&String::from_utf8_lossy(&tail))
+            parse_message(&String::from_utf8_lossy(&tail))
         }
+    }
+}
+
+/// The `/turn` SSE decoder: framing ([`FrameDecoder`]) plus typed per-event
+/// dispatch against the turn vocabulary.
+#[derive(Debug, Default)]
+pub struct SseDecoder {
+    frames: FrameDecoder,
+}
+
+impl SseDecoder {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Feed one byte chunk; returns every complete block's decode outcome.
+    pub fn push(&mut self, chunk: &[u8]) -> Vec<Decoded> {
+        self.frames.push(chunk).iter().map(dispatch).collect()
+    }
+
+    /// Flush any trailing partial block (a stream that ended without a final
+    /// blank line).
+    pub fn finish(&mut self) -> Option<Decoded> {
+        self.frames.finish().as_ref().map(dispatch)
     }
 }
 

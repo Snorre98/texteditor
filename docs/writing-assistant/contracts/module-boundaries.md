@@ -40,6 +40,7 @@ multi-root corpus, workspace-sharded context storage).
 | **Session store** (leaf) | sessions + their messages + persisted per-turn context snapshots + the session context policy | `ListByDocument`, `ListByWorkspace`, `Create`, `Resume`, `Append`, `History`, `SaveContext`, `TurnContext`, `SetContextPolicy`, `ContextPolicy` | per-workspace shard `sessions.db`, `turn_context` retention (100/session), `context_policy` column (validated opaque JSON, ADR-0049 §8) |
 | **API server** | the versioned REST/SSE surface (codegen'd) | HTTP routes + SSE endpoints per the OpenAPI spec | framing, validation, turnID↔client correlation |
 | **SSE event bus** | typed event fan-out | `Emit(event)`, `Subscribe(filter) → stream` | connection registry, bounded chans |
+| **Liveness poller** | the engine-side fleet feed producer (ADR-0052 §4): polls the daemon's batch `status/all` projection and emits a `fleet` event on change | none exposed to other modules (started by the composition root) | interval ticker, last-projection change detection, outage folding (`control: unreachable`) |
 
 ### Serving (Layer 0, `macos-dev-config`)
 
@@ -94,6 +95,7 @@ flowchart LR
         Corpus[Corpus service]
         Locate[Locate resolver]
         Bus[SSE event bus]
+        Poller[Liveness poller]
     end
     subgraph serving[Serving]
         Daemon[Control daemon]
@@ -149,6 +151,9 @@ flowchart LR
     Bus -.emit.-> API
     Meter -.emit.-> Bus
     Loop -.emit.-> Bus
+    Corpus -.emit.-> Bus
+    Poller --> Fleet
+    Poller -.emit.-> Bus
 ```
 
 - Every edge targets a module's **public API**, never its internals.
@@ -174,6 +179,9 @@ flowchart LR
   open document's blocks, the Retriever for the embedding-free corpus search and
   status, and the Filesystem for bounded staleness reads) — a deliberate
   consequence of ADR-0048. It calls **no** model and no embedding path.
+- The `Liveness poller` depends on the Fleet gateway and emits `fleet` events to
+  the bus; it is the one feed producer that is not a direct in-process emit
+  (the control daemon is external with no webhook — ADR-0025, ADR-0052 §4).
 
 ## 3. Public API signatures
 

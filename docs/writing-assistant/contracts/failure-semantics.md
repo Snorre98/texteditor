@@ -107,6 +107,9 @@ Retries are **bounded (≤3)**; every failure is recorded in `meter_events`/logs
 | resolved runner cannot disable thinking | turn proceeds thinking-on; snapshot labels `thinking-unsupported`, never a silent pretend (ADR-0051 §3) |
 | context-window drop | each drop recorded in `ContextDrop` with reason `context-window`, counted and labeled (ADR-0051 §6) |
 | session soft budget crossed | snapshot labels `session-budget-soft`; the turn proceeds (ADR-0051 §7) |
+| accept over an externally changed file | typed `file-changed-externally` (409), no bytes written; retry with `overwrite: true` (ADR-0047 §3, ADR-0052 §3) |
+| non-turn feed subscriber overflows | the bus drops the oldest buffered event and delivers exactly one labeled `backpressure` event; never silent (ADR-0052 §4) |
+| daemon unreachable on the fleet poller | the `fleet` feed event carries `control: "unreachable"` with every `liveState` forced to `unknown`; distinct from a per-model `provider-unreachable` (ADR-0040 §3, ADR-0052 §4) |
 
 ## 6. Invariants
 

@@ -17,6 +17,7 @@
 use texteditor_tui_rs::discovery::{self, EngineEnv};
 use texteditor_tui_rs::gen::{
     BlockEdit, CommitDocumentApiError, FileChangedExternallyError, HttpClient, OpenDocumentRequest,
+    OpenRequest, OpenResultKind,
 };
 
 fn scratch_path(name: &str) -> std::path::PathBuf {
@@ -121,5 +122,56 @@ async fn external_change_is_a_labeled_conflict_and_never_clobbers() {
 
     let on_disk = std::fs::read_to_string(&path).unwrap();
     assert_eq!(on_disk, "Changed externally, out of band.\n", "no clobber");
+    let _ = std::fs::remove_file(&path);
+}
+
+#[tokio::test]
+#[ignore = "requires a running engine"]
+async fn open_and_accept_are_one_verb_each() {
+    let (client, _base) = connected().await;
+
+    let path = scratch_path("accept.md");
+    std::fs::write(&path, "The original sentence.\n").unwrap();
+
+    // One POST /open resolves workspace + document + blocks + session + modes.
+    let result = client
+        .open(OpenRequest {
+            path: path.to_string_lossy().into_owned(),
+            anchor_block_id: None,
+            mode_type: None,
+        })
+        .await
+        .expect("open");
+    assert_eq!(result.kind, OpenResultKind::Document);
+    let document = result.document.expect("document");
+    let block = result
+        .blocks
+        .expect("blocks")
+        .into_iter()
+        .next()
+        .expect("one block");
+    assert!(result.session.is_some(), "open resumes or creates a session");
+    assert!(result.modes.is_some(), "open returns the presets");
+
+    // Stage (as a turn would), then accept atomically — no candidate text sent.
+    client
+        .apply_edit(
+            &document.id,
+            BlockEdit::new(block.id.clone(), "The rewritten sentence.".to_string()),
+        )
+        .await
+        .expect("stage edit");
+    let revision = client
+        .accept_block(&document.id, &block.id, None)
+        .await
+        .expect("accept");
+    assert_eq!(revision.written_through, Some(true), "must write through");
+    assert_eq!(revision.path.as_deref(), Some(document.path.as_str()));
+
+    let on_disk = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        on_disk.contains("The rewritten sentence."),
+        "accepted edit not on disk: {on_disk:?}"
+    );
     let _ = std::fs::remove_file(&path);
 }
