@@ -1472,7 +1472,7 @@ func TestPutSessionContextPersistsAndReadsBack(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	body := `{"pinned":[{"path":"/v/a.md","chunkKey":"/v/a.md#0"}],"excluded":[{"path":"/v/b.md"}],"autoRag":false,"retrievalQuery":"rq"}`
+	body := `{"pinned":[{"path":"/v/a.md","chunkKey":"/v/a.md#0"}],"excluded":[{"path":"/v/b.md"}],"autoRag":false,"retrievalQuery":"rq","decision":"on"}`
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPut, "/sessions/s1/context", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
@@ -1494,12 +1494,18 @@ func TestPutSessionContextPersistsAndReadsBack(t *testing.T) {
 	if v, ok := cp.AutoRag.Get(); !ok || v {
 		t.Fatalf("read-back autoRag = %v, want false", cp.AutoRag)
 	}
+	if v, ok := cp.Decision.Get(); !ok || v != genapi.ContextPolicyDecisionOn {
+		t.Fatalf("read-back decision = %v, want on", cp.Decision)
+	}
 	raw, err := ps.ContextPolicy("s1")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(string(raw), `"autoRag":false`) || !strings.Contains(string(raw), `"chunkKey":"/v/a.md#0"`) {
 		t.Fatalf("persisted policy = %s", raw)
+	}
+	if !strings.Contains(string(raw), `"decision":"on"`) {
+		t.Fatalf("persisted policy lost decision: %s", raw)
 	}
 }
 

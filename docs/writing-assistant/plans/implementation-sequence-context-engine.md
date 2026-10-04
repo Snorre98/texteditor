@@ -367,6 +367,14 @@ index progress arrives over `/events` with no client poll loop.
 Gate: gating reduces injected tokens without recall loss; measured defaults
 documented.
 
+**F.1 — graded enablement + bounded inputs (ADR-0054, ADR-0055).** Items 1–3
+above are the original Phase F; the follow-on work that makes the layer an
+optional, experimental dependency with an isolable gate and no silent
+truncation is [`handoff-plan-f1.md`](handoff-plan-f1.md): `decision.mode`
+(`off|planner|planner+gate`), engine-side `maxChunkTokens`/`maxPlannerTokens`
+with labeled `truncated`, the `off`/nil no-op baseline, and the cross-repo
+runner check (F.3). F.2 (the sweep) still depends on the runner.
+
 ---
 
 ## Cross-cutting rules

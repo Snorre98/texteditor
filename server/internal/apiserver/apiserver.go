@@ -1229,6 +1229,10 @@ func contextPolicyFromGen(p *genapi.ContextPolicy) *dto.ContextPolicy {
 		lvl := dto.ThinkingLevel(v)
 		out.Thinking = &lvl
 	}
+	if v, ok := p.Decision.Get(); ok {
+		d := dto.DecisionOverride(v)
+		out.Decision = &d
+	}
 	return out
 }
 

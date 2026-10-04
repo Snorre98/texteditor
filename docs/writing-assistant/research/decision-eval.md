@@ -33,11 +33,24 @@ unchanged.
 
 ## Procedure
 
+The harness is [`tools/eval-decision.sh`](../../../tools/eval-decision.sh); see
+the full-testing runbook §8 for prerequisites. It indexes the fixture, runs each
+query with the layer off (baseline) and on (gated), and prints recall / injected
+tokens / keep rate / decision tokens plus the claim verdict:
+
+```sh
+SMOKE_BASE=/an/allowed/root tools/eval-decision.sh
+SMOKE_CORPUS=~/thesis SMOKE_QUERIES=~/thesis/queries.jsonl tools/eval-decision.sh   # real corpus
+```
+
 1. Index the fixture corpus; for each golden query run a turn with the decision
    layer off (baseline) and on (gated), at a fixed `autoRagTopK`.
 2. Read the snapshot `decision.gate.chunks` and the meter `decision` component.
 3. Sweep `gateThreshold` in `{0.3, 0.4, 0.5, 0.6, 0.7}` and `breadthTopK`
-   (`few`/`many`) and record the metric table.
+   (`few`/`many`). The policy is embedded, so edit `config/pipeline.json`,
+   rebuild/restart the engine, and rerun with a label; `--record` appends a row
+   to the table below:
+   `SMOKE_LABEL="tau=0.4,breadth=few" tools/eval-decision.sh --record`
 4. Compare checkpoints (`english` vs `multilingual` vs `typed-decisions`) and,
    where available, fp32 vs ONNX int8 exports.
 5. Set the shipped defaults from the sweep; record them in `status.md`.
