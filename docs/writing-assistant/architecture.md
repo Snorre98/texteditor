@@ -355,7 +355,7 @@ flowchart TB
 | Prompt presets | modes are `name` + `systemPrompt` + `defaultModel`; one fixed pipeline (all tools, one global step cap and budget set); tabs are presentation, the wire term stays `mode` — ADR-0045 |
 | Write-through safety | approve = commit + atomic mirror; open and pre-write hash checks; typed `file-changed-externally` conflict; newest-first, base-validated candidates; guards live on the model path — ADR-0047 (amends ADR-0039) |
 | Vault locate | `/locate` command; deterministic markdown-stripped exact-then-fuzzy search over the open document then the vault index; typed `LocateResult`; anchored, guarded edit — ADR-0048 |
-| Decision layer | the Laya typed-decision engine (native `/v1/systemone`): a planner call (retrieve-or-not, thinking, breadth) before retrieval and a gate call (per-chunk keep/drop) after exclusion, as second metered model calls; one global policy; fail-open with labeled degradation — ADR-0053 (extends ADR-0044 §5, ADR-0028); no per-mode config (ADR-0045) |
+| Decision layer | the Laya typed-decision engine (native `/v1/systemone`): a planner call (retrieve-or-not, thinking, breadth) before retrieval and a gate call (per-chunk keep/drop) after exclusion, as second metered model calls; one global policy; fail-open with labeled degradation — ADR-0053 (extends ADR-0044 §5, ADR-0028); optional and experimental with a decoupling guarantee (ADR-0054); graded `mode` and bounded inputs (ADR-0055); no per-mode config (ADR-0045) |
 | Context inspector | persisted per-turn snapshot: assembled messages with component + provenance, retrieval/decision outcomes, budgets, labeled drops; engine data, clients render — ADR-0044, ADR-0011 |
 | Context management | workspace registry + multi-root corpus scope (roots + include/exclude, per-document status, idempotent eviction) and the per-turn context tray (pin/remove, retrieval query, auto-RAG); Workspace ≠ Corpus — the workspace root bounds browsing/editing only — ADR-0049 |
 | Reasoning policy | thinking off / auto / on (pipeline default, session + per-turn override); `auto` escalates once after a structured failure; runner thinking toggle mapped with a labeled degrade; exact thinking metering + `thinking` event; truncation labeled — ADR-0051 |
@@ -429,6 +429,8 @@ Full records in [adr/](adr/). Index:
 | 0051 | Reasoning policy and context-window budgets: thinking off/auto/on, window gate, session budget + compaction, exact thinking metering | Accepted — extends 0011/0024/0044/0045/0049; amends 0026 §5 |
 | 0052 | Engine-owned context lifecycle and liveness feed: one-verb bootstrap/resume/accept, a non-turn event feed, no client polling or sequencing | Accepted — completes 0013 §3; amends 0046 §4/§5/§8/§9; extends 0031/0040/0047/0049 |
 | 0053 | Laya decision layer: typed retrieval gating, retrieve-or-not, and thinking-level selection as second metered calls | Accepted — extends 0044 §5/0028/0049 §8/§11/0051; amends 0044 §5 (scope) and 0028 §7 (native API, no facade) |
+| 0054 | Laya decision layer as an optional, experimental dependency with a normative decoupling guarantee and measured exit criteria | Accepted — amends 0053; extends 0044 §5/§Alternatives |
+| 0055 | Graded decision enablement (`off`/`planner`/`planner+gate`) and bounded Laya inputs (`maxChunkTokens`/`maxPlannerTokens`) | Accepted — amends 0053 §4/§6; extends 0045 §7/0051 |
 
 ## 10. Quality Requirements
 
@@ -532,7 +534,7 @@ The documentation set is complete when:
 | Thinking policy | the engine's off / auto / on decision over the runner's thinking channel; `auto` escalates once after a structured failure (ADR-0051) |
 | Context-window gate | the pre-call check that the assembled payload plus the output reserve fits the model's window; overflow is a labeled drop or a typed refusal (ADR-0051) |
 | Compaction | replacing the oldest session history with one metered, labeled summary so a session can keep running (ADR-0051) |
-| Decision layer | the Laya typed-decision engine that plans retrieval (retrieve-or-not, thinking, breadth) and gates retrieved chunks as second metered calls under one global policy (ADR-0053, ADR-0044, ADR-0045) |
+| Decision layer | the Laya typed-decision engine that plans retrieval (retrieve-or-not, thinking, breadth) and gates retrieved chunks as second metered calls under one global policy; optional and experimental, fully decoupled from the engine (ADR-0053, ADR-0054, ADR-0055; ADR-0044, ADR-0045) |
 | Preset | a mode's minimal form — name + system prompt + default model; presented as TUI tabs (ADR-0045) |
 | Locate anchor | the document + block resolved from a pasted chunk by `/locate` (ADR-0048) |
 | Write-through conflict | `file-changed-externally`: the disk file changed since the engine last read it; the write is refused, never clobbered (ADR-0047) |

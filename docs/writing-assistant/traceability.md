@@ -61,6 +61,8 @@ row: ADR-0001/0016 map to it and to §2/§5.2/§8.
 | 0051 | §4, §5.2, §8 | context-budgets | interface (§2 `Runner`/`Thinking`/`reasoning`, §5 window gate, §6 measurements/compaction, §8c policy fields), failure-semantics (typed `context-window-exceeded`/`session-budget-exceeded`/`thinking-truncated`/`no-outcome` + `thinking-*` labels), data-model (`meter_measurements`, `compaction` component, pipeline fields); Phase C5 | Q1, Q6 |
 | 0052 | §3, §4, §5.2, §8 | client-swap, context-management, fleet-observability | interface (`POST /open`, `POST /documents/{id}/session`, `POST /documents/{id}/blocks/{bid}/accept`, `GET /events` + its event schema), failure-semantics (feed `backpressure` label; typed conflict on `accept`), module-boundaries (an engine-owned lifecycle/feed seam); Phase E4 | Q1, Q5 |
 | 0053 | §4, §5.2, §8 | context-inspector, context-management | interface (`GET /decision`, `DecisionPolicy`/`DecisionRecord`/`DecisionPlanner`/`DecisionGate`/`DecisionChunk`, `ContextSnapshot.decision`, `ContextPolicy.decision`, `AttributeDecision`), failure-semantics (`decision-degraded` reasons), data-model (`decision` meter component); Phase F | Q1, Q6 |
+| 0054 | §4, §5.2, §8 | context-inspector | failure-semantics (fail-open `decision-degraded`; a degraded turn is never a failed turn), interface (the optional-surface inventory: `GET /decision`, `Decision*`, `ContextSnapshot.decision`, `ContextPolicy.decision`, `decision` component), data-model (`decision` component); the experimental status + normative decoupling guarantee | Q1, Q6 |
+| 0055 | §4, §5.2, §8 | context-inspector, context-budgets | interface (`DecisionPolicy.mode` replaces `enabled`; `maxChunkTokens`/`maxPlannerTokens`; `ContextPolicy.decision` tri-state; `DecisionPlanner.truncated`/`DecisionChunk.truncated`), data-model (pipeline `decision` fields) | Q1 |
 
 ## Behavior contract ↔ quality scenario coverage
 
@@ -195,6 +197,15 @@ row: ADR-0001/0016 map to it and to §2/§5.2/§8.
   second-metered-call pattern, ADR-0049 §8/§11 (the override seam; pins bypass
   the gate), and ADR-0051 (thinking precedence) are *extended*; ADR-0045's one
   global policy and ADR-0003's no-CGO tenet are preserved.
+- ADR-0053 → *amended* by ADR-0054 and ADR-0055: ADR-0054 records the layer as an
+  optional, experimental dependency — the gate's out-of-distribution limits,
+  the normative decoupling guarantee, and measured exit criteria — without
+  changing the mechanism; ADR-0055 replaces the single `enabled` boolean with a
+  three-value `mode` (`off`/`planner`/`planner+gate`) and bounds the planner/gate
+  inputs (`maxChunkTokens`/`maxPlannerTokens`, labeled truncation), so the gate
+  experiment is isolated and Q1's no-silent-truncation rule holds on the decision
+  path. ADR-0045 §7's one global policy and ADR-0049 §11's human overrides are
+  preserved.
 
 Superseded ADRs remain in the log, untouched; supersession is recorded in the
 superseding ADR's header and in the §9 index.
