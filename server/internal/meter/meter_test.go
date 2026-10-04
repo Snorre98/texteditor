@@ -170,3 +170,64 @@ func TestSessionExceeded(t *testing.T) {
 		t.Fatal("nil budget must never exceed")
 	}
 }
+
+func TestSessionBreakdown(t *testing.T) {
+	m, _, _ := newTestMeter(t)
+	// Two turns in s1 with distinct components, plus a row in s2 to prove scoping.
+	if _, err := m.Attribute(context.Background(), "t1", "s1", "m",
+		dto.Breakdown{SystemPrompt: 10, User: 10},
+		dto.ProviderCounts{InputTokens: 20, OutputTokens: 50}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Attribute(context.Background(), "t2", "s1", "m",
+		dto.Breakdown{SystemPrompt: 10, History: 10, User: 10, Thinking: 4},
+		dto.ProviderCounts{InputTokens: 30, OutputTokens: 20, ThinkingTokens: 4}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Attribute(context.Background(), "t3", "s2", "m",
+		dto.Breakdown{User: 5}, dto.ProviderCounts{InputTokens: 5, OutputTokens: 5}); err != nil {
+		t.Fatal(err)
+	}
+
+	sb, err := m.SessionBreakdown(context.Background(), "s1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sb.SessionID != "s1" {
+		t.Fatalf("sessionID = %q", sb.SessionID)
+	}
+	got := map[string]dto.SessionMeterComponent{}
+	total := 0
+	for _, c := range sb.Components {
+		got[c.Component] = c
+		total += c.PromptTokens + c.CompletionTokens
+	}
+	if total != sb.Total {
+		t.Fatalf("component sum %d != reported total %d", total, sb.Total)
+	}
+	// s1: turn1 (system 10 + user 10 + completion 50) + turn2 (system 10 +
+	// history 10 + user 10 + completion 16 + thinking 4) = 120.
+	if sb.Total != 120 {
+		t.Fatalf("s1 total = %d, want 120 (%+v)", sb.Total, sb.Components)
+	}
+	if got["completion"].CompletionTokens != 66 { // 50 + 16
+		t.Fatalf("completion = %+v, want 66", got["completion"])
+	}
+	if got["thinking"].CompletionTokens != 4 || got["thinking"].Approx {
+		t.Fatalf("thinking = %+v, want exact 4 (not approx)", got["thinking"])
+	}
+	// The thinking component is a completion-side row; promptTokens is 0.
+	if got["thinking"].PromptTokens != 0 {
+		t.Fatalf("thinking prompt = %d, want 0", got["thinking"].PromptTokens)
+	}
+
+	// An unknown session is an empty, zero meter (the route maps routing absence
+	// to 404, not this aggregate).
+	empty, err := m.SessionBreakdown(context.Background(), "nope")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if empty.Total != 0 || len(empty.Components) != 0 {
+		t.Fatalf("unknown session meter = %+v, want zero", empty)
+	}
+}

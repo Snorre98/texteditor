@@ -87,6 +87,24 @@ type Handler interface {
 	//
 	// GET /sessions/{id}/messages
 	GetSessionMessages(ctx context.Context, params GetSessionMessagesParams) ([]Message, error)
+	// GetSessionMeter implements getSessionMeter operation.
+	//
+	// Aggregates the workspace shard's meter_events for a session by component (system, tools, rag,
+	// history, mentions, user, thinking, completion) and returns the cumulative total. The session id is
+	// resolved to its workspace shard through the registry's session routing index; an unknown session is
+	// a typed 404.
+	//
+	// GET /sessions/{id}/meter
+	GetSessionMeter(ctx context.Context, params GetSessionMeterParams) (GetSessionMeterRes, error)
+	// GetTurnContext implements getTurnContext operation.
+	//
+	// Returns the context snapshot the engine persisted for a turn: every assembled message with its
+	// component and provenance, the retrieved chunks, the labeled drops, and the budget accounting. The
+	// snapshot is engine data; clients render it and never reconstruct it. The turn id is resolved to its
+	// workspace shard through the registry's turn routing index; an unknown turn is a typed 404.
+	//
+	// GET /turns/{id}/context
+	GetTurnContext(ctx context.Context, params GetTurnContextParams) (GetTurnContextRes, error)
 	// GetWorkspace implements getWorkspace operation.
 	//
 	// Read one workspace record.

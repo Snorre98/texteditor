@@ -51,7 +51,7 @@ row: ADR-0001/0016 map to it and to §2/§5.2/§8.
 | 0041 | §3, §7 | chat-window, sessions | — | — |
 | 0042 | §3 | chat-window | — | — |
 | 0043 | §7 | — | — | — |
-| 0044 | §1, §4, §5.2, §7, §8, §10 | context-inspector | interface, data-model, failure-semantics | Q1, Q6 |
+| 0044 | §1, §4, §5.2, §7, §8, §10 | context-inspector | interface, data-model, failure-semantics, module-boundaries | Q1, Q6 |
 | 0045 | §4, §5.2, §8 | provider-hotswap, token-metering | data-model | Q2 |
 | 0046 | §3, §7 | client-swap | module-boundaries | — |
 | 0047 | §5.2, §6, §8 | versioning | interface, data-model, failure-semantics | Q4 |

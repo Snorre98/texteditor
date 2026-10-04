@@ -513,8 +513,8 @@ paths:
             SSE event stream. Each message is `event: <type>` followed by
             `data: <payload>` where <type> is one of the Event.type enum values
             and <payload> is the matching component schema (TokenEvent,
-            MeterEvent, CandidateEvent, DiffEvent, RagEvent, DoneEvent,
-            ErrorEvent, BackpressureEvent). One turn per connection: the server
+            MeterEvent, CandidateEvent, DiffEvent, RagEvent, ContextEvent,
+            DoneEvent, ErrorEvent, BackpressureEvent). One turn per connection: the server
             demultiplexes a turn's events to exactly one client stream, so
             payloads do not repeat the turnId. (ADR-0017 §6, amended.)
           content:
@@ -586,6 +586,67 @@ paths:
                 type: array
                 items:
                   $ref: '#/components/schemas/Message'
+
+  /turns/{id}/context:
+    get:
+      operationId: getTurnContext
+      summary: Read a completed turn's persisted context snapshot (ADR-0044 §4)
+      description: >
+        Returns the context snapshot the engine persisted for a turn: every
+        assembled message with its component and provenance, the retrieved
+        chunks, the labeled drops, and the budget accounting. The snapshot is
+        engine data; clients render it and never reconstruct it. The turn id is
+        resolved to its workspace shard through the registry's turn routing
+        index; an unknown turn is a typed 404.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: the turn's context snapshot
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ContextSnapshot'
+        '404':
+          description: no snapshot exists for the turn id
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotFound'
+
+  /sessions/{id}/meter:
+    get:
+      operationId: getSessionMeter
+      summary: Read a session's cumulative per-component token meter (ADR-0026, ADR-0044)
+      description: >
+        Aggregates the workspace shard's meter_events for a session by
+        component (system, tools, rag, history, mentions, user, thinking,
+        completion) and returns the cumulative total. The session id is
+        resolved to its workspace shard through the registry's session routing
+        index; an unknown session is a typed 404.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: the session's cumulative meter
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionMeter'
+        '404':
+          description: no session exists with the id
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotFound'
 
 components:
   parameters:
@@ -1201,6 +1262,53 @@ components:
         modeType:
           type: string
 
+    SessionMeter:
+      type: object
+      description: >
+        A session's cumulative token meter, aggregated from the workspace
+        shard's meter_events by component (ADR-0026 §5, ADR-0044 §4). Newest
+        session state is workspace-scoped; there is no global meter total
+        (ADR-0049 §5).
+      required: [sessionId, components, total]
+      properties:
+        sessionId:
+          type: string
+        components:
+          type: array
+          items:
+            type: object
+            required: [component, promptTokens, completionTokens]
+            properties:
+              component:
+                type: string
+                enum: [system, tools, rag, history, mentions, user, thinking, completion]
+              promptTokens:
+                type: integer
+              completionTokens:
+                type: integer
+              approx:
+                type: boolean
+                description: True when the component is a labeled approximation (thinking, ADR-0024).
+        total:
+          type: integer
+          description: Cumulative prompt + completion tokens across all components.
+
+    NotFound:
+      type: object
+      description: >
+        A typed not-found refusal for a routing lookup that resolved to no
+        record (an unknown turn or session id). The engine never invents data.
+      required: [error, resource, id]
+      properties:
+        error:
+          type: string
+          enum: [not-found]
+        resource:
+          type: string
+          enum: [turn, session]
+        id:
+          type: string
+
     # SSE event vocabulary (ADR-0017 §6, amended Track 1 TUI session). The
     # hand-framed server writes `event: <type>` + `data: <payload>`; the client
     # codegens (Hey API + Zod, openapi-to-rust) consume the payload schemas
@@ -1217,7 +1325,7 @@ components:
       properties:
         type:
           type: string
-          enum: [token, meter, candidate, diff, rag, done, error, backpressure]
+          enum: [token, meter, candidate, diff, rag, context, done, error, backpressure]
 
     TokenEvent:
       type: object
@@ -1344,6 +1452,133 @@ components:
           type: string
         hash:
           type: string
+
+    ContextSnapshot:
+      type: object
+      description: >
+        The engine-owned, persisted record of one turn's assembled context
+        (ADR-0044 §4, ADR-0049 §7): every assembled message with its component
+        and provenance, the retrieved chunks, the labeled drops, and the budget
+        accounting. The snapshot itself is the contract — clients render it and
+        never reconstruct provenance, budgets, or drops. The optional
+        `decision` (Phase F) and `locate` (Phase D) records are reserved and
+        not implemented in Phase C3.
+      required: [turnId, sessionId, workspaceId, retrievalQuery, autoRag, messages, chunks, drops, budget, createdAt]
+      properties:
+        turnId:
+          type: string
+        sessionId:
+          type: string
+        workspaceId:
+          type: string
+        retrievalQuery:
+          type: string
+          description: The query auto-RAG ran (the turn's user input).
+        autoRag:
+          type: boolean
+        messages:
+          type: array
+          items:
+            $ref: '#/components/schemas/ContextMessage'
+        chunks:
+          type: array
+          items:
+            $ref: '#/components/schemas/ContextChunk'
+        drops:
+          type: array
+          items:
+            $ref: '#/components/schemas/ContextDrop'
+        budget:
+          type: array
+          items:
+            $ref: '#/components/schemas/BudgetUsage'
+        decision:
+          type: object
+          description: Reserved for Phase F decision records; not implemented in Phase C3.
+        locate:
+          type: object
+          description: Reserved for Phase D locate outcomes; not implemented in Phase C3.
+        createdAt:
+          type: integer
+          format: int64
+
+    ContextMessage:
+      type: object
+      description: >
+        One assembled message's component and provenance. `tool`/`thinking` are
+        components but not messages, so they appear in the budget accounting.
+      required: [role, component, tokens, pinned]
+      properties:
+        role:
+          type: string
+          enum: [system, user, assistant, tool]
+        component:
+          type: string
+          enum: [system, history, rag, mention, user]
+        source:
+          type: string
+        tokens:
+          type: integer
+        pinned:
+          type: boolean
+          description: True for a human-pinned item (Phase C4); false in Phase C3.
+
+    ContextChunk:
+      type: object
+      description: >
+        One retrieved chunk recorded in the snapshot; the same shape as a
+        RagEvent chunk, with provenance (ADR-0044 §3).
+      required: [blockId, text]
+      properties:
+        blockId:
+          type: string
+        chunkKey:
+          type: string
+        text:
+          type: string
+        score:
+          type: number
+        source:
+          type: string
+        path:
+          type: string
+        heading:
+          type: string
+
+    ContextDrop:
+      type: object
+      description: >
+        One labeled truncation/drop record. Truncation is never silent
+        (ADR-0044 §3, failure-semantics §4).
+      required: [component, reason, count]
+      properties:
+        component:
+          type: string
+          enum: [history, rag, mention]
+        reason:
+          type: string
+        count:
+          type: integer
+        detail:
+          type: string
+
+    BudgetUsage:
+      type: object
+      description: Per-component budget utilization (used vs the PipelinePolicy limit).
+      required: [component, used]
+      properties:
+        component:
+          type: string
+          enum: [system, tools, rag, history, mentions, user, thinking]
+        used:
+          type: integer
+        limit:
+          type: integer
+          description: The PipelinePolicy limit for this component; 0/absent when none applies.
+
+    ContextEvent:
+      allOf:
+        - $ref: '#/components/schemas/ContextSnapshot'
 
     DoneEvent:
       type: object

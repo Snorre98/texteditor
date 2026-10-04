@@ -1,5 +1,7 @@
 package dto
 
+import "encoding/json"
+
 // Message is one conversation entry (role ∈ user | assistant | tool)
 // (interface.md §0b).
 type Message struct {
@@ -83,4 +85,52 @@ type ChunkRef struct {
 	Path     string `json:"path"`
 	ChunkKey string `json:"chunkKey"`
 	Hash     string `json:"hash,omitempty"`
+}
+
+// ContextMessage is one assembled message's component and provenance in a
+// context snapshot (interface.md §5, ADR-0044 §4). It is the wire form of
+// MessageProvenance; the snapshot is engine-owned data clients render verbatim.
+type ContextMessage struct {
+	Role      string `json:"role"`      // system | user | assistant | tool
+	Component string `json:"component"` // system | history | rag | mention | user
+	Source    string `json:"source,omitempty"`
+	Tokens    int    `json:"tokens"`
+	Pinned    bool   `json:"pinned"` // human override (Phase C4; false in C3)
+}
+
+// ContextDrop is one labeled truncation/drop record (interface.md §5,
+// ADR-0044 §3). Truncation is never silent.
+type ContextDrop struct {
+	Component string `json:"component"` // history | rag | mention
+	Reason    string `json:"reason"`
+	Count     int    `json:"count"`
+	Detail    string `json:"detail,omitempty"`
+}
+
+// BudgetUsage is one component's budget utilization (interface.md §5,
+// ADR-0044 §4): the deterministic estimate used vs the PipelinePolicy limit.
+type BudgetUsage struct {
+	Component string `json:"component"` // system|tools|rag|history|mentions|user|thinking
+	Used      int    `json:"used"`
+	Limit     int    `json:"limit,omitempty"` // 0/absent when no policy limit applies
+}
+
+// ContextSnapshot is the engine-owned, persisted record of one turn's assembled
+// context (interface.md §5/§7, ADR-0044 §4, ADR-0049 §7). The snapshot itself
+// is the contract: clients render it and never reconstruct provenance, budgets,
+// or drops. Decision (Phase F) and Locate (Phase D) are reserved optional
+// records, unimplemented in C3.
+type ContextSnapshot struct {
+	TurnID         string           `json:"turnId"`
+	SessionID      string           `json:"sessionId"`
+	WorkspaceID    string           `json:"workspaceId"`
+	RetrievalQuery string           `json:"retrievalQuery"`
+	AutoRag        bool             `json:"autoRag"`
+	Messages       []ContextMessage `json:"messages"`
+	Chunks         []Chunk          `json:"chunks"`
+	Drops          []ContextDrop    `json:"drops"`
+	Budget         []BudgetUsage    `json:"budget"`
+	Decision       json.RawMessage  `json:"decision,omitempty"`
+	Locate         json.RawMessage  `json:"locate,omitempty"`
+	CreatedAt      int64            `json:"createdAt"`
 }

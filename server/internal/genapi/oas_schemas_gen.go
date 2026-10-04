@@ -304,6 +304,121 @@ func (s *BlockWriteKind) UnmarshalText(data []byte) error {
 	}
 }
 
+// Per-component budget utilization (used vs the PipelinePolicy limit).
+// Ref: #/components/schemas/BudgetUsage
+type BudgetUsage struct {
+	Component BudgetUsageComponent `json:"component"`
+	Used      int                  `json:"used"`
+	// The PipelinePolicy limit for this component; 0/absent when none applies.
+	Limit OptInt `json:"limit"`
+}
+
+// GetComponent returns the value of Component.
+func (s *BudgetUsage) GetComponent() BudgetUsageComponent {
+	return s.Component
+}
+
+// GetUsed returns the value of Used.
+func (s *BudgetUsage) GetUsed() int {
+	return s.Used
+}
+
+// GetLimit returns the value of Limit.
+func (s *BudgetUsage) GetLimit() OptInt {
+	return s.Limit
+}
+
+// SetComponent sets the value of Component.
+func (s *BudgetUsage) SetComponent(val BudgetUsageComponent) {
+	s.Component = val
+}
+
+// SetUsed sets the value of Used.
+func (s *BudgetUsage) SetUsed(val int) {
+	s.Used = val
+}
+
+// SetLimit sets the value of Limit.
+func (s *BudgetUsage) SetLimit(val OptInt) {
+	s.Limit = val
+}
+
+type BudgetUsageComponent string
+
+const (
+	BudgetUsageComponentSystem   BudgetUsageComponent = "system"
+	BudgetUsageComponentTools    BudgetUsageComponent = "tools"
+	BudgetUsageComponentRag      BudgetUsageComponent = "rag"
+	BudgetUsageComponentHistory  BudgetUsageComponent = "history"
+	BudgetUsageComponentMentions BudgetUsageComponent = "mentions"
+	BudgetUsageComponentUser     BudgetUsageComponent = "user"
+	BudgetUsageComponentThinking BudgetUsageComponent = "thinking"
+)
+
+// AllValues returns all BudgetUsageComponent values.
+func (BudgetUsageComponent) AllValues() []BudgetUsageComponent {
+	return []BudgetUsageComponent{
+		BudgetUsageComponentSystem,
+		BudgetUsageComponentTools,
+		BudgetUsageComponentRag,
+		BudgetUsageComponentHistory,
+		BudgetUsageComponentMentions,
+		BudgetUsageComponentUser,
+		BudgetUsageComponentThinking,
+	}
+}
+
+// MarshalText implements encoding.TextMarshaler.
+func (s BudgetUsageComponent) MarshalText() ([]byte, error) {
+	switch s {
+	case BudgetUsageComponentSystem:
+		return []byte(s), nil
+	case BudgetUsageComponentTools:
+		return []byte(s), nil
+	case BudgetUsageComponentRag:
+		return []byte(s), nil
+	case BudgetUsageComponentHistory:
+		return []byte(s), nil
+	case BudgetUsageComponentMentions:
+		return []byte(s), nil
+	case BudgetUsageComponentUser:
+		return []byte(s), nil
+	case BudgetUsageComponentThinking:
+		return []byte(s), nil
+	default:
+		return nil, errors.Errorf("invalid value: %q", s)
+	}
+}
+
+// UnmarshalText implements encoding.TextUnmarshaler.
+func (s *BudgetUsageComponent) UnmarshalText(data []byte) error {
+	switch BudgetUsageComponent(data) {
+	case BudgetUsageComponentSystem:
+		*s = BudgetUsageComponentSystem
+		return nil
+	case BudgetUsageComponentTools:
+		*s = BudgetUsageComponentTools
+		return nil
+	case BudgetUsageComponentRag:
+		*s = BudgetUsageComponentRag
+		return nil
+	case BudgetUsageComponentHistory:
+		*s = BudgetUsageComponentHistory
+		return nil
+	case BudgetUsageComponentMentions:
+		*s = BudgetUsageComponentMentions
+		return nil
+	case BudgetUsageComponentUser:
+		*s = BudgetUsageComponentUser
+		return nil
+	case BudgetUsageComponentThinking:
+		*s = BudgetUsageComponentThinking
+		return nil
+	default:
+		return errors.Errorf("invalid value: %q", data)
+	}
+}
+
 // Ref: #/components/schemas/Candidate
 type Candidate struct {
 	BlockId OptString `json:"blockId"`
@@ -395,6 +510,518 @@ func (s *CommitRequest) GetOverwrite() OptBool {
 func (s *CommitRequest) SetOverwrite(val OptBool) {
 	s.Overwrite = val
 }
+
+// One retrieved chunk recorded in the snapshot; the same shape as a RagEvent chunk, with provenance
+// (ADR-0044 §3).
+// Ref: #/components/schemas/ContextChunk
+type ContextChunk struct {
+	BlockId  string     `json:"blockId"`
+	ChunkKey OptString  `json:"chunkKey"`
+	Text     string     `json:"text"`
+	Score    OptFloat64 `json:"score"`
+	Source   OptString  `json:"source"`
+	Path     OptString  `json:"path"`
+	Heading  OptString  `json:"heading"`
+}
+
+// GetBlockId returns the value of BlockId.
+func (s *ContextChunk) GetBlockId() string {
+	return s.BlockId
+}
+
+// GetChunkKey returns the value of ChunkKey.
+func (s *ContextChunk) GetChunkKey() OptString {
+	return s.ChunkKey
+}
+
+// GetText returns the value of Text.
+func (s *ContextChunk) GetText() string {
+	return s.Text
+}
+
+// GetScore returns the value of Score.
+func (s *ContextChunk) GetScore() OptFloat64 {
+	return s.Score
+}
+
+// GetSource returns the value of Source.
+func (s *ContextChunk) GetSource() OptString {
+	return s.Source
+}
+
+// GetPath returns the value of Path.
+func (s *ContextChunk) GetPath() OptString {
+	return s.Path
+}
+
+// GetHeading returns the value of Heading.
+func (s *ContextChunk) GetHeading() OptString {
+	return s.Heading
+}
+
+// SetBlockId sets the value of BlockId.
+func (s *ContextChunk) SetBlockId(val string) {
+	s.BlockId = val
+}
+
+// SetChunkKey sets the value of ChunkKey.
+func (s *ContextChunk) SetChunkKey(val OptString) {
+	s.ChunkKey = val
+}
+
+// SetText sets the value of Text.
+func (s *ContextChunk) SetText(val string) {
+	s.Text = val
+}
+
+// SetScore sets the value of Score.
+func (s *ContextChunk) SetScore(val OptFloat64) {
+	s.Score = val
+}
+
+// SetSource sets the value of Source.
+func (s *ContextChunk) SetSource(val OptString) {
+	s.Source = val
+}
+
+// SetPath sets the value of Path.
+func (s *ContextChunk) SetPath(val OptString) {
+	s.Path = val
+}
+
+// SetHeading sets the value of Heading.
+func (s *ContextChunk) SetHeading(val OptString) {
+	s.Heading = val
+}
+
+// One labeled truncation/drop record. Truncation is never silent (ADR-0044 §3, failure-semantics
+// §4).
+// Ref: #/components/schemas/ContextDrop
+type ContextDrop struct {
+	Component ContextDropComponent `json:"component"`
+	Reason    string               `json:"reason"`
+	Count     int                  `json:"count"`
+	Detail    OptString            `json:"detail"`
+}
+
+// GetComponent returns the value of Component.
+func (s *ContextDrop) GetComponent() ContextDropComponent {
+	return s.Component
+}
+
+// GetReason returns the value of Reason.
+func (s *ContextDrop) GetReason() string {
+	return s.Reason
+}
+
+// GetCount returns the value of Count.
+func (s *ContextDrop) GetCount() int {
+	return s.Count
+}
+
+// GetDetail returns the value of Detail.
+func (s *ContextDrop) GetDetail() OptString {
+	return s.Detail
+}
+
+// SetComponent sets the value of Component.
+func (s *ContextDrop) SetComponent(val ContextDropComponent) {
+	s.Component = val
+}
+
+// SetReason sets the value of Reason.
+func (s *ContextDrop) SetReason(val string) {
+	s.Reason = val
+}
+
+// SetCount sets the value of Count.
+func (s *ContextDrop) SetCount(val int) {
+	s.Count = val
+}
+
+// SetDetail sets the value of Detail.
+func (s *ContextDrop) SetDetail(val OptString) {
+	s.Detail = val
+}
+
+type ContextDropComponent string
+
+const (
+	ContextDropComponentHistory ContextDropComponent = "history"
+	ContextDropComponentRag     ContextDropComponent = "rag"
+	ContextDropComponentMention ContextDropComponent = "mention"
+)
+
+// AllValues returns all ContextDropComponent values.
+func (ContextDropComponent) AllValues() []ContextDropComponent {
+	return []ContextDropComponent{
+		ContextDropComponentHistory,
+		ContextDropComponentRag,
+		ContextDropComponentMention,
+	}
+}
+
+// MarshalText implements encoding.TextMarshaler.
+func (s ContextDropComponent) MarshalText() ([]byte, error) {
+	switch s {
+	case ContextDropComponentHistory:
+		return []byte(s), nil
+	case ContextDropComponentRag:
+		return []byte(s), nil
+	case ContextDropComponentMention:
+		return []byte(s), nil
+	default:
+		return nil, errors.Errorf("invalid value: %q", s)
+	}
+}
+
+// UnmarshalText implements encoding.TextUnmarshaler.
+func (s *ContextDropComponent) UnmarshalText(data []byte) error {
+	switch ContextDropComponent(data) {
+	case ContextDropComponentHistory:
+		*s = ContextDropComponentHistory
+		return nil
+	case ContextDropComponentRag:
+		*s = ContextDropComponentRag
+		return nil
+	case ContextDropComponentMention:
+		*s = ContextDropComponentMention
+		return nil
+	default:
+		return errors.Errorf("invalid value: %q", data)
+	}
+}
+
+// One assembled message's component and provenance. `tool`/`thinking` are components but not messages,
+// so they appear in the budget accounting.
+// Ref: #/components/schemas/ContextMessage
+type ContextMessage struct {
+	Role      ContextMessageRole      `json:"role"`
+	Component ContextMessageComponent `json:"component"`
+	Source    OptString               `json:"source"`
+	Tokens    int                     `json:"tokens"`
+	// True for a human-pinned item (Phase C4); false in Phase C3.
+	Pinned bool `json:"pinned"`
+}
+
+// GetRole returns the value of Role.
+func (s *ContextMessage) GetRole() ContextMessageRole {
+	return s.Role
+}
+
+// GetComponent returns the value of Component.
+func (s *ContextMessage) GetComponent() ContextMessageComponent {
+	return s.Component
+}
+
+// GetSource returns the value of Source.
+func (s *ContextMessage) GetSource() OptString {
+	return s.Source
+}
+
+// GetTokens returns the value of Tokens.
+func (s *ContextMessage) GetTokens() int {
+	return s.Tokens
+}
+
+// GetPinned returns the value of Pinned.
+func (s *ContextMessage) GetPinned() bool {
+	return s.Pinned
+}
+
+// SetRole sets the value of Role.
+func (s *ContextMessage) SetRole(val ContextMessageRole) {
+	s.Role = val
+}
+
+// SetComponent sets the value of Component.
+func (s *ContextMessage) SetComponent(val ContextMessageComponent) {
+	s.Component = val
+}
+
+// SetSource sets the value of Source.
+func (s *ContextMessage) SetSource(val OptString) {
+	s.Source = val
+}
+
+// SetTokens sets the value of Tokens.
+func (s *ContextMessage) SetTokens(val int) {
+	s.Tokens = val
+}
+
+// SetPinned sets the value of Pinned.
+func (s *ContextMessage) SetPinned(val bool) {
+	s.Pinned = val
+}
+
+type ContextMessageComponent string
+
+const (
+	ContextMessageComponentSystem  ContextMessageComponent = "system"
+	ContextMessageComponentHistory ContextMessageComponent = "history"
+	ContextMessageComponentRag     ContextMessageComponent = "rag"
+	ContextMessageComponentMention ContextMessageComponent = "mention"
+	ContextMessageComponentUser    ContextMessageComponent = "user"
+)
+
+// AllValues returns all ContextMessageComponent values.
+func (ContextMessageComponent) AllValues() []ContextMessageComponent {
+	return []ContextMessageComponent{
+		ContextMessageComponentSystem,
+		ContextMessageComponentHistory,
+		ContextMessageComponentRag,
+		ContextMessageComponentMention,
+		ContextMessageComponentUser,
+	}
+}
+
+// MarshalText implements encoding.TextMarshaler.
+func (s ContextMessageComponent) MarshalText() ([]byte, error) {
+	switch s {
+	case ContextMessageComponentSystem:
+		return []byte(s), nil
+	case ContextMessageComponentHistory:
+		return []byte(s), nil
+	case ContextMessageComponentRag:
+		return []byte(s), nil
+	case ContextMessageComponentMention:
+		return []byte(s), nil
+	case ContextMessageComponentUser:
+		return []byte(s), nil
+	default:
+		return nil, errors.Errorf("invalid value: %q", s)
+	}
+}
+
+// UnmarshalText implements encoding.TextUnmarshaler.
+func (s *ContextMessageComponent) UnmarshalText(data []byte) error {
+	switch ContextMessageComponent(data) {
+	case ContextMessageComponentSystem:
+		*s = ContextMessageComponentSystem
+		return nil
+	case ContextMessageComponentHistory:
+		*s = ContextMessageComponentHistory
+		return nil
+	case ContextMessageComponentRag:
+		*s = ContextMessageComponentRag
+		return nil
+	case ContextMessageComponentMention:
+		*s = ContextMessageComponentMention
+		return nil
+	case ContextMessageComponentUser:
+		*s = ContextMessageComponentUser
+		return nil
+	default:
+		return errors.Errorf("invalid value: %q", data)
+	}
+}
+
+type ContextMessageRole string
+
+const (
+	ContextMessageRoleSystem    ContextMessageRole = "system"
+	ContextMessageRoleUser      ContextMessageRole = "user"
+	ContextMessageRoleAssistant ContextMessageRole = "assistant"
+	ContextMessageRoleTool      ContextMessageRole = "tool"
+)
+
+// AllValues returns all ContextMessageRole values.
+func (ContextMessageRole) AllValues() []ContextMessageRole {
+	return []ContextMessageRole{
+		ContextMessageRoleSystem,
+		ContextMessageRoleUser,
+		ContextMessageRoleAssistant,
+		ContextMessageRoleTool,
+	}
+}
+
+// MarshalText implements encoding.TextMarshaler.
+func (s ContextMessageRole) MarshalText() ([]byte, error) {
+	switch s {
+	case ContextMessageRoleSystem:
+		return []byte(s), nil
+	case ContextMessageRoleUser:
+		return []byte(s), nil
+	case ContextMessageRoleAssistant:
+		return []byte(s), nil
+	case ContextMessageRoleTool:
+		return []byte(s), nil
+	default:
+		return nil, errors.Errorf("invalid value: %q", s)
+	}
+}
+
+// UnmarshalText implements encoding.TextUnmarshaler.
+func (s *ContextMessageRole) UnmarshalText(data []byte) error {
+	switch ContextMessageRole(data) {
+	case ContextMessageRoleSystem:
+		*s = ContextMessageRoleSystem
+		return nil
+	case ContextMessageRoleUser:
+		*s = ContextMessageRoleUser
+		return nil
+	case ContextMessageRoleAssistant:
+		*s = ContextMessageRoleAssistant
+		return nil
+	case ContextMessageRoleTool:
+		*s = ContextMessageRoleTool
+		return nil
+	default:
+		return errors.Errorf("invalid value: %q", data)
+	}
+}
+
+// The engine-owned, persisted record of one turn's assembled context (ADR-0044 §4, ADR-0049 §7):
+// every assembled message with its component and provenance, the retrieved chunks, the labeled drops,
+// and the budget accounting. The snapshot itself is the contract — clients render it and never
+// reconstruct provenance, budgets, or drops. The optional `decision` (Phase F) and `locate` (Phase D)
+// records are reserved and not implemented in Phase C3.
+// Ref: #/components/schemas/ContextSnapshot
+type ContextSnapshot struct {
+	TurnId      string `json:"turnId"`
+	SessionId   string `json:"sessionId"`
+	WorkspaceId string `json:"workspaceId"`
+	// The query auto-RAG ran (the turn's user input).
+	RetrievalQuery string           `json:"retrievalQuery"`
+	AutoRag        bool             `json:"autoRag"`
+	Messages       []ContextMessage `json:"messages"`
+	Chunks         []ContextChunk   `json:"chunks"`
+	Drops          []ContextDrop    `json:"drops"`
+	Budget         []BudgetUsage    `json:"budget"`
+	// Reserved for Phase F decision records; not implemented in Phase C3.
+	Decision *ContextSnapshotDecision `json:"decision"`
+	// Reserved for Phase D locate outcomes; not implemented in Phase C3.
+	Locate    *ContextSnapshotLocate `json:"locate"`
+	CreatedAt int64                  `json:"createdAt"`
+}
+
+// GetTurnId returns the value of TurnId.
+func (s *ContextSnapshot) GetTurnId() string {
+	return s.TurnId
+}
+
+// GetSessionId returns the value of SessionId.
+func (s *ContextSnapshot) GetSessionId() string {
+	return s.SessionId
+}
+
+// GetWorkspaceId returns the value of WorkspaceId.
+func (s *ContextSnapshot) GetWorkspaceId() string {
+	return s.WorkspaceId
+}
+
+// GetRetrievalQuery returns the value of RetrievalQuery.
+func (s *ContextSnapshot) GetRetrievalQuery() string {
+	return s.RetrievalQuery
+}
+
+// GetAutoRag returns the value of AutoRag.
+func (s *ContextSnapshot) GetAutoRag() bool {
+	return s.AutoRag
+}
+
+// GetMessages returns the value of Messages.
+func (s *ContextSnapshot) GetMessages() []ContextMessage {
+	return s.Messages
+}
+
+// GetChunks returns the value of Chunks.
+func (s *ContextSnapshot) GetChunks() []ContextChunk {
+	return s.Chunks
+}
+
+// GetDrops returns the value of Drops.
+func (s *ContextSnapshot) GetDrops() []ContextDrop {
+	return s.Drops
+}
+
+// GetBudget returns the value of Budget.
+func (s *ContextSnapshot) GetBudget() []BudgetUsage {
+	return s.Budget
+}
+
+// GetDecision returns the value of Decision.
+func (s *ContextSnapshot) GetDecision() *ContextSnapshotDecision {
+	return s.Decision
+}
+
+// GetLocate returns the value of Locate.
+func (s *ContextSnapshot) GetLocate() *ContextSnapshotLocate {
+	return s.Locate
+}
+
+// GetCreatedAt returns the value of CreatedAt.
+func (s *ContextSnapshot) GetCreatedAt() int64 {
+	return s.CreatedAt
+}
+
+// SetTurnId sets the value of TurnId.
+func (s *ContextSnapshot) SetTurnId(val string) {
+	s.TurnId = val
+}
+
+// SetSessionId sets the value of SessionId.
+func (s *ContextSnapshot) SetSessionId(val string) {
+	s.SessionId = val
+}
+
+// SetWorkspaceId sets the value of WorkspaceId.
+func (s *ContextSnapshot) SetWorkspaceId(val string) {
+	s.WorkspaceId = val
+}
+
+// SetRetrievalQuery sets the value of RetrievalQuery.
+func (s *ContextSnapshot) SetRetrievalQuery(val string) {
+	s.RetrievalQuery = val
+}
+
+// SetAutoRag sets the value of AutoRag.
+func (s *ContextSnapshot) SetAutoRag(val bool) {
+	s.AutoRag = val
+}
+
+// SetMessages sets the value of Messages.
+func (s *ContextSnapshot) SetMessages(val []ContextMessage) {
+	s.Messages = val
+}
+
+// SetChunks sets the value of Chunks.
+func (s *ContextSnapshot) SetChunks(val []ContextChunk) {
+	s.Chunks = val
+}
+
+// SetDrops sets the value of Drops.
+func (s *ContextSnapshot) SetDrops(val []ContextDrop) {
+	s.Drops = val
+}
+
+// SetBudget sets the value of Budget.
+func (s *ContextSnapshot) SetBudget(val []BudgetUsage) {
+	s.Budget = val
+}
+
+// SetDecision sets the value of Decision.
+func (s *ContextSnapshot) SetDecision(val *ContextSnapshotDecision) {
+	s.Decision = val
+}
+
+// SetLocate sets the value of Locate.
+func (s *ContextSnapshot) SetLocate(val *ContextSnapshotLocate) {
+	s.Locate = val
+}
+
+// SetCreatedAt sets the value of CreatedAt.
+func (s *ContextSnapshot) SetCreatedAt(val int64) {
+	s.CreatedAt = val
+}
+
+func (*ContextSnapshot) getTurnContextRes() {}
+
+// Reserved for Phase F decision records; not implemented in Phase C3.
+type ContextSnapshotDecision struct{}
+
+// Reserved for Phase D locate outcomes; not implemented in Phase C3.
+type ContextSnapshotLocate struct{}
 
 // One corpus file's index status. Corpus files are never documents rows and never versioned (ADR-0049
 // §4); `id` is the stable path-derived identity (sha256 prefix of the canonical path).
@@ -1050,6 +1677,7 @@ const (
 	EventTypeCandidate    EventType = "candidate"
 	EventTypeDiff         EventType = "diff"
 	EventTypeRag          EventType = "rag"
+	EventTypeContext      EventType = "context"
 	EventTypeDone         EventType = "done"
 	EventTypeError        EventType = "error"
 	EventTypeBackpressure EventType = "backpressure"
@@ -1063,6 +1691,7 @@ func (EventType) AllValues() []EventType {
 		EventTypeCandidate,
 		EventTypeDiff,
 		EventTypeRag,
+		EventTypeContext,
 		EventTypeDone,
 		EventTypeError,
 		EventTypeBackpressure,
@@ -1081,6 +1710,8 @@ func (s EventType) MarshalText() ([]byte, error) {
 	case EventTypeDiff:
 		return []byte(s), nil
 	case EventTypeRag:
+		return []byte(s), nil
+	case EventTypeContext:
 		return []byte(s), nil
 	case EventTypeDone:
 		return []byte(s), nil
@@ -1110,6 +1741,9 @@ func (s *EventType) UnmarshalText(data []byte) error {
 		return nil
 	case EventTypeRag:
 		*s = EventTypeRag
+		return nil
+	case EventTypeContext:
+		*s = EventTypeContext
 		return nil
 	case EventTypeDone:
 		*s = EventTypeDone
@@ -1846,6 +2480,123 @@ func (s *ModelLiveState) UnmarshalText(data []byte) error {
 		return nil
 	case ModelLiveStateUnknown:
 		*s = ModelLiveStateUnknown
+		return nil
+	default:
+		return errors.Errorf("invalid value: %q", data)
+	}
+}
+
+// A typed not-found refusal for a routing lookup that resolved to no record (an unknown turn or
+// session id). The engine never invents data.
+// Ref: #/components/schemas/NotFound
+type NotFound struct {
+	Error    NotFoundError    `json:"error"`
+	Resource NotFoundResource `json:"resource"`
+	ID       string           `json:"id"`
+}
+
+// GetError returns the value of Error.
+func (s *NotFound) GetError() NotFoundError {
+	return s.Error
+}
+
+// GetResource returns the value of Resource.
+func (s *NotFound) GetResource() NotFoundResource {
+	return s.Resource
+}
+
+// GetID returns the value of ID.
+func (s *NotFound) GetID() string {
+	return s.ID
+}
+
+// SetError sets the value of Error.
+func (s *NotFound) SetError(val NotFoundError) {
+	s.Error = val
+}
+
+// SetResource sets the value of Resource.
+func (s *NotFound) SetResource(val NotFoundResource) {
+	s.Resource = val
+}
+
+// SetID sets the value of ID.
+func (s *NotFound) SetID(val string) {
+	s.ID = val
+}
+
+func (*NotFound) getSessionMeterRes() {}
+func (*NotFound) getTurnContextRes()  {}
+
+type NotFoundError string
+
+const (
+	NotFoundErrorNotFound NotFoundError = "not-found"
+)
+
+// AllValues returns all NotFoundError values.
+func (NotFoundError) AllValues() []NotFoundError {
+	return []NotFoundError{
+		NotFoundErrorNotFound,
+	}
+}
+
+// MarshalText implements encoding.TextMarshaler.
+func (s NotFoundError) MarshalText() ([]byte, error) {
+	switch s {
+	case NotFoundErrorNotFound:
+		return []byte(s), nil
+	default:
+		return nil, errors.Errorf("invalid value: %q", s)
+	}
+}
+
+// UnmarshalText implements encoding.TextUnmarshaler.
+func (s *NotFoundError) UnmarshalText(data []byte) error {
+	switch NotFoundError(data) {
+	case NotFoundErrorNotFound:
+		*s = NotFoundErrorNotFound
+		return nil
+	default:
+		return errors.Errorf("invalid value: %q", data)
+	}
+}
+
+type NotFoundResource string
+
+const (
+	NotFoundResourceTurn    NotFoundResource = "turn"
+	NotFoundResourceSession NotFoundResource = "session"
+)
+
+// AllValues returns all NotFoundResource values.
+func (NotFoundResource) AllValues() []NotFoundResource {
+	return []NotFoundResource{
+		NotFoundResourceTurn,
+		NotFoundResourceSession,
+	}
+}
+
+// MarshalText implements encoding.TextMarshaler.
+func (s NotFoundResource) MarshalText() ([]byte, error) {
+	switch s {
+	case NotFoundResourceTurn:
+		return []byte(s), nil
+	case NotFoundResourceSession:
+		return []byte(s), nil
+	default:
+		return nil, errors.Errorf("invalid value: %q", s)
+	}
+}
+
+// UnmarshalText implements encoding.TextUnmarshaler.
+func (s *NotFoundResource) UnmarshalText(data []byte) error {
+	switch NotFoundResource(data) {
+	case NotFoundResourceTurn:
+		*s = NotFoundResourceTurn
+		return nil
+	case NotFoundResourceSession:
+		*s = NotFoundResourceSession
 		return nil
 	default:
 		return errors.Errorf("invalid value: %q", data)
@@ -2742,6 +3493,180 @@ func (s *Session) SetCreatedAt(val OptInt64) {
 // SetUpdatedAt sets the value of UpdatedAt.
 func (s *Session) SetUpdatedAt(val OptInt64) {
 	s.UpdatedAt = val
+}
+
+// A session's cumulative token meter, aggregated from the workspace shard's meter_events by component
+// (ADR-0026 §5, ADR-0044 §4). Newest session state is workspace-scoped; there is no global meter
+// total (ADR-0049 §5).
+// Ref: #/components/schemas/SessionMeter
+type SessionMeter struct {
+	SessionId  string                       `json:"sessionId"`
+	Components []SessionMeterComponentsItem `json:"components"`
+	// Cumulative prompt + completion tokens across all components.
+	Total int `json:"total"`
+}
+
+// GetSessionId returns the value of SessionId.
+func (s *SessionMeter) GetSessionId() string {
+	return s.SessionId
+}
+
+// GetComponents returns the value of Components.
+func (s *SessionMeter) GetComponents() []SessionMeterComponentsItem {
+	return s.Components
+}
+
+// GetTotal returns the value of Total.
+func (s *SessionMeter) GetTotal() int {
+	return s.Total
+}
+
+// SetSessionId sets the value of SessionId.
+func (s *SessionMeter) SetSessionId(val string) {
+	s.SessionId = val
+}
+
+// SetComponents sets the value of Components.
+func (s *SessionMeter) SetComponents(val []SessionMeterComponentsItem) {
+	s.Components = val
+}
+
+// SetTotal sets the value of Total.
+func (s *SessionMeter) SetTotal(val int) {
+	s.Total = val
+}
+
+func (*SessionMeter) getSessionMeterRes() {}
+
+type SessionMeterComponentsItem struct {
+	Component        SessionMeterComponentsItemComponent `json:"component"`
+	PromptTokens     int                                 `json:"promptTokens"`
+	CompletionTokens int                                 `json:"completionTokens"`
+	// True when the component is a labeled approximation (thinking, ADR-0024).
+	Approx OptBool `json:"approx"`
+}
+
+// GetComponent returns the value of Component.
+func (s *SessionMeterComponentsItem) GetComponent() SessionMeterComponentsItemComponent {
+	return s.Component
+}
+
+// GetPromptTokens returns the value of PromptTokens.
+func (s *SessionMeterComponentsItem) GetPromptTokens() int {
+	return s.PromptTokens
+}
+
+// GetCompletionTokens returns the value of CompletionTokens.
+func (s *SessionMeterComponentsItem) GetCompletionTokens() int {
+	return s.CompletionTokens
+}
+
+// GetApprox returns the value of Approx.
+func (s *SessionMeterComponentsItem) GetApprox() OptBool {
+	return s.Approx
+}
+
+// SetComponent sets the value of Component.
+func (s *SessionMeterComponentsItem) SetComponent(val SessionMeterComponentsItemComponent) {
+	s.Component = val
+}
+
+// SetPromptTokens sets the value of PromptTokens.
+func (s *SessionMeterComponentsItem) SetPromptTokens(val int) {
+	s.PromptTokens = val
+}
+
+// SetCompletionTokens sets the value of CompletionTokens.
+func (s *SessionMeterComponentsItem) SetCompletionTokens(val int) {
+	s.CompletionTokens = val
+}
+
+// SetApprox sets the value of Approx.
+func (s *SessionMeterComponentsItem) SetApprox(val OptBool) {
+	s.Approx = val
+}
+
+type SessionMeterComponentsItemComponent string
+
+const (
+	SessionMeterComponentsItemComponentSystem     SessionMeterComponentsItemComponent = "system"
+	SessionMeterComponentsItemComponentTools      SessionMeterComponentsItemComponent = "tools"
+	SessionMeterComponentsItemComponentRag        SessionMeterComponentsItemComponent = "rag"
+	SessionMeterComponentsItemComponentHistory    SessionMeterComponentsItemComponent = "history"
+	SessionMeterComponentsItemComponentMentions   SessionMeterComponentsItemComponent = "mentions"
+	SessionMeterComponentsItemComponentUser       SessionMeterComponentsItemComponent = "user"
+	SessionMeterComponentsItemComponentThinking   SessionMeterComponentsItemComponent = "thinking"
+	SessionMeterComponentsItemComponentCompletion SessionMeterComponentsItemComponent = "completion"
+)
+
+// AllValues returns all SessionMeterComponentsItemComponent values.
+func (SessionMeterComponentsItemComponent) AllValues() []SessionMeterComponentsItemComponent {
+	return []SessionMeterComponentsItemComponent{
+		SessionMeterComponentsItemComponentSystem,
+		SessionMeterComponentsItemComponentTools,
+		SessionMeterComponentsItemComponentRag,
+		SessionMeterComponentsItemComponentHistory,
+		SessionMeterComponentsItemComponentMentions,
+		SessionMeterComponentsItemComponentUser,
+		SessionMeterComponentsItemComponentThinking,
+		SessionMeterComponentsItemComponentCompletion,
+	}
+}
+
+// MarshalText implements encoding.TextMarshaler.
+func (s SessionMeterComponentsItemComponent) MarshalText() ([]byte, error) {
+	switch s {
+	case SessionMeterComponentsItemComponentSystem:
+		return []byte(s), nil
+	case SessionMeterComponentsItemComponentTools:
+		return []byte(s), nil
+	case SessionMeterComponentsItemComponentRag:
+		return []byte(s), nil
+	case SessionMeterComponentsItemComponentHistory:
+		return []byte(s), nil
+	case SessionMeterComponentsItemComponentMentions:
+		return []byte(s), nil
+	case SessionMeterComponentsItemComponentUser:
+		return []byte(s), nil
+	case SessionMeterComponentsItemComponentThinking:
+		return []byte(s), nil
+	case SessionMeterComponentsItemComponentCompletion:
+		return []byte(s), nil
+	default:
+		return nil, errors.Errorf("invalid value: %q", s)
+	}
+}
+
+// UnmarshalText implements encoding.TextUnmarshaler.
+func (s *SessionMeterComponentsItemComponent) UnmarshalText(data []byte) error {
+	switch SessionMeterComponentsItemComponent(data) {
+	case SessionMeterComponentsItemComponentSystem:
+		*s = SessionMeterComponentsItemComponentSystem
+		return nil
+	case SessionMeterComponentsItemComponentTools:
+		*s = SessionMeterComponentsItemComponentTools
+		return nil
+	case SessionMeterComponentsItemComponentRag:
+		*s = SessionMeterComponentsItemComponentRag
+		return nil
+	case SessionMeterComponentsItemComponentHistory:
+		*s = SessionMeterComponentsItemComponentHistory
+		return nil
+	case SessionMeterComponentsItemComponentMentions:
+		*s = SessionMeterComponentsItemComponentMentions
+		return nil
+	case SessionMeterComponentsItemComponentUser:
+		*s = SessionMeterComponentsItemComponentUser
+		return nil
+	case SessionMeterComponentsItemComponentThinking:
+		*s = SessionMeterComponentsItemComponentThinking
+		return nil
+	case SessionMeterComponentsItemComponentCompletion:
+		*s = SessionMeterComponentsItemComponentCompletion
+		return nil
+	default:
+		return errors.Errorf("invalid value: %q", data)
+	}
 }
 
 // StartTurnOKRawTextEventStream represents raw HTTP response for StartTurn text/event-stream.

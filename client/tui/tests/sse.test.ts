@@ -73,6 +73,18 @@ describe("streamTurn", () => {
     expect(events[0]?.[1]).toMatchObject({ ok: true });
   });
 
+  test("dispatches a context event against the generated snapshot schema", async () => {
+    const events: [SseEventName, unknown][] = [];
+    const blocks = [
+      'event: context\ndata: {"turnId":"t1","sessionId":"s1","workspaceId":"ws1","retrievalQuery":"q","autoRag":true,"messages":[],"chunks":[],"drops":[],"budget":[],"createdAt":1}',
+      'event: done\ndata: {}',
+    ];
+    await streamTurn("http://x", task, { onEvent: (name, payload) => events.push([name, payload]) }, { fetchImpl: streamingFetch(blocks) });
+
+    expect(events[0]?.[0]).toBe("context");
+    expect(events[0]?.[1]).toMatchObject({ turnId: "t1", autoRag: true });
+  });
+
   test("labels a payload that fails zod validation instead of dispatching it", async () => {
     const errors: string[] = [];
     const dispatched: SseEventName[] = [];

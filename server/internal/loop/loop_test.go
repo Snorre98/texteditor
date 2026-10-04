@@ -7,8 +7,10 @@ import (
 	"testing"
 	"time"
 
+	"texteditor/internal/assembler"
 	"texteditor/internal/filesystem"
 	"texteditor/internal/retriever"
+	"texteditor/internal/session"
 	"texteditor/internal/shard"
 	"texteditor/internal/workspace"
 	"texteditor/shared/dto"
@@ -140,16 +142,38 @@ type stubPipeline struct{ policy dto.PipelinePolicy }
 
 func (s stubPipeline) Policy() dto.PipelinePolicy { return s.policy }
 
-type stubSessions struct{ hist []dto.Message }
+type stubSessions struct {
+	hist      []dto.Message
+	mu        sync.Mutex
+	snapshots map[string]json.RawMessage
+}
 
-func (s stubSessions) ListByDocument(string) ([]dto.Session, error) { return nil, nil }
-func (s stubSessions) ListByWorkspace() ([]dto.Session, error)      { return nil, nil }
-func (stubSessions) Create(string, *string, string) (dto.Session, error) {
+func newStubSessions() *stubSessions { return &stubSessions{snapshots: map[string]json.RawMessage{}} }
+
+func (s *stubSessions) ListByDocument(string) ([]dto.Session, error) { return nil, nil }
+func (s *stubSessions) ListByWorkspace() ([]dto.Session, error)      { return nil, nil }
+func (s *stubSessions) Create(string, *string, string) (dto.Session, error) {
 	return dto.Session{}, nil
 }
-func (stubSessions) Resume(string) (dto.Session, error)      { return dto.Session{}, nil }
-func (stubSessions) Append(string, dto.Message) error        { return nil }
-func (s stubSessions) History(string) ([]dto.Message, error) { return s.hist, nil }
+func (s *stubSessions) Resume(string) (dto.Session, error)    { return dto.Session{}, nil }
+func (s *stubSessions) Append(string, dto.Message) error      { return nil }
+func (s *stubSessions) History(string) ([]dto.Message, error) { return s.hist, nil }
+
+func (s *stubSessions) SaveContext(turnID, sessionID string, snapshot json.RawMessage) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.snapshots[turnID] = snapshot
+	return nil
+}
+
+func (s *stubSessions) TurnContext(turnID string) (json.RawMessage, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if snap, ok := s.snapshots[turnID]; ok {
+		return snap, nil
+	}
+	return nil, session.ErrNotFound
+}
 
 // stubFilesystem implements filesystem.Interface over an in-memory map keyed by
 // path → (content, error). Used to drive mention resolution and the
@@ -237,6 +261,9 @@ func (s *stubMeter) Attribute(context.Context, string, string, string, dto.Break
 	return dto.AttributedBreakdown{}, nil
 }
 func (s *stubMeter) SessionUsage(context.Context, string) (int, error) { return 0, nil }
+func (s *stubMeter) SessionBreakdown(context.Context, string) (dto.SessionMeter, error) {
+	return dto.SessionMeter{}, nil
+}
 
 type stubBus struct {
 	mu     sync.Mutex
@@ -267,7 +294,7 @@ func (e *stubErr) Error() string { return e.msg }
 func happyPathDeps(bus *stubBus) Deps {
 	svc := &shard.Services{
 		Retriever: &stubRetriever{},
-		Sessions:  stubSessions{},
+		Sessions:  newStubSessions(),
 		Meter:     &stubMeter{},
 	}
 	return Deps{
@@ -472,23 +499,32 @@ func TestAgenticRetrieveEmitsRag(t *testing.T) {
 
 	bus.mu.Lock()
 	defer bus.mu.Unlock()
-	sawRag := false
+	sawRag, sawToolChunk := false, false
 	for _, ev := range bus.events {
-		if ev.Type == "rag" {
-			sawRag = true
-			var d struct {
-				Chunks []struct {
-					BlockID string `json:"blockId"`
-					Text    string `json:"text"`
-				} `json:"chunks"`
-			}
-			if err := json.Unmarshal(ev.Data, &d); err != nil || len(d.Chunks) != 1 || d.Chunks[0].Text != "cited" {
-				t.Fatalf("rag data = %s, want structured chunks", ev.Data)
-			}
+		if ev.Type != "rag" {
+			continue
+		}
+		sawRag = true
+		var d struct {
+			Chunks []struct {
+				BlockID string `json:"blockId"`
+				Text    string `json:"text"`
+			} `json:"chunks"`
+		}
+		if err := json.Unmarshal(ev.Data, &d); err != nil {
+			t.Fatalf("rag data = %s: %v", ev.Data, err)
+		}
+		// Auto-RAG emits an (empty) rag event first; the tool retrieval emits
+		// the structured chunk. Assert the tool result is among them.
+		if len(d.Chunks) == 1 && d.Chunks[0].Text == "cited" {
+			sawToolChunk = true
 		}
 	}
 	if !sawRag {
 		t.Fatalf("no rag event: %+v", bus.events)
+	}
+	if !sawToolChunk {
+		t.Fatalf("no tool-retrieval rag event with the structured chunk: %+v", bus.events)
 	}
 }
 
@@ -546,6 +582,12 @@ func (b budgetSessions) Resume(string) (dto.Session, error) {
 }
 func (budgetSessions) Append(string, dto.Message) error      { return nil }
 func (budgetSessions) History(string) ([]dto.Message, error) { return nil, nil }
+func (budgetSessions) SaveContext(string, string, json.RawMessage) error {
+	return nil
+}
+func (budgetSessions) TurnContext(string) (json.RawMessage, error) {
+	return nil, session.ErrNotFound
+}
 
 type budgetMeter struct{ used int }
 
@@ -553,6 +595,9 @@ func (b budgetMeter) Attribute(context.Context, string, string, string, dto.Brea
 	return dto.AttributedBreakdown{}, nil
 }
 func (b budgetMeter) SessionUsage(context.Context, string) (int, error) { return b.used, nil }
+func (b budgetMeter) SessionBreakdown(context.Context, string) (dto.SessionMeter, error) {
+	return dto.SessionMeter{}, nil
+}
 
 // --------------------- one pipeline, every preset (ADR-0045) ---------------------
 
@@ -1044,6 +1089,138 @@ func TestExplicitWorkspaceIDWins(t *testing.T) {
 	}
 	if got := workspaces.resolved(); len(got) != 0 {
 		t.Fatalf("explicit workspace must not fall back: resolved %v", got)
+	}
+}
+
+// routeWorkspaces records the turn→workspace→session routing writes so the loop
+// can be asserted to write RouteTurn at turn start (ADR-0044 §4).
+type routeWorkspaces struct {
+	stubWorkspaces
+	mu     sync.Mutex
+	routes []turnRoute
+}
+
+type turnRoute struct{ turnID, workspaceID, sessionID string }
+
+func (r *routeWorkspaces) RouteTurn(turnID, workspaceID, sessionID string) error {
+	r.mu.Lock()
+	r.routes = append(r.routes, turnRoute{turnID, workspaceID, sessionID})
+	r.mu.Unlock()
+	return nil
+}
+
+func (r *routeWorkspaces) recorded() []turnRoute {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]turnRoute(nil), r.routes...)
+}
+
+// TestAutoRagRagEventAndSnapshot covers context-inspector "Auto-retrieved chunks
+// are visible with provenance" and "A completed turn persists a context
+// snapshot": auto-RAG emits the same rag shape as tool retrieval, the loop
+// persists a snapshot and emits it as `context`, the snapshot records the
+// retrieved chunks and the tool/thinking components, and RouteTurn is written.
+func TestAutoRagRagEventAndSnapshot(t *testing.T) {
+	bus := &stubBus{done: make(chan struct{})}
+	deps := happyPathDeps(bus)
+	svc := shardSvc(deps)
+	svc.Retriever = &stubRetriever{chunks: []dto.Chunk{{
+		BlockID: "b9", ChunkKey: "/vault/a.md#0", Text: "retrieved", Score: 0.8,
+		Path: "/vault/a.md", Heading: "Intro",
+	}}}
+	deps.Assembler = assembler.New()
+	rw := &routeWorkspaces{}
+	deps.Workspaces = rw
+
+	l := New(deps)
+	turnID, err := l.Run(context.Background(), dto.Task{
+		SessionID: "s1", ModeName: "proofreader", DocumentID: "d1", UserInput: "find citations",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitDone(t, bus)
+
+	events := busEvents(t, bus)
+	ragIdx, ctxIdx := -1, -1
+	for i := range events {
+		switch events[i].Type {
+		case "rag":
+			if ragIdx < 0 {
+				ragIdx = i
+			}
+		case "context":
+			ctxIdx = i
+		}
+	}
+	if ragIdx < 0 {
+		t.Fatalf("no rag event: %+v", events)
+	}
+	if ctxIdx < 0 {
+		t.Fatalf("no context event: %+v", events)
+	}
+	if ragIdx >= ctxIdx {
+		t.Fatalf("rag must precede context: rag@%d context@%d", ragIdx, ctxIdx)
+	}
+
+	// The rag event has the same {ok, chunks} shape as tool retrieval.
+	var rag struct {
+		Ok     bool        `json:"ok"`
+		Chunks []dto.Chunk `json:"chunks"`
+	}
+	if err := json.Unmarshal(events[ragIdx].Data, &rag); err != nil {
+		t.Fatal(err)
+	}
+	if !rag.Ok || len(rag.Chunks) != 1 || rag.Chunks[0].Path != "/vault/a.md" || rag.Chunks[0].Heading != "Intro" {
+		t.Fatalf("rag data = %s, want structured provenance", events[ragIdx].Data)
+	}
+
+	// The context event carries the persisted snapshot.
+	var snap dto.ContextSnapshot
+	if err := json.Unmarshal(events[ctxIdx].Data, &snap); err != nil {
+		t.Fatal(err)
+	}
+	if snap.TurnID != turnID || snap.SessionID != "s1" || snap.WorkspaceID != "ws1" {
+		t.Fatalf("snapshot envelope = %+v", snap)
+	}
+	if !snap.AutoRag || snap.RetrievalQuery != "find citations" {
+		t.Fatalf("snapshot retrieval metadata = %+v", snap)
+	}
+	if len(snap.Chunks) != 1 || snap.Chunks[0].ChunkKey != "/vault/a.md#0" {
+		t.Fatalf("snapshot chunks = %+v, want the retrieved chunk", snap.Chunks)
+	}
+	messageComponents := map[string]bool{}
+	for _, m := range snap.Messages {
+		messageComponents[m.Component] = true
+	}
+	if !messageComponents["system"] || !messageComponents["user"] || !messageComponents["rag"] {
+		t.Fatalf("snapshot message components = %v, want system+rag+user", messageComponents)
+	}
+	budgetComponents := map[string]bool{}
+	for _, u := range snap.Budget {
+		budgetComponents[u.Component] = true
+	}
+	for _, want := range []string{"system", "tools", "rag", "history", "mentions", "user", "thinking"} {
+		if !budgetComponents[want] {
+			t.Fatalf("snapshot budget missing %q: %+v", want, snap.Budget)
+		}
+	}
+
+	// The snapshot is persisted and retrievable by turnID, byte-identical to the
+	// emitted context event (clients never reconstruct it).
+	recorder := svc.Sessions.(*stubSessions)
+	raw, err := recorder.TurnContext(turnID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(raw) != string(events[ctxIdx].Data) {
+		t.Fatalf("persisted snapshot != context event:\n%s\n%s", raw, events[ctxIdx].Data)
+	}
+
+	// RouteTurn was written at turn start.
+	routes := rw.recorded()
+	if len(routes) != 1 || routes[0].turnID != turnID || routes[0].workspaceID != "ws1" || routes[0].sessionID != "s1" {
+		t.Fatalf("turn routes = %+v, want one turnID/ws1/s1", routes)
 	}
 }
 

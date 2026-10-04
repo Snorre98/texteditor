@@ -20,6 +20,8 @@ const (
 	GetHistoryOperation          OperationName = "GetHistory"
 	GetModelStatusOperation      OperationName = "GetModelStatus"
 	GetSessionMessagesOperation  OperationName = "GetSessionMessages"
+	GetSessionMeterOperation     OperationName = "GetSessionMeter"
+	GetTurnContextOperation      OperationName = "GetTurnContext"
 	GetWorkspaceOperation        OperationName = "GetWorkspace"
 	IndexCorpusOperation         OperationName = "IndexCorpus"
 	ListDirectoryOperation       OperationName = "ListDirectory"

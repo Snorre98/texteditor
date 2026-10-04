@@ -21,6 +21,7 @@ import (
 	"texteditor/internal/loop"
 	"texteditor/internal/mode"
 	"texteditor/internal/pathutil"
+	"texteditor/internal/session"
 	"texteditor/internal/shard"
 	"texteditor/internal/tool"
 	"texteditor/internal/workspace"
@@ -669,6 +670,94 @@ func (h *handler) GetSessionMessages(ctx context.Context, p genapi.GetSessionMes
 		})
 	}
 	return out, nil
+}
+
+// GetTurnContext backs GET /turns/{id}/context (ADR-0044 §4): resolve the
+// turn's workspace shard through the registry's turn routing index, read the
+// persisted snapshot, and return it. The snapshot is engine-owned data; an
+// unknown turn is the typed 404.
+func (h *handler) GetTurnContext(ctx context.Context, p genapi.GetTurnContextParams) (genapi.GetTurnContextRes, error) {
+	workspaceID, _, ok, err := h.d.Workspaces.TurnRoute(p.ID)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return notFound("turn", p.ID), nil
+	}
+	lease, err := h.d.Shards.Services(ctx, workspaceID)
+	if err != nil {
+		return nil, err
+	}
+	defer lease.Release()
+
+	raw, err := lease.Sessions.TurnContext(p.ID)
+	if errors.Is(err, session.ErrNotFound) {
+		return notFound("turn", p.ID), nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var snap genapi.ContextSnapshot
+	if err := json.Unmarshal(raw, &snap); err != nil {
+		return nil, err
+	}
+	return &snap, nil
+}
+
+// GetSessionMeter backs GET /sessions/{id}/meter (ADR-0044 §4): resolve the
+// session's workspace shard and aggregate its meter_events by component. An
+// unknown session is the typed 404.
+func (h *handler) GetSessionMeter(ctx context.Context, p genapi.GetSessionMeterParams) (genapi.GetSessionMeterRes, error) {
+	workspaceID, ok, err := h.d.Workspaces.SessionWorkspace(p.ID)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return notFound("session", p.ID), nil
+	}
+	lease, err := h.d.Shards.Services(ctx, workspaceID)
+	if err != nil {
+		return nil, err
+	}
+	defer lease.Release()
+	if lease.Meter == nil {
+		return nil, fmt.Errorf("meter-unavailable")
+	}
+	m, err := lease.Meter.SessionBreakdown(ctx, p.ID)
+	if err != nil {
+		return nil, err
+	}
+	return sessionMeterToGen(m), nil
+}
+
+// notFound renders the typed routing refusal (api/openapi.yaml NotFound).
+func notFound(resource, id string) *genapi.NotFound {
+	return &genapi.NotFound{
+		Error:    genapi.NotFoundErrorNotFound,
+		Resource: genapi.NotFoundResource(resource),
+		ID:       id,
+	}
+}
+
+// sessionMeterToGen projects a dto.SessionMeter onto the wire schema.
+func sessionMeterToGen(m dto.SessionMeter) *genapi.SessionMeter {
+	out := &genapi.SessionMeter{
+		SessionId:  m.SessionID,
+		Components: make([]genapi.SessionMeterComponentsItem, 0, len(m.Components)),
+		Total:      m.Total,
+	}
+	for _, c := range m.Components {
+		item := genapi.SessionMeterComponentsItem{
+			Component:        genapi.SessionMeterComponentsItemComponent(c.Component),
+			PromptTokens:     c.PromptTokens,
+			CompletionTokens: c.CompletionTokens,
+		}
+		if c.Approx {
+			item.Approx = genapi.NewOptBool(true)
+		}
+		out.Components = append(out.Components, item)
+	}
+	return out
 }
 
 // StartTurn is the hand-framed `/turn` SSE handler (ADR-0031). It decodes the

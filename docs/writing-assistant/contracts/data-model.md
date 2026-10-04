@@ -186,6 +186,23 @@ reopens the same session.
 | `content` | TEXT | |
 | `ts` | INTEGER | |
 
+#### `turn_context` — persisted per-turn context snapshots (many per session)
+
+Source ADR-0044 §4 (Phase C3). One row per turn; the snapshot is opaque JSON
+(the Session store never parses it) and the payload of the `context` SSE event
+and `GET /turns/{id}/context`.
+
+| Column | Type | Notes |
+|---|---|---|
+| `turn_id` | TEXT PK | the turn the snapshot belongs to |
+| `session_id` | TEXT | → `sessions.id` |
+| `snapshot` | TEXT | the serialized `ContextSnapshot` (JSON passthrough) |
+| `created_at` | INTEGER | unix epoch seconds |
+
+**Retention:** `SaveContext` keeps only the newest 100 rows per `session_id`
+(ordered by `created_at DESC, rowid DESC`) in the same transaction as the
+insert — snapshots grow with usage, so the bound is required (ADR-0044 §4).
+
 ### 1.5 `workspaces.db` — Workspace store (global registry)
 
 Source ADR-0049 §2/§3/§5. The only global index; owned by the Workspace store.

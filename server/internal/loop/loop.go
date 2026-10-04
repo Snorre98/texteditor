@@ -235,6 +235,13 @@ func (l *loop) runTurn(ctx context.Context, turnID string, task dto.Task) {
 	// through the context (ADR-0049 §5).
 	ctx = shard.WithServices(ctx, svc)
 
+	// Route the turn to its workspace/session so a finished turn's context
+	// snapshot is resolvable via GET /turns/{id}/context (ADR-0044 §4).
+	if err := l.d.Workspaces.RouteTurn(turnID, wsID, task.SessionID); err != nil {
+		l.emit(turnID, dto.Event{Type: "error", Data: errorData(err)})
+		return
+	}
+
 	// planning: read session history + retrieved chunks.
 	history, _ := svc.Sessions.History(task.SessionID)
 
@@ -260,6 +267,11 @@ func (l *loop) runTurn(ctx context.Context, turnID string, task dto.Task) {
 	policy := l.d.Pipeline.Policy()
 	chunks, _ := svc.Retriever.Query(ctx, task.UserInput, policy.AutoRagTopK)
 
+	// Auto-RAG is visible: the same rag event shape as tool retrieval, emitted
+	// before assembly so clients can show what was retrieved even when no tool
+	// ran (ADR-0044 §3, "auto-retrieved chunks visible with provenance").
+	l.emitRag(turnID, chunks)
+
 	tools := toolsFor(l.d.Tools)
 
 	payload, breakdown, err := l.d.Assembler.Assemble(ctx, dto.AssemblerInput{
@@ -277,6 +289,22 @@ func (l *loop) runTurn(ctx context.Context, turnID string, task dto.Task) {
 		l.emit(turnID, dto.Event{Type: "error", Data: errorData(err)})
 		return
 	}
+
+	// Build, persist, and emit the turn's context snapshot (ADR-0044 §4). The
+	// snapshot is engine-owned data: the loop wraps the assembler's provenance/
+	// drops/budget with the turn/session/workspace ids and the retrieved chunks;
+	// the assembler never knows about sessions or workspaces.
+	snapshot := buildSnapshot(turnID, task, wsID, chunks, payload)
+	rawSnapshot, err := json.Marshal(snapshot)
+	if err != nil {
+		l.emit(turnID, dto.Event{Type: "error", Data: errorData(err)})
+		return
+	}
+	if err := svc.Sessions.SaveContext(turnID, task.SessionID, rawSnapshot); err != nil {
+		l.emit(turnID, dto.Event{Type: "error", Data: errorData(err)})
+		return
+	}
+	l.emit(turnID, dto.Event{Type: "context", Data: rawSnapshot})
 
 	target := dto.Target{BaseURL: res.Model.BaseURL, Capabilities: res.Model.Capabilities}
 
@@ -481,6 +509,58 @@ func (l *loop) emit(turnID string, ev dto.Event) {
 	}
 	ev.TurnID = turnID
 	l.d.Bus.Emit(ev)
+}
+
+// emitRag emits the structured retrieval result (the same `{ok, chunks}` shape
+// as the retrieve/read_note tools) for auto-RAG, so retrieved chunks with
+// provenance reach the client even when no tool was invoked (ADR-0044 §3).
+func (l *loop) emitRag(turnID string, chunks []dto.Chunk) {
+	if chunks == nil {
+		chunks = []dto.Chunk{}
+	}
+	data, _ := json.Marshal(map[string]interface{}{"ok": true, "chunks": chunks})
+	l.emit(turnID, dto.Event{Type: "rag", Data: data})
+}
+
+// buildSnapshot wraps the assembler's provenance/drops/budget and the retrieved
+// chunks into the engine-owned ContextSnapshot for one turn (ADR-0044 §4). It
+// recomputes nothing: provenance, drops, and budget all come from the pure
+// assembler; only the turn/session/workspace envelope and retrieval metadata
+// are added here.
+func buildSnapshot(turnID string, task dto.Task, workspaceID string, chunks []dto.Chunk, payload dto.Payload) dto.ContextSnapshot {
+	messages := make([]dto.ContextMessage, 0, len(payload.Provenance))
+	for _, p := range payload.Provenance {
+		messages = append(messages, dto.ContextMessage{
+			Role:      p.Role,
+			Component: p.Component,
+			Source:    p.Source,
+			Tokens:    p.Tokens,
+			Pinned:    p.Pinned,
+		})
+	}
+	if chunks == nil {
+		chunks = []dto.Chunk{}
+	}
+	drops := payload.Drops
+	if drops == nil {
+		drops = []dto.ContextDrop{}
+	}
+	budget := payload.Budget
+	if budget == nil {
+		budget = []dto.BudgetUsage{}
+	}
+	return dto.ContextSnapshot{
+		TurnID:         turnID,
+		SessionID:      task.SessionID,
+		WorkspaceID:    workspaceID,
+		RetrievalQuery: task.UserInput,
+		AutoRag:        true,
+		Messages:       messages,
+		Chunks:         chunks,
+		Drops:          drops,
+		Budget:         budget,
+		CreatedAt:      time.Now().Unix(),
+	}
 }
 
 // emitToken forwards one text token event (the answering phase; state-machine

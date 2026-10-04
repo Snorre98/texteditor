@@ -5,6 +5,7 @@ package session
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"time"
 
@@ -24,6 +25,12 @@ type SessionStore interface {
 	Resume(id string) (dto.Session, error)
 	Append(sessionID string, msg dto.Message) error
 	History(sessionID string) ([]dto.Message, error)
+	// SaveContext persists one turn's context snapshot in this shard, keeping
+	// only the newest 100 rows per session (ADR-0044 §4). The snapshot is an
+	// opaque JSON passthrough — the session leaf never parses it.
+	SaveContext(turnID, sessionID string, snapshot json.RawMessage) error
+	// TurnContext returns a persisted turn's context snapshot, or ErrNotFound.
+	TurnContext(turnID string) (json.RawMessage, error)
 }
 
 // Interface is an alias for SessionStore (the contracted name, interface.md §10).
@@ -203,4 +210,50 @@ func (s *store) History(sessionID string) ([]dto.Message, error) {
 		out = append(out, m)
 	}
 	return out, rows.Err()
+}
+
+// retentionPerSession bounds persisted turn-context snapshots per session
+// (ADR-0044 §4: snapshots grow with usage; retention is required).
+const retentionPerSession = 100
+
+// SaveContext persists one turn's context snapshot (opaque JSON) and prunes the
+// session's snapshots to the newest retentionPerSession rows. Insert + prune run
+// in one transaction so the bound always holds.
+func (s *store) SaveContext(turnID, sessionID string, snapshot json.RawMessage) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec(
+		`INSERT INTO turn_context (turn_id, session_id, snapshot, created_at) VALUES (?, ?, ?, ?)
+		 ON CONFLICT(turn_id) DO UPDATE SET session_id = excluded.session_id, snapshot = excluded.snapshot, created_at = excluded.created_at`,
+		turnID, sessionID, string(snapshot), time.Now().Unix(),
+	); err != nil {
+		return err
+	}
+	// Keep only the newest N rows per session; rowid breaks same-second ties.
+	if _, err := tx.Exec(
+		`DELETE FROM turn_context WHERE session_id = ? AND turn_id NOT IN (
+			SELECT turn_id FROM turn_context WHERE session_id = ? ORDER BY created_at DESC, rowid DESC LIMIT ?
+		)`,
+		sessionID, sessionID, retentionPerSession,
+	); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// TurnContext returns a persisted turn's context snapshot, or ErrNotFound.
+func (s *store) TurnContext(turnID string) (json.RawMessage, error) {
+	var snap string
+	err := s.db.QueryRow(`SELECT snapshot FROM turn_context WHERE turn_id = ?`, turnID).Scan(&snap)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return json.RawMessage(snap), nil
 }

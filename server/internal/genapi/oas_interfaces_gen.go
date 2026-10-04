@@ -9,6 +9,14 @@ type EvictCorpusDocumentRes interface {
 	evictCorpusDocumentRes()
 }
 
+type GetSessionMeterRes interface {
+	getSessionMeterRes()
+}
+
+type GetTurnContextRes interface {
+	getTurnContextRes()
+}
+
 type ListDirectoryRes interface {
 	listDirectoryRes()
 }

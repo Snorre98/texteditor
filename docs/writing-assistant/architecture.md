@@ -214,14 +214,14 @@ flowchart TB
 |---|---|---|---|
 | Fleet gateway | model discovery, resolution (merge + gates + fallback), lifecycle | `ListModels`, `Resolve(name, opts) → Resolution`, `Status`, `Start` (blocking), `Stop`, `Provision` (async), `Fingerprint` (router sync gate) | daemon HTTP client, fallback ladder |
 | Provider gateway | OpenAI-compatible REST/SSE calls | `Chat(ctx, target, params)`, `Stream(ctx, target, params, emit)`, `Embed(ctx, target, text)` | retry/backoff, `-np 1` serialization |
-| Agent loop | turn loop (thin orchestrator, session-scoped) | `Run(ctx, task) → (turnID, err)` (async) | turn state machine, dispatch/observe |
+| Agent loop | turn loop (thin orchestrator, session-scoped) | `Run(ctx, task) → (turnID, err)` (async) | turn state machine, dispatch/observe, snapshot build/persist, `RouteTurn`, auto-RAG `rag` + `context` events |
 | Mode registry | prompt presets as data (name + system prompt + default model) | `List`, `Get` | validation, file loading |
 | Pipeline policy | one global turn policy: step cap, context budgets, auto-RAG top-k (ADR-0045) | `Policy` | schema validation, `config/pipeline.json` |
 | Tool registry | tool definitions + schemas (all tools global) | `Register`, `List` | schema validation |
 | Tool executor | tool execution (ctx carries the turn's shard services) | `Invoke(ctx, name, args)` | name-keyed handler map |
 | Tool decider (optional) | tool-intent resolution ("which tool, what args") from a writer's `request_tool` intent — **parked/unwired** (ADR-0045) | `SignalTool`, `Decide(ctx, intent, c)` | prompt layout, Provider.Chat, τ threshold, `.cact` fingerprint |
-| Context assembler | payload + attribution (pure) | `Assemble(ctx, in) → (Payload, Breakdown)` | layout, truncation, accounting |
-| Token metering | counts + attribution + persistence | `Attribute(ctx, turnID, breakdown, counts)` | scale-to-total, shard `meter.db` |
+| Context assembler | payload + attribution + per-message provenance/drops/budget (pure) | `Assemble(ctx, in) → (Payload, Breakdown)` | layout, truncation, accounting, provenance, labeled drops, budget utilization |
+| Token metering | counts + attribution + persistence + per-session aggregation | `Attribute(ctx, turnID, breakdown, counts)`, `SessionUsage`, `SessionBreakdown` | scale-to-total, shard `meter.db`, per-component cumulative aggregate |
 | Retriever | hybrid retrieval + provenance + eviction + status, per workspace shard | `Query`, `Index`, `IndexPath`, `Evict`, `Status`, `Get` | embedding, vec0 KNN + FTS5 bm25 fused with RRF, shard `index.db` |
 | Chunker | chunking (pure) | `Chunk(tree []Block, maxTokens int)` | splitting algorithm |
 | TextFormatter | formatting (pure) | `Normalize(kind, text)`, `Validate(kind, text)`, `Format(kind, text)` | hardcoded opinionated style |
@@ -230,7 +230,7 @@ flowchart TB
 | Workspace store (leaf) | global workspace registry + corpus scope + jobs + routing | `ResolveOrCreate`, `Get`, `List`, `FindContaining`, `Scope`, `SetScope`, job/tombstone/routing methods | `workspaces.db` |
 | Shard manager | per-workspace context-state lifecycle (lazy open, migrate, LRU close, leases) | `Services(ctx, workspaceID) → *Lease` | `workspaces/<id>/{index,sessions,meter}.db`, LRU cap, refcounts |
 | Corpus service | index-only multi-root corpus: scope, reconcile, status, async jobs, lifecycle hook | `Get`, `SetScope`, `Index`, `Evict`, `NotifyChanged` | glob walk via Filesystem, single-flight jobs, tombstones/errors |
-| Session store | sessions + their messages (one per selection/doc), workspace-scoped by shard | `ListByDocument`, `ListByWorkspace`, `Create`, `Resume`, `Append`, `History` | shard `sessions.db` |
+| Session store | sessions + their messages + persisted per-turn snapshots (one per selection/doc), workspace-scoped by shard | `ListByDocument`, `ListByWorkspace`, `Create`, `Resume`, `Append`, `History`, `SaveContext`, `TurnContext` | shard `sessions.db`, `turn_context` retention |
 | API server | REST/SSE surface (codegen'd) | routes per OpenAPI spec | framing, turnID↔session↔client correlation |
 | SSE event bus | typed event fan-out | `Emit`, `Subscribe` | connection registry, backpressure |
 

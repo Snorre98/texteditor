@@ -3,6 +3,7 @@ package assembler
 import (
 	"context"
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -259,21 +260,203 @@ func TestTruncateMentionsPure(t *testing.T) {
 		mc("/b", "bbbbbbbb"),
 		mc("/c", "cccc"),
 	}
-	kept, overflow := truncateMentions(mentions, 2) // ~8 bytes → only "aaaa" fits
-	if !overflow {
-		t.Fatal("expected overflow")
+	kept, dropped := truncateMentions(mentions, 2) // ~8 bytes → only "aaaa" fits
+	if dropped != 2 {
+		t.Fatalf("dropped = %d, want 2", dropped)
 	}
 	if len(kept) != 1 || kept[0].Path != "/a" {
 		t.Fatalf("kept = %+v, want [ /a ] (tail-first truncation)", kept)
 	}
 
-	kept, overflow = truncateMentions(mentions, 1000)
-	if overflow || len(kept) != 3 {
-		t.Fatalf("kept = %+v overflow=%v, want all 3, no overflow", kept, overflow)
+	kept, dropped = truncateMentions(mentions, 1000)
+	if dropped != 0 || len(kept) != 3 {
+		t.Fatalf("kept = %+v dropped=%d, want all 3, none dropped", kept, dropped)
 	}
 
-	kept, overflow = truncateMentions(mentions, 0)
-	if !overflow || len(kept) != 0 {
-		t.Fatalf("zero budget: kept=%+v overflow=%v, want empty + overflow", kept, overflow)
+	kept, dropped = truncateMentions(mentions, 0)
+	if dropped != 3 || len(kept) != 0 {
+		t.Fatalf("zero budget: kept=%+v dropped=%d, want empty + 3 dropped", kept, dropped)
+	}
+}
+
+// TestProvenancePerMessage covers context-inspector "A completed turn persists a
+// context snapshot": every assembled message carries its component and source.
+func TestProvenancePerMessage(t *testing.T) {
+	a := New()
+	in := dto.AssemblerInput{
+		Mode: dto.Mode{SystemPrompt: "sys"},
+		Policy: dto.PipelinePolicy{
+			MaxHistoryTokens: 1000, MaxRagTokens: 1000, MaxMentionTokens: 1000,
+		},
+		History: []dto.Message{
+			{Role: "user", Content: "earlier"},
+			{Role: "assistant", Content: "reply"},
+		},
+		RAGChunks: []dto.Chunk{{BlockID: "b1", Text: "passage", Path: "/vault/a.md"}},
+		Mentions:  []dto.MentionContent{{Path: "/vault/b.md", Text: "note"}},
+		UserInput: "fix this",
+	}
+	p, _, err := a.Assemble(context.Background(), in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p.Provenance) != len(p.Messages) {
+		t.Fatalf("provenance %d != messages %d", len(p.Provenance), len(p.Messages))
+	}
+	wantComponents := []string{"system", "history", "history", "rag", "mention", "user"}
+	got := make([]string, 0, len(p.Provenance))
+	for i, prov := range p.Provenance {
+		got = append(got, prov.Component)
+		if prov.Role != p.Messages[i].Role {
+			t.Fatalf("provenance[%d].Role = %q, message role = %q", i, prov.Role, p.Messages[i].Role)
+		}
+	}
+	if !reflect.DeepEqual(got, wantComponents) {
+		t.Fatalf("components = %v, want %v", got, wantComponents)
+	}
+	if p.Provenance[3].Source != "/vault/a.md" {
+		t.Fatalf("rag provenance source = %q, want the chunk path", p.Provenance[3].Source)
+	}
+	if p.Provenance[4].Source != "/vault/b.md" {
+		t.Fatalf("mention provenance source = %q, want the mention path", p.Provenance[4].Source)
+	}
+	for _, prov := range p.Provenance {
+		if prov.Pinned {
+			t.Fatalf("no C3 item is pinned: %+v", prov)
+		}
+	}
+}
+
+// TestHistoryAndRagTruncationDropsLabeled covers context-inspector "Truncation
+// is labeled, never silent": silent history/RAG truncation now records a drop
+// with a count, and the breakdown still sums.
+func TestHistoryAndRagTruncationDropsLabeled(t *testing.T) {
+	a := New()
+	p, b, err := a.Assemble(context.Background(), dto.AssemblerInput{
+		Mode:   dto.Mode{SystemPrompt: "sys"},
+		Policy: dto.PipelinePolicy{MaxHistoryTokens: 4, MaxRagTokens: 4, MaxMentionTokens: 1000},
+		History: []dto.Message{
+			{Role: "user", Content: "aaaaaaaaaaaaaaaaaaaa"}, // oldest, oversized
+			{Role: "assistant", Content: "ok"},
+		},
+		RAGChunks: []dto.Chunk{
+			{BlockID: "b1", Text: "tiny"},
+			{BlockID: "b2", Text: "xxxxxxxxxxxxxxxxxxxxxxxxxxxx"},
+		},
+		UserInput: "hi",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	drops := map[string]dto.ContextDrop{}
+	for _, d := range p.Drops {
+		drops[d.Component] = d
+	}
+	if d, ok := drops["history"]; !ok || d.Count != 1 {
+		t.Fatalf("history drop = %+v, want count 1", d)
+	}
+	if d, ok := drops["rag"]; !ok || d.Count != 1 {
+		t.Fatalf("rag drop = %+v, want count 1", d)
+	}
+	if b.History > 4 || b.Rag > 4 {
+		t.Fatalf("breakdown not truncated: %+v", b)
+	}
+}
+
+// TestMentionOverflowRecordsDrop: the labeled overflow line is accompanied by a
+// mention drop record.
+func TestMentionOverflowRecordsDrop(t *testing.T) {
+	a := New()
+	p, _, err := a.Assemble(context.Background(), dto.AssemblerInput{
+		Mode:      dto.Mode{SystemPrompt: "sys"},
+		Policy:    dto.PipelinePolicy{MaxMentionTokens: 6},
+		UserInput: "hi",
+		Mentions: []dto.MentionContent{
+			{Path: "/a.md", Text: "aaaa"},
+			{Path: "/b.md", Text: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mentionDrop *dto.ContextDrop
+	for i := range p.Drops {
+		if p.Drops[i].Component == "mention" {
+			mentionDrop = &p.Drops[i]
+		}
+	}
+	if mentionDrop == nil || mentionDrop.Count != 1 {
+		t.Fatalf("mention drop = %+v, want count 1", mentionDrop)
+	}
+}
+
+// TestBudgetUtilization: every component is accounted with its policy limit.
+func TestBudgetUtilization(t *testing.T) {
+	a := New()
+	p, b, err := a.Assemble(context.Background(), dto.AssemblerInput{
+		Mode:      dto.Mode{SystemPrompt: "sys"},
+		Policy:    dto.PipelinePolicy{MaxHistoryTokens: 100, MaxRagTokens: 200, MaxMentionTokens: 300},
+		History:   []dto.Message{{Role: "user", Content: "hello history"}},
+		RAGChunks: []dto.Chunk{{BlockID: "b1", Text: "a rag passage"}},
+		Mentions:  []dto.MentionContent{{Path: "/a.md", Text: "a mention"}},
+		UserInput: "input",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	usage := map[string]dto.BudgetUsage{}
+	for _, u := range p.Budget {
+		usage[u.Component] = u
+	}
+	for _, comp := range []string{"system", "tools", "rag", "history", "mentions", "user", "thinking"} {
+		if _, ok := usage[comp]; !ok {
+			t.Fatalf("budget missing component %q: %+v", comp, p.Budget)
+		}
+	}
+	// The three budgeted components carry their policy limit; used matches the
+	// deterministic breakdown (the numbers the meter scales).
+	if u := usage["history"]; u.Limit != 100 || u.Used != b.History {
+		t.Fatalf("history budget = %+v, want limit 100 used %d", u, b.History)
+	}
+	if u := usage["rag"]; u.Limit != 200 || u.Used != b.Rag {
+		t.Fatalf("rag budget = %+v, want limit 200 used %d", u, b.Rag)
+	}
+	if u := usage["mentions"]; u.Limit != 300 || u.Used != b.Mentions {
+		t.Fatalf("mentions budget = %+v, want limit 300 used %d", u, b.Mentions)
+	}
+	// Uncapped components carry no limit.
+	for _, comp := range []string{"system", "tools", "user", "thinking"} {
+		if usage[comp].Limit != 0 {
+			t.Fatalf("component %q should have no limit: %+v", comp, usage[comp])
+		}
+	}
+}
+
+// TestAssemblePayloadPurity: same inputs → identical payload, including the new
+// provenance/drops/budget slices (R4, ADR-0016 §6).
+func TestAssemblePayloadPurity(t *testing.T) {
+	a := New()
+	in := dto.AssemblerInput{
+		Mode:      dto.Mode{SystemPrompt: "sys"},
+		Policy:    dto.PipelinePolicy{MaxHistoryTokens: 1000, MaxRagTokens: 1000, MaxMentionTokens: 1000},
+		History:   []dto.Message{{Role: "user", Content: "earlier"}},
+		RAGChunks: []dto.Chunk{{BlockID: "b1", Text: "passage", Path: "/vault/a.md"}},
+		Mentions:  []dto.MentionContent{{Path: "/vault/b.md", Text: "note"}},
+		UserInput: "fix this",
+	}
+	p1, b1, err := a.Assemble(context.Background(), in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p2, b2, err := a.Assemble(context.Background(), in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(p1, p2) {
+		t.Fatalf("payload not deterministic:\n%+v\n%+v", p1, p2)
+	}
+	if b1 != b2 {
+		t.Fatalf("breakdown not deterministic")
 	}
 }

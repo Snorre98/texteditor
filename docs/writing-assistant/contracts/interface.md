@@ -43,9 +43,10 @@ embeds a sibling module's package type.
 | `BlockKind`, `TextFormatterIssue` | `TextFormatter` | 4b |
 | `Guard` | Document store (`BlockEdit`) | 9 |
 | `Session` | Session store | 10 |
-| `Payload`, `Breakdown` | Context assembler | 5 |
+| `Payload`, `Breakdown`, `MessageProvenance` | Context assembler | 5 |
+| `ContextSnapshot`, `ContextMessage`, `ContextDrop`, `BudgetUsage` | Context inspector / API | 5 |
 | `MentionContent`, `Mention` | Context assembler / Agent loop | 5, 7 |
-| `ProviderCounts`, `AttributedBreakdown` | Token metering | 6 |
+| `ProviderCounts`, `AttributedBreakdown`, `SessionMeter` | Token metering | 6 |
 | `Entry` | Filesystem | 9b |
 | `Workspace`, `CorpusScope`, `CorpusDocumentStatus`, `CorpusJob` | Workspace store, corpus surface | 9c |
 
@@ -371,8 +372,43 @@ type Request struct {     // the fully-assembled provider request (pure DTO)
 }
 
 type Payload struct {
-    Messages []Message // the assembled message list
-    Request  Request   // the provider-ready request handed verbatim to the Provider
+    Messages   []Message           // the assembled message list
+    Request    Request             // the provider-ready request handed verbatim to the Provider
+    Provenance []MessageProvenance // component + provenance for every assembled message (ADR-0044 §4)
+    Drops      []ContextDrop       // labeled truncation/drop records (never silent)
+    Budget     []BudgetUsage       // per-component utilization vs the PipelinePolicy limit
+}
+
+// MessageProvenance: one assembled message's component and source. Component ∈
+// system | history | rag | mention | user. Tokens is the deterministic estimate
+// contributing to Breakdown; Pinned is a human override (Phase C4; false in C3).
+type MessageProvenance struct {
+    Role      string
+    Component string
+    Source    string
+    Tokens    int
+    Pinned    bool
+}
+
+// ContextMessage / ContextDrop / BudgetUsage are the wire forms of the snapshot
+// (ADR-0044 §4); the snapshot is engine data clients render verbatim.
+type ContextMessage struct { Role, Component, Source string; Tokens int; Pinned bool }
+type ContextDrop struct { Component, Reason string; Count int; Detail string }
+type BudgetUsage struct { Component string; Used, Limit int }
+
+// ContextSnapshot is the persisted per-turn record (GET /turns/{id}/context and
+// the `context` SSE payload). Decision (Phase F) and Locate (Phase D) are
+// reserved optional records, unimplemented in C3.
+type ContextSnapshot struct {
+    TurnID, SessionID, WorkspaceID string
+    RetrievalQuery                 string
+    AutoRag                        bool
+    Messages                       []ContextMessage
+    Chunks                         []Chunk
+    Drops                          []ContextDrop
+    Budget                         []BudgetUsage
+    Decision, Locate               json.RawMessage // reserved, omitempty
+    CreatedAt                      int64
 }
 
 type ContextAssembler interface {
@@ -395,6 +431,16 @@ The `Mentions` budget is `PipelinePolicy.MaxMentionTokens`; over-budget
 mentions are truncated from the tail with a labeled overflow line. ADR-0045
 moved the history/RAG/mention budgets from the mode to `PipelinePolicy`.)
 
+(Amended by ADR-0044 §4 (Phase C3): `Payload` gains `Provenance`, `Drops`, and
+`Budget`. The assembler builds one `MessageProvenance` per assembled message
+(component `system|history|rag|mention|user`; `source` is the chunk/mention path
+for rag/mention rows); records labeled history/RAG/mention truncation drops with
+counts (`history-budget`, `rag-budget`, `mention-budget`); and reports
+per-component budget utilization against `PipelinePolicy` (`limit` only for the
+three budgeted components). The signature is unchanged and the leaf stays
+pure/deterministic: the assembler never knows about sessions, workspaces, or
+snapshots.)
+
 ## 6. Token metering (Go)
 
 ```go
@@ -412,6 +458,22 @@ type AttributedBreakdown struct {
 type TokenMeter interface {
     Attribute(ctx context.Context, turnID, sessionID, model string, b Breakdown, counts ProviderCounts) (AttributedBreakdown, error)
     SessionUsage(ctx context.Context, sessionID string) (int, error) // cumulative tokens per session (budget)
+    SessionBreakdown(ctx context.Context, sessionID string) (SessionMeter, error) // per-component cumulative meter
+}
+
+// SessionMeter is a session's cumulative per-component token meter
+// (GET /sessions/{id}/meter, ADR-0044 §4, ADR-0026 §5): meter_events grouped by
+// component in canonical order, plus the cumulative prompt+completion total.
+type SessionMeter struct {
+    SessionID  string
+    Components []SessionMeterComponent // system|tools|rag|history|mentions|user|thinking|completion
+    Total      int
+}
+type SessionMeterComponent struct {
+    Component        string
+    PromptTokens     int
+    CompletionTokens int
+    Approx           bool // labeled approximation (thinking, ADR-0024)
 }
 ```
 
@@ -434,6 +496,13 @@ surfaces `session-budget-exceeded`.)
 `meter_events.component` gains the `mentions` value (data-model §1.3); the
 `meter` SSE event gains a required `mentions` field. Components still sum to
 the scaled provider totals exactly (Q1).)
+
+(Amended by ADR-0044 §4 (Phase C3): `SessionBreakdown(ctx, sessionID)` was added
+so `GET /sessions/{id}/meter` can aggregate the workspace shard's `meter_events`
+by component. The meter is workspace-scoped by shard (ADR-0049 §5) — the API
+server resolves the session's shard, then reads this aggregate; there is no
+global meter total. `Attribute` and its scale-to-provider-total invariant are
+unchanged.)
 
 ## 7. Agent loop (Go)
 
@@ -485,6 +554,16 @@ Retriever/Session/Meter. The lease is released when the turn ends.)
 advertised, auto-RAG always runs (`PipelinePolicy.AutoRagTopK`), one agentic loop
 bounded by `PipelinePolicy.MaxSteps`. The single-shot `maxSteps=0` branch and all
 per-mode branches are gone.)
+
+(Amended by ADR-0044 §4 (Phase C3): at turn start the loop writes
+`Workspaces.RouteTurn(turnID, workspaceID, sessionID)` so a finished turn's
+snapshot resolves; emits the auto-RAG `rag` event (the same `{ok, chunks}`
+shape as tool retrieval) after `Query`; and, after `Assemble`, wraps the
+assembler's provenance/drops/budget plus the retrieved chunks into a
+`ContextSnapshot`, persists it through the shard Session store
+(`SaveContext`), and emits the `context` SSE event carrying the snapshot bytes.
+The assembler never knows about sessions/workspaces; the loop builds the
+envelope from the assembler output + retrieval results.)
 
 ## 8. Mode registry + Tool registry + Tool executor (Go)
 
@@ -840,6 +919,8 @@ type SessionStore interface {
     Resume(id string) (Session, error)          // find-or-open an anchored session
     Append(sessionID string, msg Message) error
     History(sessionID string) ([]Message, error)
+    SaveContext(turnID, sessionID string, snapshot json.RawMessage) error // persisted per-turn snapshot
+    TurnContext(turnID string) (json.RawMessage, error)                   // ErrNotFound when unknown
 }
 ```
 
@@ -847,13 +928,16 @@ type SessionStore interface {
 is create-or-resume: re-anchoring to the same block reopens the same session.
 The API server routes a session id to its workspace shard through the
 `workspaces.db` routing index; `Session.workspaceId` is populated on responses.
+`SaveContext` persists one turn's `ContextSnapshot` (opaque JSON passthrough —
+the leaf never parses it) and prunes the session to the newest 100 snapshots in
+one transaction (ADR-0044 §4 retention); `TurnContext` reads it back by turn id.
 
 ## 11. SSE event bus (Go)
 
 ```go
 type Event struct {
     TurnID string
-    Type   string // token|meter|candidate|diff|rag|done|error|backpressure
+    Type   string // token|meter|candidate|diff|rag|context|done|error|backpressure
     Data   json.RawMessage
 }
 
@@ -867,6 +951,13 @@ type EventBus interface {
 loop emits one `rag` event when it observes a `retrieve`/`read_note` result,
 carrying the structured tool output (the TUI's RAG-results panel consumes it,
 ADR-0013). Recorded alongside the ADR-0017 §6 amendment; not a silent change.
+
+*Amendment (ADR-0044 §4, Phase C3):* the vocabulary gains `context`. The loop
+emits one `context` event after assembly whose payload is the turn's persisted
+`ContextSnapshot` (the snapshot itself is the contract; clients never
+reconstruct it). Auto-RAG also emits a `rag` event at turn start with the same
+`{ok, chunks}` shape as tool retrieval. Clients that do not understand `context`
+must ignore it without dropping the stream (labeled, never fatal).
 
 
 ## 12. Serving lifecycle — the verb contract (transported by the daemon)

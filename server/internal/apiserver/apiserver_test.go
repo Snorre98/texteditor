@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -21,6 +22,8 @@ import (
 	"texteditor/internal/document"
 	"texteditor/internal/filesystem"
 	"texteditor/internal/fleet"
+	"texteditor/internal/genapi"
+	"texteditor/internal/session"
 	"texteditor/internal/shard"
 	"texteditor/internal/textformatter"
 	"texteditor/internal/workspace"
@@ -143,6 +146,25 @@ func (stubSessions) Append(string, dto.Message) error   { return nil }
 func (stubSessions) History(string) ([]dto.Message, error) {
 	return []dto.Message{{Role: "user", Content: "hi"}}, nil
 }
+func (stubSessions) SaveContext(string, string, json.RawMessage) error { return nil }
+func (stubSessions) TurnContext(string) (json.RawMessage, error) {
+	return json.RawMessage(`{"turnId":"t1","sessionId":"s1","workspaceId":"ws1","retrievalQuery":"q","autoRag":true,"messages":[{"role":"system","component":"system","tokens":1,"pinned":false}],"chunks":[],"drops":[],"budget":[],"createdAt":1}`), nil
+}
+
+// stubMeter implements meter.Interface for the /sessions/{id}/meter route.
+type stubMeter struct{}
+
+func (stubMeter) Attribute(context.Context, string, string, string, dto.Breakdown, dto.ProviderCounts) (dto.AttributedBreakdown, error) {
+	return dto.AttributedBreakdown{}, nil
+}
+func (stubMeter) SessionUsage(context.Context, string) (int, error) { return 5, nil }
+func (stubMeter) SessionBreakdown(_ context.Context, sessionID string) (dto.SessionMeter, error) {
+	return dto.SessionMeter{
+		SessionID:  sessionID,
+		Components: []dto.SessionMeterComponent{{Component: "system", PromptTokens: 3, CompletionTokens: 2}},
+		Total:      5,
+	}, nil
+}
 
 // stubFilesystem implements the apiserver's filesystem.Interface.
 type stubFilesystem struct {
@@ -200,6 +222,12 @@ func (stubWorkspaces) TurnRoute(string) (string, string, bool, error) {
 }
 
 var _ workspace.Interface = stubWorkspaces{}
+
+// emptyWorkspaces resolves no turn/session routing — the typed-404 path.
+type emptyWorkspaces struct{ stubWorkspaces }
+
+func (emptyWorkspaces) TurnRoute(string) (string, string, bool, error) { return "", "", false, nil }
+func (emptyWorkspaces) SessionWorkspace(string) (string, bool, error)  { return "", false, nil }
 
 // stubShards returns one fixed shard lease carrying the stub session store.
 type stubShards struct{ svc *shard.Services }
@@ -1008,4 +1036,205 @@ func readFile(t *testing.T, path string) string {
 		t.Fatal(err)
 	}
 	return string(b)
+}
+
+// ------------------------- context + meter routes (ADR-0044 §4) -------------------------
+
+// newRouteServer builds a server over the supplied workspace resolver and shard
+// services for the context/meter route tests.
+func newRouteServer(t *testing.T, ws workspace.Interface, svc *shard.Services) *Server {
+	t.Helper()
+	bus := &fakeBus{}
+	srv, err := New(Deps{
+		Fleet:      stubFleet{},
+		Modes:      stubModes{},
+		Tools:      stubTools{},
+		Doc:        stubDoc{},
+		Filesystem: &stubFilesystem{},
+		Workspaces: ws,
+		Shards:     stubShards{svc: svc},
+		Loop:       &stubLoopEmitter{bus: bus},
+	}, bus)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return srv
+}
+
+func TestGetTurnContext(t *testing.T) {
+	srv, _ := newTestServer(t)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/turns/t1/context", nil)
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("turn context = %d body %s", rec.Code, rec.Body.String())
+	}
+	var snap struct {
+		TurnID      string `json:"turnId"`
+		SessionID   string `json:"sessionId"`
+		WorkspaceID string `json:"workspaceId"`
+		AutoRag     bool   `json:"autoRag"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &snap); err != nil {
+		t.Fatal(err)
+	}
+	if snap.TurnID != "t1" || snap.SessionID != "s1" || snap.WorkspaceID != "ws1" || !snap.AutoRag {
+		t.Fatalf("snapshot = %+v, want the persisted t1/s1/ws1 snapshot", snap)
+	}
+}
+
+func TestGetTurnContextUnknownIsTyped404(t *testing.T) {
+	srv := newRouteServer(t, emptyWorkspaces{}, &shard.Services{Sessions: stubSessions{}})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/turns/nope/context", nil)
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("turn context = %d body %s, want 404", rec.Code, rec.Body.String())
+	}
+	var nf struct {
+		Error    string `json:"error"`
+		Resource string `json:"resource"`
+		ID       string `json:"id"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &nf); err != nil {
+		t.Fatal(err)
+	}
+	if nf.Error != "not-found" || nf.Resource != "turn" || nf.ID != "nope" {
+		t.Fatalf("not-found body = %+v", nf)
+	}
+}
+
+func TestGetSessionMeter(t *testing.T) {
+	srv := newRouteServer(t, stubWorkspaces{}, &shard.Services{Sessions: stubSessions{}, Meter: stubMeter{}})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/sessions/s1/meter", nil)
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("session meter = %d body %s", rec.Code, rec.Body.String())
+	}
+	var m struct {
+		SessionID  string `json:"sessionId"`
+		Total      int    `json:"total"`
+		Components []struct {
+			Component    string `json:"component"`
+			PromptTokens int    `json:"promptTokens"`
+		} `json:"components"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &m); err != nil {
+		t.Fatal(err)
+	}
+	if m.SessionID != "s1" || m.Total != 5 || len(m.Components) != 1 || m.Components[0].Component != "system" {
+		t.Fatalf("session meter = %+v", m)
+	}
+}
+
+func TestGetSessionMeterUnknownIsTyped404(t *testing.T) {
+	srv := newRouteServer(t, emptyWorkspaces{}, &shard.Services{Sessions: stubSessions{}, Meter: stubMeter{}})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/sessions/nope/meter", nil)
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("session meter = %d body %s, want 404", rec.Code, rec.Body.String())
+	}
+	var nf struct {
+		Error    string `json:"error"`
+		Resource string `json:"resource"`
+		ID       string `json:"id"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &nf); err != nil {
+		t.Fatal(err)
+	}
+	if nf.Error != "not-found" || nf.Resource != "session" || nf.ID != "nope" {
+		t.Fatalf("not-found body = %+v", nf)
+	}
+}
+
+// testSnapshotE2E is a full ContextSnapshot payload (messages/chunks/drops/
+// budget) used to prove the route returns exactly the persisted engine data.
+const testSnapshotE2E = `{"turnId":"t1","sessionId":"s1","workspaceId":"ws1","retrievalQuery":"fix","autoRag":true,"messages":[{"role":"system","component":"system","tokens":3,"pinned":false}],"chunks":[{"blockId":"b1","chunkKey":"/v/a.md#0","text":"hi","path":"/v/a.md","heading":"Intro"}],"drops":[{"component":"history","reason":"history-budget","count":2}],"budget":[{"component":"history","used":1,"limit":10}],"createdAt":2}`
+
+// snapshotLoop persists a snapshot through the real session store and emits it
+// as the `context` event, so the E2E can compare the route's response with the
+// event payload.
+type snapshotLoop struct {
+	sessions session.Interface
+	bus      *fakeBus
+	snapshot []byte
+}
+
+func (s *snapshotLoop) Run(_ context.Context, task dto.Task) (string, error) {
+	const id = "t1"
+	if err := s.sessions.SaveContext(id, task.SessionID, s.snapshot); err != nil {
+		return "", err
+	}
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		s.bus.Emit(dto.Event{TurnID: id, Type: "context", Data: s.snapshot})
+		s.bus.Emit(dto.Event{TurnID: id, Type: "done", Data: json.RawMessage(`{}`)})
+	}()
+	return id, nil
+}
+
+// TestContextSnapshotE2EMatchesEvent covers context-inspector "A completed turn
+// persists a context snapshot": the snapshot persisted through the real session
+// store is returned by GET /turns/{id}/context and is the same data the loop
+// emitted as the `context` event.
+func TestContextSnapshotE2EMatchesEvent(t *testing.T) {
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	if err := session.Migrate(context.Background(), db); err != nil {
+		t.Fatal(err)
+	}
+	store := session.New(db)
+
+	bus := &fakeBus{}
+	loop := &snapshotLoop{sessions: store, bus: bus, snapshot: []byte(testSnapshotE2E)}
+	srv, err := New(Deps{
+		Fleet:      stubFleet{},
+		Modes:      stubModes{},
+		Tools:      stubTools{},
+		Doc:        stubDoc{},
+		Filesystem: &stubFilesystem{},
+		Workspaces: stubWorkspaces{},
+		Shards:     stubShards{svc: &shard.Services{Sessions: store}},
+		Loop:       loop,
+	}, bus)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts := httptest.NewServer(http.HandlerFunc(srv.ServeHTTP))
+	defer ts.Close()
+
+	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/turn", strings.NewReader(`{"sessionId":"s1","modeName":"proofreader","documentId":"d1","userInput":"fix"}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "event: context") {
+		t.Fatalf("SSE stream missing context event: %s", body)
+	}
+
+	rec := httptest.NewRecorder()
+	getReq := httptest.NewRequest(http.MethodGet, "/turns/t1/context", nil)
+	srv.ServeHTTP(rec, getReq)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("turn context = %d body %s", rec.Code, rec.Body.String())
+	}
+
+	var fromEvent, fromRoute genapi.ContextSnapshot
+	if err := json.Unmarshal([]byte(testSnapshotE2E), &fromEvent); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &fromRoute); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(fromEvent, fromRoute) {
+		t.Fatalf("route snapshot != context event:\n route: %+v\n event: %+v", fromRoute, fromEvent)
+	}
 }

@@ -18,7 +18,7 @@ Last verified: 2026-10-04.
 | Router seam (D2–D5) + enablement seam (D1 minus the ML job) | ✅ committed (`504cd16`); **parked** (ADR-0045) — packages in-tree, unwired |
 | Track 2 — Deployment (E) · Tauri editor (F) | ✅ landed — **frozen** (ADR-0044) |
 | Fleet observability surface (ADR-0040 — `/fleet`, batch status, selectors) | ✅ |
-| Context-engine refocus (write-through safety, presets, RAG wiring, context inspector, `/locate`, context management — workspaces, multi-root corpus, tray — Ratatui TUI + reader pane) | 🚧 active roadmap — Phases A, B, C1 and C2 landed; C3–F remain — [`plans/implementation-sequence-context-engine.md`](plans/implementation-sequence-context-engine.md) |
+| Context-engine refocus (write-through safety, presets, RAG wiring, context inspector, `/locate`, context management — workspaces, multi-root corpus, tray — Ratatui TUI + reader pane) | 🚧 active roadmap — Phases A, B, C1, C2 and C3 landed; C4–F remain — [`plans/implementation-sequence-context-engine.md`](plans/implementation-sequence-context-engine.md) |
 | D1 ML fine-tune (Needle 2 `.cact` + flip a mode to `router`) | 🚧 deferred by trigger |
 | CI automation | 🚧 none |
 | `InferenceControl` surface (risk #9) | 🚧 deferred |
@@ -40,7 +40,7 @@ Last verified: 2026-10-04.
 | Layer | Status | Notes |
 |---|---|---|
 | Layer 3 — Clients (dumb, swappable) | ✅ | TUI v2 (Ratatui, ADR-0046) in progress, incl. a read-only reader pane (ADR-0050); OpenTUI + Tauri editor + web frozen; one contract (ADR-0014) |
-| API contract | ✅ | Track-1.5 + ADR-0038/0040 amendments; C1 added `/sessions` `workspaceId` + rag provenance; C2 added `/workspaces`, `/corpus`, `/corpus/index`, `/corpus/documents/{id}` and the typed ALLOWED_ROOTS 403; C3 adds `/turns/{id}/context` + `/sessions/{id}/meter` |
+| API contract | ✅ | Track-1.5 + ADR-0038/0040 amendments; C1 added `/sessions` `workspaceId` + rag provenance; C2 added `/workspaces`, `/corpus`, `/corpus/index`, `/corpus/documents/{id}` and the typed ALLOWED_ROOTS 403; C3 landed `/turns/{id}/context` + `/sessions/{id}/meter`, the `context` SSE event, and the typed `NotFound` 404 |
 | Layer 2 — Engine | ✅ | all modules below |
 | Layer 0 — Model serving | ✅ | via control daemon (ADR-0025/0027/0033), not a raw Ollama port |
 
@@ -95,7 +95,7 @@ from architecture.md §65 are future tools — not shipped; the reserved
 | Token-metering events + conversation history | ✅ |
 | git as the versioning engine | ✅ |
 | Workspace registry + corpus scope (`workspaces.db`) | ✅ C1 (registry + scope persistence); ✅ C2 (routes, status, jobs, tombstones, routing) |
-| Per-workspace context-state shards (`index.db`/`sessions.db`/`meter.db`) | ✅ C1 (lazy open + LRU + leases); ✅ C2 (corpus indexing/status/eviction); snapshots 🚧 C3–C4 |
+| Per-workspace context-state shards (`index.db`/`sessions.db`/`meter.db`) | ✅ C1 (lazy open + LRU + leases); ✅ C2 (corpus indexing/status/eviction); ✅ C3 (per-turn `turn_context` snapshots + 100/session retention); tray policy 🚧 C4 |
 
 ## Layer 3 — Clients
 
@@ -126,9 +126,11 @@ from architecture.md §65 are future tools — not shipped; the reserved
 ## The core learning surface (token metering)
 
 All six levers metered and surfaced ✅ — system prompt & mode, tool schemas, RAG
-chunks, history, thinking, completion length (Q1, ADR-0022). What is not yet
-surfaced is the **content** of those components — which messages, which chunks,
-what was dropped; the context inspector (ADR-0044, Phase 2) closes that.
+chunks, history, thinking, completion length (Q1, ADR-0022). C3 completes the
+**content** half engine-side: every turn persists a `ContextSnapshot` (per-message
+component/provenance, retrieved chunks, labeled drops, per-component budget) and
+emits it as the `context` SSE event; `GET /turns/{id}/context` replays it. The
+TUI context panel that renders it is Phase E.
 
 ## RAG design
 
@@ -136,7 +138,7 @@ what was dropped; the context inspector (ADR-0044, Phase 2) closes that.
 |---|---|
 | Chunk → embed (`nomic-embed` via Fleet) → `vec0` | ✅ C1: heading-aware chunks (versioned + `ChunkMarkdown` for corpus), per-workspace shard, idempotent per unchanged content; corpus bulk ingest/status 🚧 C2 |
 | FTS5 full-text index | ✅ C1: `Query` runs FTS5 bm25 + vec0 KNN fused with RRF (k=60) + dedupe, with path/heading provenance |
-| Auto-RAG provenance visible to clients | 🚧 auto-retrieved chunks still emit no `rag` event (C3); chunks already carry provenance |
+| Auto-RAG provenance visible to clients | ✅ C3: the loop emits a `rag` event at turn start (same shape as tool retrieval) and persists the retrieved chunks in the context snapshot; chunks carry provenance |
 | Literature **bulk ingest** / citation tool | ✅ C2: multi-root corpus scope + `POST /corpus/index` async bulk ingest + per-document status + idempotent eviction; `cite`/`search_vault` tools remain future (ADR-0045) |
 
 ## Modularity principles
@@ -154,7 +156,7 @@ The phases (A–F) are detailed in
 
 1. **Phase A — trustworthy write-through (ADR-0047)** — open revalidation + path canonicalization; pre-write conflict check (`file-changed-externally`); no-op re-sync; newest-first, base-validated candidates; guards live on the model path; symlink-safe writes; HTTP-level E2E tests.
 2. ✅ **Phase B — prompt presets + one pipeline (ADR-0045)** — landed: modes are `name`/`systemPrompt`/`defaultModel`; `config/pipeline.json` is the one validated policy (maxSteps + budgets + autoRagTopK); one agentic loop, all tools global, auto-RAG always; router parked/unwired.
-3. **Phase C — real RAG + context management + context inspector (ADR-0044, ADR-0049)** — ✅ **C1 landed** (retriever correctness + storage foundation). ✅ **C2 landed** (corpus management surface: `/workspaces`, `/corpus` scope/status/jobs, `POST /corpus/index`, idempotent `DELETE /corpus/documents/{id}`, multi-root glob walk, ALLOWED_ROOTS typed 403, `DocHook` lifecycle). Remaining: **C3** assembler v2 + snapshots + `context`/`rag` events + `/turns/{id}/context` + `/sessions/{id}/meter`; **C4** session context policy + tray overrides.
+3. **Phase C — real RAG + context management + context inspector (ADR-0044, ADR-0049)** — ✅ **C1 landed** (retriever correctness + storage foundation). ✅ **C2 landed** (corpus management surface: `/workspaces`, `/corpus` scope/status/jobs, `POST /corpus/index`, idempotent `DELETE /corpus/documents/{id}`, multi-root glob walk, ALLOWED_ROOTS typed 403, `DocHook` lifecycle). ✅ **C3 landed** (assembler v2 provenance/drops/budget; per-turn `ContextSnapshot` persisted with 100/session retention; auto-RAG `rag` event + `context` SSE; `GET /turns/{id}/context`, `GET /sessions/{id}/meter` typed 404; `RouteTurn`). Remaining: **C4** session context policy + tray overrides (`Task.context`, `PUT /sessions/{id}/context`, pins via `Retriever.Get`, humanOverride labels).
 4. **Phase D — `/locate` (ADR-0048)** — engine-side command parse; normalized exact-then-fuzzy resolver over the open document then the vault; `locate` event + snapshot record; ambiguity picker; anchored guarded edit.
 5. **Phase E — Ratatui TUI v2 (ADR-0046)** — `client/tui-rs/`; regenerated Rust client + Rust SSE decoder; preset tabs, read-only reader pane (ADR-0050 — rendered markdown over the block tree, `tui-markdown`, write path unwired), meter, context panel, diff/approve, write-through status, bracketed paste, mentions/sessions/cancel; workspace open/resume, corpus tree (multi-root scope, status, index/evict/rebuild, allowed-roots UX), context tray (pin/remove, retrieval query, auto-RAG, pin-for-session); fleet orchestration engine-side + daemon reliability fixes; retire OpenTUI on parity.
 6. **Phase F — decision layer (Laya) + thesis validation** — `laya-decider` runner; one global retrieval-gating policy; second meter row; golden-query metrics; model evaluation; budget defaults recorded.
@@ -167,7 +169,7 @@ The phases (A–F) are detailed in
 13. **Tauri unfreeze** — requires an explicit decision against ADR-0044 plus Rust codegen regeneration against the then-current OpenAPI spec; deferred chat affordances ("Stop generating", session titles) move with it.
 
 Deferred endpoint note: the bare `/files` read (ADR-0035) still lands only when a
-client needs it; `GET /sessions/{id}/meter` is Phase C3.
+client needs it; `GET /sessions/{id}/meter` landed in Phase C3.
 
 ## Verification status
 
@@ -180,3 +182,4 @@ client needs it; `GET /sessions/{id}/meter` is Phase C3.
 - Client suites: `client/tui` re-run for Phase B (above); `client/tauri` + `src-tauri` suites remain frozen with the client (ADR-0044) and were not re-run.
 - Phase C1 gates: `CGO_ENABLED=0 go test -count=1 ./...`, `go vet ./...`, `gofmt -l server/` clean; `client/tui` `bun test` + `bun run typecheck` green after the additive contract regen. New tests: retriever (stale-FTS, vec-id collision, idempotent eviction, RRF, `IndexPath` idempotency, temp-vault two-root E2E), markdown chunker, Filesystem allowlist/symlink escape, WorkspaceStore (alias/nested/scope), shard manager (lazy migrate/LRU/leases), loop fallback workspace resolution.
 - Phase C2 gates: same Go/vet/gofmt gates plus the HTTP E2E `TestCorpusHTTPE2E` (real `workspaces.db` + shard manager + retriever + corpus service over temp vaults: scope set, async index, per-document status incl. stale, idempotent eviction, rebuild, typed ALLOWED_ROOTS refusal on `/corpus` and `/directories`); corpus service tests (default scope/hidden exclusion, reconcile-evict, union-of-roots dedupe, `NotifyChanged`, `DocHook` write boundaries); `internal/glob` matcher tests. TUI regenerated against the additive contract and green.
+- Phase C3 gates: `CGO_ENABLED=0 go test -count=1 ./...`, `CGO_ENABLED=0 go vet ./...`, `gofmt -l server/` all clean; `client/tui` `bun test` (35 pass) + `bun run typecheck` green after the additive contract regen. New tests: assembler (per-message provenance, labeled history/RAG/mention drops with counts, budget utilization, payload purity); loop (auto-RAG `rag` event + `context` snapshot persisted and retrievable by turnID, `RouteTurn` written); session (`SaveContext`/`TurnContext` round-trip, newest-100 retention per session); meter (`SessionBreakdown` per-component aggregate + total); apiserver (`GET /turns/{id}/context`, `GET /sessions/{id}/meter`, typed `NotFound` 404s); TUI `context` event decode.

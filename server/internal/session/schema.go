@@ -26,4 +26,13 @@ var sessionsSchema = []string{
 		ts         INTEGER NOT NULL
 	)`,
 	`CREATE INDEX messages_session_idx ON messages(session_id)`,
+	// turn_context — one persisted context snapshot per turn (ADR-0044 §4).
+	// Retention keeps only the newest 100 rows per session (SaveContext prunes).
+	`CREATE TABLE turn_context (
+		turn_id    TEXT PRIMARY KEY,
+		session_id TEXT NOT NULL,
+		snapshot   TEXT NOT NULL,
+		created_at INTEGER NOT NULL
+	)`,
+	`CREATE INDEX turn_context_session_idx ON turn_context(session_id, created_at DESC)`,
 }

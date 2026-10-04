@@ -357,11 +357,42 @@ export type CreateSessionRequest = {
 };
 
 /**
+ * A session's cumulative token meter, aggregated from the workspace shard's meter_events by component (ADR-0026 §5, ADR-0044 §4). Newest session state is workspace-scoped; there is no global meter total (ADR-0049 §5).
+ *
+ */
+export type SessionMeter = {
+    sessionId: string;
+    components: Array<{
+        component: 'system' | 'tools' | 'rag' | 'history' | 'mentions' | 'user' | 'thinking' | 'completion';
+        promptTokens: number;
+        completionTokens: number;
+        /**
+         * True when the component is a labeled approximation (thinking, ADR-0024).
+         */
+        approx?: boolean;
+    }>;
+    /**
+     * Cumulative prompt + completion tokens across all components.
+     */
+    total: number;
+};
+
+/**
+ * A typed not-found refusal for a routing lookup that resolved to no record (an unknown turn or session id). The engine never invents data.
+ *
+ */
+export type NotFound = {
+    error: 'not-found';
+    resource: 'turn' | 'session';
+    id: string;
+};
+
+/**
  * Framing marker for the SSE stream: the `event:` line carries `type`; the `data:` line carries the payload schema matching that type. The payload JSON itself has no `type` field.
  *
  */
 export type Event = {
-    type: 'token' | 'meter' | 'candidate' | 'diff' | 'rag' | 'done' | 'error' | 'backpressure';
+    type: 'token' | 'meter' | 'candidate' | 'diff' | 'rag' | 'context' | 'done' | 'error' | 'backpressure';
 };
 
 export type TokenEvent = {
@@ -433,6 +464,92 @@ export type ChunkRef = {
     chunkKey: string;
     hash?: string;
 };
+
+/**
+ * The engine-owned, persisted record of one turn's assembled context (ADR-0044 §4, ADR-0049 §7): every assembled message with its component and provenance, the retrieved chunks, the labeled drops, and the budget accounting. The snapshot itself is the contract — clients render it and never reconstruct provenance, budgets, or drops. The optional `decision` (Phase F) and `locate` (Phase D) records are reserved and not implemented in Phase C3.
+ *
+ */
+export type ContextSnapshot = {
+    turnId: string;
+    sessionId: string;
+    workspaceId: string;
+    /**
+     * The query auto-RAG ran (the turn's user input).
+     */
+    retrievalQuery: string;
+    autoRag: boolean;
+    messages: Array<ContextMessage>;
+    chunks: Array<ContextChunk>;
+    drops: Array<ContextDrop>;
+    budget: Array<BudgetUsage>;
+    /**
+     * Reserved for Phase F decision records; not implemented in Phase C3.
+     */
+    decision?: {
+        [key: string]: unknown;
+    };
+    /**
+     * Reserved for Phase D locate outcomes; not implemented in Phase C3.
+     */
+    locate?: {
+        [key: string]: unknown;
+    };
+    createdAt: number;
+};
+
+/**
+ * One assembled message's component and provenance. `tool`/`thinking` are components but not messages, so they appear in the budget accounting.
+ *
+ */
+export type ContextMessage = {
+    role: 'system' | 'user' | 'assistant' | 'tool';
+    component: 'system' | 'history' | 'rag' | 'mention' | 'user';
+    source?: string;
+    tokens: number;
+    /**
+     * True for a human-pinned item (Phase C4); false in Phase C3.
+     */
+    pinned: boolean;
+};
+
+/**
+ * One retrieved chunk recorded in the snapshot; the same shape as a RagEvent chunk, with provenance (ADR-0044 §3).
+ *
+ */
+export type ContextChunk = {
+    blockId: string;
+    chunkKey?: string;
+    text: string;
+    score?: number;
+    source?: string;
+    path?: string;
+    heading?: string;
+};
+
+/**
+ * One labeled truncation/drop record. Truncation is never silent (ADR-0044 §3, failure-semantics §4).
+ *
+ */
+export type ContextDrop = {
+    component: 'history' | 'rag' | 'mention';
+    reason: string;
+    count: number;
+    detail?: string;
+};
+
+/**
+ * Per-component budget utilization (used vs the PipelinePolicy limit).
+ */
+export type BudgetUsage = {
+    component: 'system' | 'tools' | 'rag' | 'history' | 'mentions' | 'user' | 'thinking';
+    used: number;
+    /**
+     * The PipelinePolicy limit for this component; 0/absent when none applies.
+     */
+    limit?: number;
+};
+
+export type ContextEvent = ContextSnapshot;
 
 export type DoneEvent = {
     degraded?: boolean;
@@ -955,7 +1072,7 @@ export type StartTurnData = {
 
 export type StartTurnResponses = {
     /**
-     * SSE event stream. Each message is `event: <type>` followed by `data: <payload>` where <type> is one of the Event.type enum values and <payload> is the matching component schema (TokenEvent, MeterEvent, CandidateEvent, DiffEvent, RagEvent, DoneEvent, ErrorEvent, BackpressureEvent). One turn per connection: the server demultiplexes a turn's events to exactly one client stream, so payloads do not repeat the turnId. (ADR-0017 §6, amended.)
+     * SSE event stream. Each message is `event: <type>` followed by `data: <payload>` where <type> is one of the Event.type enum values and <payload> is the matching component schema (TokenEvent, MeterEvent, CandidateEvent, DiffEvent, RagEvent, ContextEvent, DoneEvent, ErrorEvent, BackpressureEvent). One turn per connection: the server demultiplexes a turn's events to exactly one client stream, so payloads do not repeat the turnId. (ADR-0017 §6, amended.)
      *
      */
     200: Event;
@@ -1015,3 +1132,57 @@ export type GetSessionMessagesResponses = {
 };
 
 export type GetSessionMessagesResponse = GetSessionMessagesResponses[keyof GetSessionMessagesResponses];
+
+export type GetTurnContextData = {
+    body?: never;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/turns/{id}/context';
+};
+
+export type GetTurnContextErrors = {
+    /**
+     * no snapshot exists for the turn id
+     */
+    404: NotFound;
+};
+
+export type GetTurnContextError = GetTurnContextErrors[keyof GetTurnContextErrors];
+
+export type GetTurnContextResponses = {
+    /**
+     * the turn's context snapshot
+     */
+    200: ContextSnapshot;
+};
+
+export type GetTurnContextResponse = GetTurnContextResponses[keyof GetTurnContextResponses];
+
+export type GetSessionMeterData = {
+    body?: never;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/sessions/{id}/meter';
+};
+
+export type GetSessionMeterErrors = {
+    /**
+     * no session exists with the id
+     */
+    404: NotFound;
+};
+
+export type GetSessionMeterError = GetSessionMeterErrors[keyof GetSessionMeterErrors];
+
+export type GetSessionMeterResponses = {
+    /**
+     * the session's cumulative meter
+     */
+    200: SessionMeter;
+};
+
+export type GetSessionMeterResponse = GetSessionMeterResponses[keyof GetSessionMeterResponses];

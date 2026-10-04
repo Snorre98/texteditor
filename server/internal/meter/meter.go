@@ -27,6 +27,9 @@ type TokenMeter interface {
 	// across all its turns). It backs the per-session budget check (ADR-0026 §5) —
 	// the meter owns the cumulative tally, so the loop reads it from here.
 	SessionUsage(ctx context.Context, sessionID string) (int, error)
+	// SessionBreakdown aggregates a session's meter_events by component
+	// (interface.md §6); it backs GET /sessions/{id}/meter (ADR-0044 §4).
+	SessionBreakdown(ctx context.Context, sessionID string) (dto.SessionMeter, error)
 }
 
 // Interface is an alias for TokenMeter (the contracted name, interface.md §6).
@@ -178,6 +181,49 @@ func (m *meter) SessionUsage(ctx context.Context, sessionID string) (int, error)
 		return 0, err
 	}
 	return total, nil
+}
+
+// meterComponents is the canonical component order for SessionBreakdown, so the
+// response shape is deterministic regardless of row insertion order.
+var meterComponents = []string{"system", "tools", "rag", "history", "mentions", "user", "thinking", "completion"}
+
+// SessionBreakdown aggregates a session's meter_events by component and returns
+// the cumulative per-component totals plus the overall total (interface.md §6).
+// Only components with persisted rows are returned; the scaling invariant of
+// Attribute is unchanged (the component sum equals the provider prompt total).
+func (m *meter) SessionBreakdown(ctx context.Context, sessionID string) (dto.SessionMeter, error) {
+	rows, err := m.db.QueryContext(ctx,
+		`SELECT component, COALESCE(SUM(prompt_tokens), 0), COALESCE(SUM(completion_tokens), 0), COALESCE(MAX(approx), 0)
+		 FROM meter_events WHERE session_id = ? GROUP BY component`, sessionID)
+	if err != nil {
+		return dto.SessionMeter{}, err
+	}
+	defer rows.Close()
+
+	byComponent := map[string]dto.SessionMeterComponent{}
+	for rows.Next() {
+		var c dto.SessionMeterComponent
+		var approx int
+		if err := rows.Scan(&c.Component, &c.PromptTokens, &c.CompletionTokens, &approx); err != nil {
+			return dto.SessionMeter{}, err
+		}
+		c.Approx = approx != 0
+		byComponent[c.Component] = c
+	}
+	if err := rows.Err(); err != nil {
+		return dto.SessionMeter{}, err
+	}
+
+	out := dto.SessionMeter{SessionID: sessionID, Components: []dto.SessionMeterComponent{}}
+	for _, name := range meterComponents {
+		c, ok := byComponent[name]
+		if !ok {
+			continue
+		}
+		out.Components = append(out.Components, c)
+		out.Total += c.PromptTokens + c.CompletionTokens
+	}
+	return out, nil
 }
 
 // SessionExceeded reports whether adding nextTokens to a session's cumulative

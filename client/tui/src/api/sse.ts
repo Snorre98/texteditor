@@ -22,10 +22,10 @@ import type { Task } from "../generated/types.gen";
 import {
   zBackpressureEvent,
   zCandidateEvent,
+  zContextEvent,
   zDiffEvent,
   zDoneEvent,
   zErrorEvent,
-  zEvent,
   zMeterEvent,
   zRagEvent,
   zTokenEvent,
@@ -37,6 +37,7 @@ export const SSE_EVENT_NAMES = [
   "candidate",
   "diff",
   "rag",
+  "context",
   "done",
   "error",
   "backpressure",
@@ -56,6 +57,7 @@ export const PAYLOAD_SCHEMAS: Record<SseEventName, ZodType<unknown>> = {
   candidate: zCandidateEvent,
   diff: zDiffEvent,
   rag: zRagEvent,
+  context: zContextEvent,
   done: zDoneEvent,
   error: zErrorEvent,
   backpressure: zBackpressureEvent,
@@ -200,5 +202,9 @@ function dispatch(message: RawSseMessage, handler: TurnStreamHandler): RawSseDis
 }
 
 export function isSseEventName(name: string): name is SseEventName {
-  return (zEvent.shape.type.options as readonly string[]).includes(name);
+  // The generated `zEvent` enum is the source of the vocabulary, but a name is
+  // only dispatchable when a payload schema exists for it. Requiring presence in
+  // PAYLOAD_SCHEMAS means a newly-added enum value (e.g. `context`) is labeled as
+  // unknown instead of throwing at `schema.safeParse` (ADR-0017 §2, ADR-0031 §4).
+  return Object.prototype.hasOwnProperty.call(PAYLOAD_SCHEMAS, name);
 }

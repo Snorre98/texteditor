@@ -373,6 +373,37 @@ export const zCreateSessionRequest = z.object({
     modeType: z.string().optional()
 });
 
+export const zSessionMeter = z.object({
+    sessionId: z.string(),
+    components: z.array(z.object({
+        component: z.enum([
+            'system',
+            'tools',
+            'rag',
+            'history',
+            'mentions',
+            'user',
+            'thinking',
+            'completion'
+        ]),
+        promptTokens: z.number().int(),
+        completionTokens: z.number().int(),
+        approx: z.boolean().optional()
+    })),
+    total: z.number().int()
+});
+
+export const zNotFound = z.object({
+    error: z.enum([
+        'not-found'
+    ]),
+    resource: z.enum([
+        'turn',
+        'session'
+    ]),
+    id: z.string()
+});
+
 export const zEvent = z.object({
     type: z.enum([
         'token',
@@ -380,6 +411,7 @@ export const zEvent = z.object({
         'candidate',
         'diff',
         'rag',
+        'context',
         'done',
         'error',
         'backpressure'
@@ -440,6 +472,123 @@ export const zChunkRef = z.object({
     chunkKey: z.string(),
     hash: z.string().optional()
 });
+
+export const zContextSnapshot = z.object({
+    turnId: z.string(),
+    sessionId: z.string(),
+    workspaceId: z.string(),
+    retrievalQuery: z.string(),
+    autoRag: z.boolean(),
+    messages: z.array(z.object({
+        role: z.enum([
+            'system',
+            'user',
+            'assistant',
+            'tool'
+        ]),
+        component: z.enum([
+            'system',
+            'history',
+            'rag',
+            'mention',
+            'user'
+        ]),
+        source: z.string().optional(),
+        tokens: z.number().int(),
+        pinned: z.boolean()
+    })),
+    chunks: z.array(z.object({
+        blockId: z.string(),
+        chunkKey: z.string().optional(),
+        text: z.string(),
+        score: z.number().optional(),
+        source: z.string().optional(),
+        path: z.string().optional(),
+        heading: z.string().optional()
+    })),
+    drops: z.array(z.object({
+        component: z.enum([
+            'history',
+            'rag',
+            'mention'
+        ]),
+        reason: z.string(),
+        count: z.number().int(),
+        detail: z.string().optional()
+    })),
+    budget: z.array(z.object({
+        component: z.enum([
+            'system',
+            'tools',
+            'rag',
+            'history',
+            'mentions',
+            'user',
+            'thinking'
+        ]),
+        used: z.number().int(),
+        limit: z.number().int().optional()
+    })),
+    decision: z.object({}).optional(),
+    locate: z.object({}).optional(),
+    createdAt: z.coerce.bigint()
+});
+
+export const zContextMessage = z.object({
+    role: z.enum([
+        'system',
+        'user',
+        'assistant',
+        'tool'
+    ]),
+    component: z.enum([
+        'system',
+        'history',
+        'rag',
+        'mention',
+        'user'
+    ]),
+    source: z.string().optional(),
+    tokens: z.number().int(),
+    pinned: z.boolean()
+});
+
+export const zContextChunk = z.object({
+    blockId: z.string(),
+    chunkKey: z.string().optional(),
+    text: z.string(),
+    score: z.number().optional(),
+    source: z.string().optional(),
+    path: z.string().optional(),
+    heading: z.string().optional()
+});
+
+export const zContextDrop = z.object({
+    component: z.enum([
+        'history',
+        'rag',
+        'mention'
+    ]),
+    reason: z.string(),
+    count: z.number().int(),
+    detail: z.string().optional()
+});
+
+export const zBudgetUsage = z.object({
+    component: z.enum([
+        'system',
+        'tools',
+        'rag',
+        'history',
+        'mentions',
+        'user',
+        'thinking'
+    ]),
+    used: z.number().int(),
+    limit: z.number().int().optional()
+});
+
+export const zContextEvent = zContextSnapshot;
 
 export const zDoneEvent = z.object({
     degraded: z.boolean().optional(),
@@ -510,3 +659,7 @@ export const zListSessionsResponse = z.array(zSession);
 export const zCreateSessionResponse = zSession;
 
 export const zGetSessionMessagesResponse = z.array(zMessage);
+
+export const zGetTurnContextResponse = zContextSnapshot;
+
+export const zGetSessionMeterResponse = zSessionMeter;

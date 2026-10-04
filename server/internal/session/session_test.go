@@ -143,3 +143,78 @@ func TestResumeNotFound(t *testing.T) {
 		t.Fatalf("want ErrNotFound, got %v", err)
 	}
 }
+
+func TestSaveContextRoundTrip(t *testing.T) {
+	s := newTestStore(t)
+	sess, _ := s.Create("doc1", nil, "editor")
+
+	snap := []byte(`{"turnId":"t1","messages":[{"component":"system"}]}`)
+	if err := s.SaveContext("t1", sess.ID, snap); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.TurnContext("t1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(snap) {
+		t.Fatalf("TurnContext = %s, want %s", got, snap)
+	}
+
+	// Re-saving the same turn upserts, not duplicates.
+	if err := s.SaveContext("t1", sess.ID, []byte(`{"turnId":"t1","v":2}`)); err != nil {
+		t.Fatal(err)
+	}
+	got, _ = s.TurnContext("t1")
+	if string(got) != `{"turnId":"t1","v":2}` {
+		t.Fatalf("TurnContext after upsert = %s", got)
+	}
+
+	if _, err := s.TurnContext("missing"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("unknown turn: want ErrNotFound, got %v", err)
+	}
+}
+
+func TestSaveContextRetentionKeepsNewest100(t *testing.T) {
+	s := newTestStore(t)
+	sess, _ := s.Create("doc1", nil, "editor")
+
+	// Insert 105 snapshots for one session; retention keeps the newest 100.
+	for i := 0; i < 105; i++ {
+		if err := s.SaveContext("t-"+itoa(i), sess.ID, []byte(`{"i":`+itoa(i)+`}`)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The oldest five (t-0..t-4) are pruned; the newest is retained.
+	if _, err := s.TurnContext("t-0"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("oldest snapshot should be pruned, got %v", err)
+	}
+	if _, err := s.TurnContext("t-5"); err != nil {
+		t.Fatalf("snapshot t-5 should be retained: %v", err)
+	}
+	if _, err := s.TurnContext("t-104"); err != nil {
+		t.Fatalf("newest snapshot should be retained: %v", err)
+	}
+	// A second session's snapshots are unaffected by the first's retention.
+	sess2, _ := s.Create("doc2", nil, "editor")
+	if err := s.SaveContext("other", sess2.ID, []byte(`{}`)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.TurnContext("other"); err != nil {
+		t.Fatalf("second session snapshot pruned: %v", err)
+	}
+}
+
+// itoa is a tiny local int formatter (avoids importing strconv in the test).
+func itoa(i int) string {
+	if i == 0 {
+		return "0"
+	}
+	var b [20]byte
+	p := len(b)
+	for i > 0 {
+		p--
+		b[p] = byte('0' + i%10)
+		i /= 10
+	}
+	return string(b[p:])
+}
