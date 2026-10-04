@@ -2105,3 +2105,27 @@ func (e *anchoredExecutor) Invoke(_ context.Context, name string, args json.RawM
 	}
 	return json.RawMessage(`{"ok":true,"blockId":"` + in.BlockID + `"}`), nil
 }
+
+// The production path builds the sealed locate resolver from the open document,
+// the turn's workspace Retriever, and the Filesystem when Deps.Locate is nil.
+func TestLocateProductionResolverWiring(t *testing.T) {
+	bus := &stubBus{done: make(chan struct{})}
+	deps := happyPathDeps(bus)
+	deps.Locate = nil
+	deps.Doc = stubDoc{
+		path:   "/vault/d1.md",
+		blocks: []dto.Block{{ID: "b1", Kind: dto.BlockKindParagraph, Text: "Wired paragraph.", Hash: "h1"}},
+	}
+	l := New(deps)
+	if _, err := l.Run(context.Background(), dto.Task{
+		SessionID: "s1", ModeName: "proofreader", DocumentID: "d1",
+		UserInput: "/locate\nWired paragraph.",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	waitDone(t, bus)
+	res := locateEventOf(t, busEvents(t, bus))
+	if res.Status != dto.LocateStatusResolved || res.BlockID != "b1" {
+		t.Fatalf("locate = %+v, want resolved b1 via the real resolver", res)
+	}
+}
