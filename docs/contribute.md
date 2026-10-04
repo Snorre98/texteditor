@@ -9,8 +9,10 @@ The dev-facing complement to [`README.md`](../README.md) (which covers only buil
 ```
 api/openapi.yaml   the single contract every client codegens from (ADR-0017)
 server/            the Go engine (cmd/texteditor + internal/* + shared/dto)
-client/tui/        the OpenTUI + Solid client (dumb, generated from the spec)
-client/tauri/      the Tauri 2 + Vue 3 editor (dumb; generated Rust client +
+client/tui/        the OpenTUI + Solid client (frozen; ADR-0046 §9)
+client/tui-rs/     the standalone Ratatui TUI (ADR-0046; own generated Rust
+                   client + hand-written SSE decoder, plain cargo)
+client/tauri/      the Tauri 2 + Vue 3 editor (frozen; generated Rust client +
                    engine spawned as a bundled sidecar, ADR-0021 §1)
 docs/writing-assistant/   architecture, ADRs, contracts, behavior specs
 tools/             build.sh (standalone daemon) · build-tauri.sh (desktop
@@ -27,9 +29,15 @@ Any route/shape change lands in [`api/openapi.yaml`](../api/openapi.yaml)
 ```sh
 cd server && go generate ./...                                    # ogen (Go server)
 cd client/tui && bun run gen                                      # Hey API + Zod (TS)
-cd client/tauri && openapi-to-rust generate -c openapi-to-rust.toml   # Rust client
+cd client/tui-rs && openapi-to-rust generate -c openapi-to-rust.toml && cargo fmt   # Rust TUI (ADR-0046)
+cd client/tauri && openapi-to-rust generate -c openapi-to-rust.toml   # Rust (Tauri — frozen)
 cd client/tauri && bun run gen                                    # Hey API + Zod (TS)
 ```
+
+The trailing `cargo fmt` in the TUI regen normalizes the committed generated
+tree (openapi-to-rust output is not rustfmt-formatted; `rustfmt.toml`'s `ignore`
+is nightly-only). `client/tui-rs` must be regenerated before `client/tauri`'s
+frozen tree is ever unfrozen (ADR-0044/0046).
 
 Generated code is committed and never hand-shaped; spec extensions are recorded
 amendments in the ADRs (ADR-0002/0017). Streaming: `/turn` is
@@ -41,6 +49,8 @@ Pinned toolchain notes:
   unpublished package) and `@hey-api/client-fetch@0.7.2` (last version whose
   `Options` carries `client`).
 - Tauri: `openapi-to-rust` v0.15.0.
+- Ratatui TUI (`client/tui-rs`): `openapi-to-rust` v0.15.0 (own tree); plain
+  `cargo`, no Tauri CLI/Node/Bun. Build with `tools/build-tui-rs.sh`.
 
 ## Engine flags / env
 
@@ -61,6 +71,7 @@ clients can discover rather than assume (ADR-0021 §1).
 ```sh
 cd server && CGO_ENABLED=0 go test ./...        # engine — boundary-tested (ADR-0022 Q5)
 cd client/tui && bun test && bun run typecheck  # discovery/decoder/store/component
+cd client/tui-rs && cargo test                  # Rust TUI: discovery/SSE/state (ADR-0046)
 cd client/tauri && bun test && bun run typecheck
 cd client/tauri/src-tauri && cargo test         # sidecar handshake (needs the daemon)
 ```
@@ -74,6 +85,13 @@ needs a running engine + control daemon + a live model tagged `editor`):
 
 ```sh
 tools/smoke-write-through.sh   # ENGINE_URL defaults to http://127.0.0.1:9100
+```
+
+The Ratatui TUI's transport tests are `#[ignore]`d live tests (a running engine,
+no model needed — the approve/write-through/conflict path is deterministic HTTP):
+
+```sh
+cd client/tui-rs && cargo test --test live_engine -- --ignored --nocapture --test-threads=1
 ```
 
 Manual live smoke for the Phase C context engine (ADR-0044/0049; excluded from

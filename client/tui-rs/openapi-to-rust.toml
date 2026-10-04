@@ -1,0 +1,31 @@
+# openapi-to-rust codegen config for the standalone Ratatui TUI (ADR-0046 §2).
+#
+# The TUI owns its own generated tree (src/generated, module `gen`), regenerated
+# from the single contract every client consumes (api/openapi.yaml). The Tauri
+# tree stays frozen and untouched (ADR-0044); this is the Rust-codegen unfreeze
+# scoped to the TUI only.
+#
+# Streaming fit (recorded): the generator detects the `POST /turn`
+# `text/event-stream` response and emits `start_turn` as a live byte stream
+# (Accept: text/event-stream), ignoring the `x-ogen-raw-response` marker
+# (ADR-0031 §4). The SSE event vocabulary is a set of *separate* payload
+# schemas keyed by the SSE `event:` name (TokenEvent/MeterEvent/…), not a
+# single discriminator-tagged union, so the tool's opt-in typed "event union"
+# streaming client does not apply here; the hand-written Rust decoder
+# (src/sse.rs) decodes the raw stream against the per-type schemas, exactly as
+# the TUI's Zod decoders do. No `[[streaming.endpoints]]` is configured.
+#
+# Regenerate with:
+#   openapi-to-rust generate -c client/tui-rs/openapi-to-rust.toml
+# (tool pinned at v0.15.0 — see docs/contribute.md)
+
+[generator]
+spec_path = "../../api/openapi.yaml"
+output_dir = "src/generated"
+module_name = "gen"
+
+[features]
+enable_async_client = true
+
+[http_client.tracing]
+enabled = false

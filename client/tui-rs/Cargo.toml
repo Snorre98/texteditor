@@ -1,0 +1,33 @@
+[package]
+name = "texteditor-tui-rs"
+version = "0.1.0"
+edition = "2021"
+description = "Standalone Ratatui TUI client for the writing-assistant engine (ADR-0046). A dumb client: the API surface is generated from api/openapi.yaml (openapi-to-rust), the SSE stream is hand-decoded per ADR-0031, and the engine is contacted over the existing contract."
+license = "MIT"
+
+[lib]
+name = "texteditor_tui_rs"
+path = "src/lib.rs"
+
+[[bin]]
+name = "texteditor-tui-rs"
+path = "src/main.rs"
+
+[dependencies]
+# Generated-client deps (api/openapi.yaml, openapi-to-rust v0.15.0 — REQUIRED_DEPS.toml).
+bytes = { version = "1", features = ["serde"] }
+futures-util = "0.3"
+reqwest = { version = "0.13", default-features = false, features = ["query", "rustls", "stream"] }
+reqwest-middleware = { version = "0.5", features = ["query"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+
+# TUI (ADR-0046 §1): Ratatui widgets on crossterm, plain cargo, no Tauri/Node.
+ratatui = "0.29"
+crossterm = "0.28"
+
+# Async bridge (ADR-0046 §4): one runtime owns the generated calls + the /turn
+# byte stream; the UI thread is synchronous. No other tokio features are needed
+# (the generated reqwest client supplies its own I/O reactor).
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
