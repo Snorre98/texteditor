@@ -58,17 +58,18 @@ row: ADR-0001/0016 map to it and to §2/§5.2/§8.
 | 0048 | §4, §5.2, §6, §8 | locate-anchor | interface, data-model | Q4, Q6 |
 | 0049 | §4, §5.2, §8 | context-management | interface, data-model | Q1, Q6 |
 | 0050 | §3, §7 | client-swap | module-boundaries | — |
+| 0051 | §4, §5.2, §8 | context-budgets | interface, failure-semantics, data-model | Q1, Q6 |
 
 ## Behavior contract ↔ quality scenario coverage
 
 | §10.2 scenario | Behavior contract |
 |---|---|
-| Q1 (transparent token cost) | token-metering.feature, context-management.feature |
+| Q1 (transparent token cost) | token-metering.feature, context-management.feature, context-budgets.feature |
 | Q2 (modifiability) | serving-control.feature, provider-hotswap.feature |
 | Q3 (hot-swappable serving) | provider-hotswap.feature |
 | Q4 (edit integrity) | versioning.feature, locate-anchor.feature |
 | Q5 (testability) | client-swap.feature (dumb generated clients) |
-| Q6 (explainable context) | context-inspector.feature, locate-anchor.feature, context-management.feature |
+| Q6 (explainable context) | context-inspector.feature, locate-anchor.feature, context-management.feature, context-budgets.feature |
 
 ## Behavior contract ↔ ADR coverage
 
@@ -88,6 +89,7 @@ row: ADR-0001/0016 map to it and to §2/§5.2/§8.
 | context-inspector.feature | 0044, 0011, 0024, 0036 |
 | locate-anchor.feature | 0048, 0036, 0029, 0047 |
 | context-management.feature | 0049, 0011, 0036, 0044, 0048 |
+| context-budgets.feature | 0051, 0011, 0024, 0045, 0049 |
 
 ## Supersession notes
 
@@ -161,6 +163,12 @@ row: ADR-0001/0016 map to it and to §2/§5.2/§8.
 - ADR-0046 §5/§9 → *amended* by ADR-0050: the TUI gains a read-only document
   reader pane (rendered markdown over the engine block tree) whose write path is
   left unwired; no editor, no manual save — ADR-0047 still holds.
+- ADR-0011/0024/0044/0045/0049 → *extended* (not reversed) by ADR-0051: the
+  assembler's budgets gain a per-turn model-window gate, thinking becomes a
+  policy (`off|auto|on`) with exact metering, `Session.tokenBudget` gains
+  soft/hard semantics and metered compaction, and per-turn measurements are
+  recorded. ADR-0026 §5 is *amended* (the bare pre-turn check becomes the
+  enforced soft/hard policy); bounded by ADR-0045 (no per-preset fields).
 - ADR-0011/0036/0044/0048 → *extended* (not reversed) by ADR-0049: workspaces,
   a multi-root corpus scope with per-document status and idempotent eviction,
   the `ALLOWED_ROOTS` filesystem boundary, and the per-turn context tray are

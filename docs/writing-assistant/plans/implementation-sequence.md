@@ -37,11 +37,12 @@ Three tracks:
   was built) with the phased detail in
   [`implementation-sequence-track2.md`](implementation-sequence-track2.md)
   (order).
-- **Track 3 — context engine (active).** ADR-0044 as extended by ADR-0045–0049:
+- **Track 3 — context engine (active).** ADR-0044 as extended by ADR-0045–0051:
   trustworthy write-through, prompt presets + one pipeline, real RAG + context
   inspector, `/locate` anchoring, context management (workspaces, multi-root
   corpus scope, allowed-roots boundary, and the per-turn context tray,
-  ADR-0049), and the Ratatui TUI v2 —
+  ADR-0049), reasoning policy + context-window budgets (ADR-0051), and the
+  Ratatui TUI v2 —
   [`implementation-sequence-context-engine.md`](implementation-sequence-context-engine.md).
 
 The router (Plan D) is additive and off-by-default: its *seam* is built in

@@ -352,6 +352,8 @@ flowchart TB
 | Decision layer | retrieval gating as a second metered model call; one global pipeline policy; fail-open with labeled degradation — ADR-0044 (extends ADR-0028); no per-mode config (ADR-0045) |
 | Context inspector | persisted per-turn snapshot: assembled messages with component + provenance, retrieval/decision outcomes, budgets, labeled drops; engine data, clients render — ADR-0044, ADR-0011 |
 | Context management | workspace registry + multi-root corpus scope (roots + include/exclude, per-document status, idempotent eviction) and the per-turn context tray (pin/remove, retrieval query, auto-RAG); Workspace ≠ Corpus — the workspace root bounds browsing/editing only — ADR-0049 |
+| Reasoning policy | thinking off / auto / on (pipeline default, session + per-turn override); `auto` escalates once after a structured failure; runner thinking toggle mapped with a labeled degrade; exact thinking metering + `thinking` event; truncation labeled — ADR-0051 |
+| Context budgets | per-turn window gate (priority drops labeled `context-window`, typed refusal when fixed+pinned+user overflow); session soft/hard budget; metered, labeled compaction of oldest history; per-turn latency/token/window measurements — ADR-0051 (amends ADR-0026 §5) |
 | Workspace-scoped storage | global `app.db` + git/worktree for document identity, `workspaces.db` for the registry; per-workspace context-state shards (`index.db`/`sessions.db`/`meter.db`) opened lazily — one file per service *instance*, not per service — ADR-0049 (amends ADR-0016) |
 | Filesystem boundary | `ALLOWED_ROOTS` bounds `GET /directories` browsing and corpus indexing; outside paths are typed refusals, even at `ENGINE_BIND=0.0.0.0` — ADR-0049, ADR-0021 |
 | Edit formatting | the engine owns the bytes: whole-block edits, `TextFormatter` normalize/validate/format, block-level guard, structured edit result — ADR-0029 |
@@ -416,6 +418,7 @@ Full records in [adr/](adr/). Index:
 | 0048 | `/locate`: anchor a pasted chunk to its vault location | Accepted |
 | 0049 | Context management: workspaces, multi-root corpus, allowed-roots boundary, context tray | Accepted — amends 0016 (per-instance SQLite), 0026 (workspace-scoped sessions), 0035 §3 (workspace entity; leaf rename) |
 | 0050 | TUI reader pane: read-only rendered markdown over the engine block tree, editor-extensible | Accepted — amends 0046 §5/§9 |
+| 0051 | Reasoning policy and context-window budgets: thinking off/auto/on, window gate, session budget + compaction, exact thinking metering | Accepted — extends 0011/0024/0044/0045/0049; amends 0026 §5 |
 
 ## 10. Quality Requirements
 
@@ -462,6 +465,7 @@ Each is an SEI general scenario with a concrete response-measure (ADR-0022).
 | chat-window.feature | Tauri floating chat window (frozen) | 0041, 0042 |
 | locate-anchor.feature | `/locate` chunk anchoring: deterministic resolve, ambiguity, anchored guarded edit | 0048, 0036, 0029, 0047 |
 | context-management.feature | workspaces, multi-root corpus scope, allowed-roots boundary, context tray, pin-vs-gate | 0049, 0011, 0036, 0044, 0048 |
+| context-budgets.feature | thinking policy + bounded escalation, exact thinking metering, window gate + refusal, session soft/hard budget, metered compaction, turn measurements | 0051, 0011, 0024, 0045, 0049 |
 
 ### 10.3 Definition of done (documentation)
 
@@ -515,6 +519,9 @@ The documentation set is complete when:
 | Allowed roots | the `ALLOWED_ROOTS` allowlist bounding directory browsing and corpus indexing; outside paths are refused with a typed error (ADR-0049, ADR-0021) |
 | Context snapshot | the persisted per-turn record of the assembled payload: messages, component + provenance, retrieval/decision outcomes, budgets, labeled drops |
 | Context inspector | the contract surface + TUI panel that renders context snapshots (ADR-0044) |
+| Thinking policy | the engine's off / auto / on decision over the runner's thinking channel; `auto` escalates once after a structured failure (ADR-0051) |
+| Context-window gate | the pre-call check that the assembled payload plus the output reserve fits the model's window; overflow is a labeled drop or a typed refusal (ADR-0051) |
+| Compaction | replacing the oldest session history with one metered, labeled summary so a session can keep running (ADR-0051) |
 | Decision layer | the optional typed-decision model (Laya) that gates retrieval as a second metered call under one global policy (ADR-0044, ADR-0045) |
 | Preset | a mode's minimal form — name + system prompt + default model; presented as TUI tabs (ADR-0045) |
 | Locate anchor | the document + block resolved from a pasted chunk by `/locate` (ADR-0048) |

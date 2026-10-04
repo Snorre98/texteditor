@@ -9,7 +9,10 @@ write-through + conflicts), [ADR-0048](../adr/0048-locate-chunk-anchoring.md)
 (workspaces, multi-root corpus, context tray, workspace-sharded context
 storage); the reader pane is added by
 [ADR-0050](../adr/0050-tui-reader-pane.md) (read-only rendered markdown,
-editor-extensible). Track 2 (deployment + Tauri editor) is **landed and frozen**
+editor-extensible), and reasoning/context budgets by
+[ADR-0051](../adr/0051-reasoning-policy-context-window-budgets.md) (thinking
+policy + bounded escalation, per-turn window gate, session budget + compaction,
+exact thinking metering). Track 2 (deployment + Tauri editor) is **landed and frozen**
 ([`implementation-sequence-future.md`](implementation-sequence-future.md));
 nothing here resumes it.
 
@@ -73,6 +76,11 @@ edit the file externally mid-turn → conflict, no clobber.
 5. **Tests.** Every preset can produce an edit (the drafter trap is gone);
    pipeline-policy tests; delete obsolete mode-branch tests.
 
+Recorded follow-up (ADR-0051): `config/pipeline.json` and its schema gain the
+`thinking` default, `reserveOutputTokens`, `sessionBudgetSoftRatio`, and the
+`compaction` object — data-only, presets stay three-field. The behavior lands in
+Phase C item 7.
+
 Gate: each preset runs an edit turn; no behavioral mode fields remain.
 
 ---
@@ -104,10 +112,26 @@ Engine-first: workspace/corpus state and the pipeline land before the tray UI.
    /corpus/documents/{id}` (idempotent eviction); `ALLOWED_ROOTS` bounds both
    `GET /directories` and corpus indexing with a typed refusal; `index`
    progress event (Phase C defines none).
+7. **Reasoning policy + context budgets (ADR-0051)** — thinking policy
+   `off|auto|on` (pipeline default, session policy + `Task.context` override;
+   never a preset field); `auto` = one labeled escalation after a structured
+   failure; provider maps the runner's thinking toggle with a labeled
+   `thinking-unsupported` degrade; exact thinking metering + a `thinking` SSE
+   event; a thinking budget whose truncation is labeled (never an empty
+   `done`); the per-turn context-window gate (priority drops labeled
+   `context-window`, typed `context-window-exceeded` when fixed+pinned+user
+   alone overflow); `Session.tokenBudget` soft warning / hard refusal
+   (`session-budget-exceeded`); metered, labeled compaction of oldest history
+   (own meter row, pins + recent turns survive); per-turn measurements
+   (prompt/thinking/completion tokens, wall-clock, model + quant, window
+   utilization) recorded with the snapshot/meter. Contract additions are
+   additive and OpenAPI-first.
 
 Gate: open a vault → workspace registered + shard populated → multi-root scope
 and idempotent eviction behave → auto-RAG provenance visible → any turn
-explainable after it ends.
+explainable after it ends → a mechanical edit runs thinking-off with exact
+thinking accounting, and an over-window or over-budget turn is refused or
+compacted with a label (never silently truncated).
 
 ---
 
@@ -206,5 +230,11 @@ documented.
   sessions, meter); document identity and git stay global (ADR-0049).
 - Browsing and corpus indexing are bounded by `ALLOWED_ROOTS`; outside paths
   are typed refusals, never silent (ADR-0049).
+- Thinking is a policy, not a default: mechanical turns run thinking-off,
+  `auto` escalates only after a structured failure, and thinking that happens
+  is metered exactly (ADR-0051).
+- Context is bounded per turn (model window) and per session (soft/hard
+  budget + metered compaction); every drop, escalation, and truncation is
+  labeled, never silent (ADR-0051).
 - Data over code: presets, pipeline policy, and decision policy are JSON
   config.

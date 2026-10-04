@@ -65,7 +65,7 @@ cd client/tauri && bun test && bun run typecheck
 cd client/tauri/src-tauri && cargo test         # sidecar handshake (needs the daemon)
 ```
 
-The 14 `.feature` behavior specs (`docs/writing-assistant/behaviors/`) are
+The 15 `.feature` behavior specs (`docs/writing-assistant/behaviors/`) are
 prose contracts, verified through the boundary tests — there is no Gherkin
 runner, and no CI yet (see `docs/writing-assistant/status.md`).
 
