@@ -215,3 +215,31 @@ func TestNoRetryOn4xx(t *testing.T) {
 		t.Fatalf("calls = %d, want 1 (no retry on 4xx)", calls)
 	}
 }
+
+// TestRenderBodyDefaultsUnsetMaxTokens: an unset budget becomes the engine
+// default, never 0 — strict servers (mlx-lm >=0.32) reject 0, and their own
+// 512 default truncates reasoning models before the tool call.
+func TestRenderBodyDefaultsUnsetMaxTokens(t *testing.T) {
+	body := renderBody(dto.Request{
+		ModelName:       "m",
+		Messages:        []dto.Message{{Role: "user", Content: "hi"}},
+		EffectiveParams: dto.SamplingParams{Temperature: 0.3},
+	}, true)
+	if body["max_tokens"] != defaultMaxTokens {
+		t.Fatalf("max_tokens = %v, want %d", body["max_tokens"], defaultMaxTokens)
+	}
+	if body["temperature"] != 0.3 || body["stream"] != true {
+		t.Fatalf("body = %v", body)
+	}
+}
+
+// TestRenderBodyIncludesPositiveMaxTokens: a configured budget still rides the wire.
+func TestRenderBodyIncludesPositiveMaxTokens(t *testing.T) {
+	body := renderBody(dto.Request{EffectiveParams: dto.SamplingParams{MaxTokens: 4096}}, false)
+	if body["max_tokens"] != 4096 {
+		t.Fatalf("max_tokens = %v, want 4096", body["max_tokens"])
+	}
+	if _, ok := body["stream"]; ok {
+		t.Fatalf("stream must be omitted for a non-streaming request: %v", body)
+	}
+}

@@ -114,16 +114,26 @@ func (g *gateway) Embed(ctx context.Context, target dto.Target, text string) ([]
 	return rsp.Data[0].Embedding, nil
 }
 
+// defaultMaxTokens is the engine's output budget when the mode/model leaves it
+// unset. OpenAI treats max_tokens as optional, but local servers apply tiny
+// defaults (mlx-lm: 512) that truncate reasoning models before they reach a
+// tool call; 4096 matches the shipped presets' historical budgets.
+const defaultMaxTokens = 4096
+
 // renderBody renders an assembled dto.Request to the OpenAI-compatible request
 // body. The Provider owns only the wire format; the content (messages, tools,
 // serving model, merged params) arrives fully-assembled from the Context
 // assembler upstream (ADR-0011).
 func renderBody(req dto.Request, stream bool) map[string]interface{} {
+	maxTokens := req.EffectiveParams.MaxTokens
+	if maxTokens <= 0 {
+		maxTokens = defaultMaxTokens
+	}
 	body := map[string]interface{}{
 		"model":       req.ModelName,
 		"messages":    toOpenAIMessages(req.Messages),
 		"temperature": req.EffectiveParams.Temperature,
-		"max_tokens":  req.EffectiveParams.MaxTokens,
+		"max_tokens":  maxTokens,
 	}
 	if stream {
 		body["stream"] = true
