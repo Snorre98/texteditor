@@ -12,5 +12,14 @@
     "enabled": true,
     "triggerHistoryTokens": 24000,
     "keepRecentTurns": 4
+  },
+  "decision": {
+    "enabled": false,
+    "model": "laya",
+    "gateThreshold": 0.5,
+    "maxCandidates": 24,
+    "maxHistoryTurns": 4,
+    "breadthTopK": { "none": 0, "few": 3, "many": 8 },
+    "timeoutMs": 3000
   }
 }

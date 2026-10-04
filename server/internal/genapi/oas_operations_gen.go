@@ -16,6 +16,7 @@ const (
 	GetBlocksOperation           OperationName = "GetBlocks"
 	GetCandidatesOperation       OperationName = "GetCandidates"
 	GetCorpusOperation           OperationName = "GetCorpus"
+	GetDecisionPolicyOperation   OperationName = "GetDecisionPolicy"
 	GetDiffOperation             OperationName = "GetDiff"
 	GetEventsOperation           OperationName = "GetEvents"
 	GetFleetOperation            OperationName = "GetFleet"

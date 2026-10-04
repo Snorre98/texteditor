@@ -31,6 +31,7 @@ import (
 	"texteditor/internal/eventbus"
 	"texteditor/internal/filesystem"
 	"texteditor/internal/fleet"
+	"texteditor/internal/laya"
 	"texteditor/internal/liveness"
 	"texteditor/internal/loop"
 	"texteditor/internal/mode"
@@ -189,6 +190,10 @@ func run() error {
 
 	// --- Assembler + loop ---
 	assemblerGW := assembler.New()
+	// Laya decision layer (ADR-0053): the client resolves the named service via
+	// Fleet and calls its native typed-question API; it degrades fail-open.
+	decisionPolicy := pipelineGW.Policy().Decision
+	layaGW := laya.New(fleetGW, decisionPolicy.Model, time.Duration(decisionPolicy.TimeoutMs)*time.Millisecond)
 	loopGW := loop.New(loop.Deps{
 		Modes:      modeReg,
 		Tools:      registry,
@@ -202,6 +207,7 @@ func run() error {
 		Bus:        bus,
 		Pipeline:   pipelineGW,
 		Filesystem: fsGW,
+		Decision:   layaGW,
 	})
 
 	// --- Bind: dynamic port by default (ADR-0021 §1); ENGINE_BIND=0.0.0.0 opts
@@ -226,6 +232,7 @@ func run() error {
 		Workspaces:  wsStore,
 		Shards:      shards,
 		Corpus:      corpusSvc,
+		Pipeline:    pipelineGW,
 		BaseURL:     baseURL,
 		CORSOrigins: splitList(*cors),
 	}, bus)

@@ -96,6 +96,16 @@ type Invoker interface {
 	//
 	// GET /corpus
 	GetCorpus(ctx context.Context, params GetCorpusParams) (*CorpusState, error)
+	// GetDecisionPolicy invokes getDecisionPolicy operation.
+	//
+	// The global decision policy from `config/pipeline.json`: whether the Laya decision layer is enabled,
+	// the resolved model name, the gate threshold, the candidate cap, the planner history window, the
+	// breadth->topK mapping, and the timeout. The effective per-turn state also appears in a turn's
+	// context snapshot DecisionRecord; a session/per-turn override rides ContextPolicy.decision. Off by
+	// default.
+	//
+	// GET /decision
+	GetDecisionPolicy(ctx context.Context) (*DecisionPolicy, error)
 	// GetDiff invokes getDiff operation.
 	//
 	// GET /documents/{id}/diff
@@ -1360,6 +1370,90 @@ func (c *Client) sendGetCorpus(ctx context.Context, params GetCorpusParams) (res
 
 	stage = "DecodeResponse"
 	result, err := decodeGetCorpusResponse(resp)
+	if err != nil {
+		return res, errors.Wrap(err, "decode response")
+	}
+
+	return result, nil
+}
+
+// GetDecisionPolicy invokes getDecisionPolicy operation.
+//
+// The global decision policy from `config/pipeline.json`: whether the Laya decision layer is enabled,
+// the resolved model name, the gate threshold, the candidate cap, the planner history window, the
+// breadth->topK mapping, and the timeout. The effective per-turn state also appears in a turn's
+// context snapshot DecisionRecord; a session/per-turn override rides ContextPolicy.decision. Off by
+// default.
+//
+// GET /decision
+func (c *Client) GetDecisionPolicy(ctx context.Context) (*DecisionPolicy, error) {
+	res, err := c.sendGetDecisionPolicy(ctx)
+	return res, err
+}
+
+func (c *Client) sendGetDecisionPolicy(ctx context.Context) (res *DecisionPolicy, err error) {
+	otelAttrs := []attribute.KeyValue{
+		otelogen.OperationID("getDecisionPolicy"),
+		semconv.HTTPRequestMethodKey.String("GET"),
+		semconv.URLTemplateKey.String("/decision"),
+	}
+	otelAttrs = append(otelAttrs, c.cfg.Attributes...)
+
+	// Run stopwatch.
+	startTime := time.Now()
+	defer func() {
+		// Use floating point division here for higher precision (instead of Millisecond method).
+		elapsedDuration := time.Since(startTime)
+		c.duration.Record(ctx, float64(elapsedDuration)/float64(time.Millisecond), metric.WithAttributes(otelAttrs...))
+	}()
+
+	// Increment request counter.
+	c.requests.Add(ctx, 1, metric.WithAttributes(otelAttrs...))
+
+	// Start a span for this request.
+	ctx, span := c.cfg.Tracer.Start(ctx, GetDecisionPolicyOperation,
+		trace.WithAttributes(otelAttrs...),
+		clientSpanKind,
+	)
+	// Track stage for error reporting.
+	var stage string
+	defer func() {
+		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, stage)
+			c.errors.Add(ctx, 1, metric.WithAttributes(otelAttrs...))
+		}
+		span.End()
+	}()
+
+	stage = "BuildURL"
+	u := uri.Clone(c.requestURL(ctx))
+	var pathParts [1]string
+	pathParts[0] = "/decision"
+	uri.AddPathParts(u, pathParts[:]...)
+
+	stage = "EncodeRequest"
+	r, err := ht.NewRequest(ctx, "GET", u)
+	if err != nil {
+		return res, errors.Wrap(err, "create request")
+	}
+
+	stage = "SendRequest"
+	resp, err := c.cfg.Client.Do(r)
+	if err != nil {
+		return res, errors.Wrap(err, "do request")
+	}
+	body := resp.Body
+	defer func() {
+		// Drain the body to EOF before closing, so the underlying
+		// connection can be reused by the Transport regardless of the
+		// response status code. See https://github.com/ogen-go/ogen/issues/1670.
+		_, _ = io.Copy(io.Discard, body)
+		_ = body.Close()
+	}()
+
+	stage = "DecodeResponse"
+	result, err := decodeGetDecisionPolicyResponse(resp)
 	if err != nil {
 		return res, errors.Wrap(err, "decode response")
 	}

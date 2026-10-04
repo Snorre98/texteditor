@@ -27,6 +27,7 @@ import (
 	"texteditor/internal/document"
 	"texteditor/internal/filesystem"
 	"texteditor/internal/fleet"
+	"texteditor/internal/laya"
 	"texteditor/internal/locate"
 	"texteditor/internal/meter"
 	"texteditor/internal/mode"
@@ -82,6 +83,9 @@ type Deps struct {
 	// Locate is the deterministic `/locate` resolver (ADR-0048 §2). When nil,
 	// `/locate` degrades to plain chat with a not-found label.
 	Locate locate.Resolver
+	// Decision is the Laya decision layer (ADR-0053). When nil, the layer is
+	// unavailable and a turn that requests it is labeled decision-degraded.
+	Decision laya.Interface
 }
 
 // Mention caps (ADR-0036 §2) — constants in the loop package, not mode data.
@@ -380,11 +384,22 @@ func (l *loop) runTurn(ctx context.Context, turnID string, task dto.Task) {
 		}
 	}
 
-	// auto-RAG retrieval — skipped when the effective autoRag flag is off; pins
+	// Laya decision layer — planner (ADR-0053): decide retrieve-or-not, the
+	// retrieval breadth, and the thinking level BEFORE retrieval (retrieve-or-not
+	// cannot be decided after chunks exist). Human/policy outranks the model; a
+	// failure degrades fail-open and labeled.
+	selectionText := ""
+	if anchor != nil {
+		selectionText = anchor.context
+	}
+	dres := l.decide(ctx, turnID, task, svc, policy, eff, m.Name, task.UserInput, history, selectionText)
+
+	// auto-RAG retrieval — skipped when autoRag is off or the planner says no;
+	// the depth is the planner's breadth (bounded), else the policy topK. Pins
 	// still apply below.
 	var autoChunks []dto.Chunk
-	if eff.AutoRag {
-		autoChunks, _ = svc.Retriever.Query(ctx, eff.Query, policy.AutoRagTopK)
+	if dres.retrieve {
+		autoChunks, _ = svc.Retriever.Query(ctx, eff.Query, dres.topK)
 	}
 
 	// Apply tray exclusions to the auto-retrieved set (the rag event carries the
@@ -400,11 +415,20 @@ func (l *loop) runTurn(ctx context.Context, turnID string, task dto.Task) {
 		return
 	}
 
+	// Laya decision layer — gate (ADR-0053): filter the post-exclude auto set by
+	// per-chunk relevance. Pins/mentions/anchor bypass the gate (ADR-0049 §11);
+	// the gate never touches them. The rag event stays the pre-gate candidate set.
+	preGate := autoChunks
+	var gateDrops []dto.ContextDrop
+	if dres.record != nil && dres.retrieve {
+		autoChunks, gateDrops = l.gate(ctx, turnID, task, svc, policy, dres.record, eff.Query, autoChunks)
+	}
+
 	// Auto-RAG is visible: the same rag event shape as tool retrieval, emitted
 	// before assembly so clients can show what was retrieved even when no tool
 	// ran (ADR-0044 §3, "auto-retrieved chunks visible with provenance"). It is
 	// the auto-retrieved set only — pins are human overrides (ADR-0049 §11).
-	l.emitRag(turnID, autoChunks)
+	l.emitRag(turnID, preGate)
 
 	tools := toolsFor(l.d.Tools)
 
@@ -447,6 +471,9 @@ func (l *loop) runTurn(ctx context.Context, turnID string, task dto.Task) {
 	// policy ← per-turn override, then the runner mapping (§3). An unsupported
 	// runner degrades to thinking-on with a labeled thinking-unsupported outcome.
 	thinkLevel := policy.Thinking
+	if dres.thinking != "" {
+		thinkLevel = dres.thinking
+	}
 	if eff.Thinking != "" {
 		thinkLevel = eff.Thinking
 	}
@@ -458,9 +485,11 @@ func (l *loop) runTurn(ctx context.Context, turnID string, task dto.Task) {
 	// metadata, and the retrieved/pinned chunks; the assembler never knows about
 	// sessions or workspaces.
 	loopDrops := append(excludedDrops, notFoundDrops...)
+	loopDrops = append(loopDrops, gateDrops...)
 	snapshot := buildSnapshot(turnID, task, wsID, eff.Query, eff.AutoRag, autoChunks, pinnedChunks, loopDrops, locateRaw, payload)
 	snapshot.Compacted = compacted
 	snapshot.Thinking = st.snapshot()
+	snapshot.Decision = dres.record
 
 	// Session budget gate (ADR-0051 §7) — after assembly (real payload size),
 	// before any provider call. Soft = labeled warning (proceed); hard = typed
@@ -1107,6 +1136,7 @@ type effectiveContext struct {
 	AutoRag  bool
 	Query    string
 	Thinking dto.ThinkingLevel
+	Decision *dto.DecisionOverride
 }
 
 // mergeContextPolicy resolves the effective policy (ADR-0049 §8). The persisted
@@ -1142,10 +1172,174 @@ func mergeContextPolicy(sessionRaw json.RawMessage, override *dto.ContextPolicy,
 		if p.Thinking != nil {
 			eff.Thinking = *p.Thinking
 		}
+		if p.Decision != nil {
+			eff.Decision = p.Decision
+		}
 	}
 	apply(session)
 	apply(override)
 	return eff
+}
+
+// decisionResolution is the resolved decision-layer effect for one turn
+// (ADR-0053): the record to persist, and the effective retrieval/thinking the
+// rest of the turn uses. record is nil when the layer is disabled.
+type decisionResolution struct {
+	record   *dto.DecisionRecord
+	retrieve bool
+	topK     int
+	thinking dto.ThinkingLevel // "" inherits the policy default
+}
+
+// decide runs the planner call (ADR-0053) and resolves the effective retrieval
+// and thinking. Human/policy outranks the model: decision=off runs no Laya call;
+// session autoRag=false disables retrieval (Laya cannot re-enable it); a non-nil
+// ContextPolicy.thinking overrides the model. When there is nothing left for
+// Laya to choose (retrieval off AND thinking already resolved) the call is
+// skipped. Every failure degrades fail-open and labeled.
+func (l *loop) decide(ctx context.Context, turnID string, task dto.Task, svc *shard.Services, policy dto.PipelinePolicy, eff effectiveContext, modeName, request string, history []dto.Message, selection string) decisionResolution {
+	pol := policy.Decision
+	res := decisionResolution{retrieve: eff.AutoRag, topK: policy.AutoRagTopK}
+	enabled := pol.Enabled
+	if eff.Decision != nil {
+		enabled = *eff.Decision == dto.DecisionOn
+	}
+	if !enabled {
+		return res
+	}
+	rec := &dto.DecisionRecord{Enabled: true}
+	res.record = rec
+
+	// Nothing for Laya to decide: retrieval is closed and thinking is resolved.
+	thinkingOpen := eff.Thinking == "" && policy.Thinking == dto.ThinkingAuto
+	if !eff.AutoRag && !thinkingOpen {
+		return res
+	}
+	if l.d.Decision == nil {
+		rec.Degraded = true
+		rec.Reason = dto.DecisionDegradedUnreachable
+		return res
+	}
+	plan := l.d.Decision.Plan(ctx, dto.DecisionPlannerInput{
+		Request:   request,
+		History:   tailMessages(history, pol.MaxHistoryTurns),
+		Selection: selection,
+		Mode:      modeName,
+	})
+	rec.Planner = &plan
+	if plan.Degraded {
+		rec.Degraded = true
+		rec.Reason = plan.Reason
+		return res
+	}
+	l.meterDecision(ctx, turnID, task.SessionID, svc, decisionModel(pol, plan.Checkpoint), "planner", plan.PromptTokens, plan.CompletionTokens)
+
+	// Human/policy outranks Laya.
+	if eff.AutoRag {
+		res.retrieve = plan.Retrieve
+		if res.retrieve {
+			res.topK = breadthTopK(pol.BreadthTopK, plan.Breadth)
+			if max := pol.MaxCandidates; max > 0 && res.topK > max {
+				res.topK = max
+			}
+			if res.topK < 1 {
+				res.retrieve = false
+			}
+		}
+	}
+	if eff.Thinking == "" {
+		res.thinking = plan.Thinking
+	}
+	return res
+}
+
+// gate runs the gate call (ADR-0053) over the post-exclude auto set and returns
+// the surviving chunks plus a labeled drop for the removals. The retrieval topK
+// is already bounded by maxCandidates, so the gate input is too. On failure it
+// keeps every chunk (fail-open) and labels the record.
+func (l *loop) gate(ctx context.Context, turnID string, task dto.Task, svc *shard.Services, policy dto.PipelinePolicy, rec *dto.DecisionRecord, request string, chunks []dto.Chunk) ([]dto.Chunk, []dto.ContextDrop) {
+	if len(chunks) == 0 {
+		return chunks, nil
+	}
+	pol := policy.Decision
+	cands := chunks
+	if pol.MaxCandidates > 0 && len(cands) > pol.MaxCandidates {
+		cands = cands[:pol.MaxCandidates]
+	}
+	var gres dto.DecisionGateResult
+	if l.d.Decision == nil {
+		gres = dto.DecisionGateResult{Degraded: true, Reason: dto.DecisionDegradedUnreachable, Threshold: pol.GateThreshold}
+	} else {
+		gres = l.d.Decision.Gate(ctx, dto.DecisionGateInput{Request: request, Chunks: cands, Threshold: pol.GateThreshold})
+	}
+	rec.Gate = &gres
+	if gres.Degraded {
+		rec.Degraded = true
+		if rec.Reason == "" {
+			rec.Reason = gres.Reason
+		}
+		return chunks, nil // fail-open: keep all
+	}
+	l.meterDecision(ctx, turnID, task.SessionID, svc, decisionModel(pol, gres.Checkpoint), "gate", gres.PromptTokens, gres.CompletionTokens)
+
+	kept := make([]dto.Chunk, 0, len(cands))
+	for i, c := range cands {
+		if i < len(gres.Chunks) && gres.Chunks[i].Keep {
+			kept = append(kept, c)
+		}
+	}
+	// Any candidates beyond the cap were not gated; keep them (fail-open).
+	if len(chunks) > len(cands) {
+		kept = append(kept, chunks[len(cands):]...)
+	}
+	var drops []dto.ContextDrop
+	if n := len(chunks) - len(kept); n > 0 {
+		drops = append(drops, dto.ContextDrop{Component: "rag", Reason: "gate", Count: n})
+	}
+	return kept, drops
+}
+
+// meterDecision records one Laya call as its own model row (ADR-0053). A zero
+// usage (e.g. a refusal with no tokens) writes no row.
+func (l *loop) meterDecision(ctx context.Context, turnID, sessionID string, svc *shard.Services, model, role string, in, out int) {
+	if in == 0 && out == 0 {
+		return
+	}
+	_ = svc.Meter.AttributeDecision(ctx, turnID, sessionID, model, role, dto.ProviderCounts{InputTokens: in, OutputTokens: out})
+}
+
+// decisionModel is the routed checkpoint when Laya reported one, else the
+// configured model name (strict Jev mode omits routing).
+func decisionModel(pol dto.DecisionPolicy, checkpoint string) string {
+	if checkpoint != "" {
+		return checkpoint
+	}
+	return pol.Model
+}
+
+// breadthTopK maps the planner's breadth choice to a retrieval topK.
+func breadthTopK(b dto.DecisionBreadthTopK, breadth dto.DecisionBreadth) int {
+	switch breadth {
+	case dto.DecisionBreadthNone:
+		return b.None
+	case dto.DecisionBreadthMany:
+		return b.Many
+	default:
+		return b.Few
+	}
+}
+
+// tailMessages returns the last n turns (≈2 messages each) of history, so the
+// planner sees a bounded recent window (ADR-0053).
+func tailMessages(history []dto.Message, n int) []dto.Message {
+	if n <= 0 || len(history) == 0 {
+		return nil
+	}
+	limit := n * 2
+	if len(history) <= limit {
+		return history
+	}
+	return history[len(history)-limit:]
 }
 
 // applyExclusions drops auto-retrieved chunks matching an excluded ref: by

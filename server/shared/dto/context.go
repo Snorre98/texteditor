@@ -92,6 +92,15 @@ type ChunkRef struct {
 	Hash     string `json:"hash,omitempty"`
 }
 
+// DecisionOverride is the session/per-turn override for the Laya decision layer
+// (ADR-0053): off disables it (no Laya call); on enables it.
+type DecisionOverride string
+
+const (
+	DecisionOff DecisionOverride = "off"
+	DecisionOn  DecisionOverride = "on"
+)
+
 // ContextPolicy is the context-tray decision set (ADR-0049 §7/§8): pinned and
 // excluded chunk refs, an auto-RAG flag, and a retrieval query. The engine
 // persists one per session (Session.contextPolicy) and accepts per-turn
@@ -100,11 +109,12 @@ type ChunkRef struct {
 // list clears), and a nil field inherits. It carries no payload text — the
 // client sends decisions, the engine assembles.
 type ContextPolicy struct {
-	Pinned         []ChunkRef     `json:"pinned,omitempty"`
-	Excluded       []ChunkRef     `json:"excluded,omitempty"`
-	AutoRag        *bool          `json:"autoRag,omitempty"`
-	RetrievalQuery *string        `json:"retrievalQuery,omitempty"`
-	Thinking       *ThinkingLevel `json:"thinking,omitempty"`
+	Pinned         []ChunkRef        `json:"pinned,omitempty"`
+	Excluded       []ChunkRef        `json:"excluded,omitempty"`
+	AutoRag        *bool             `json:"autoRag,omitempty"`
+	RetrievalQuery *string           `json:"retrievalQuery,omitempty"`
+	Thinking       *ThinkingLevel    `json:"thinking,omitempty"`
+	Decision       *DecisionOverride `json:"decision,omitempty"`
 }
 
 // ContextMessage is one assembled message's component and provenance in a
@@ -152,7 +162,7 @@ type ContextSnapshot struct {
 	Chunks         []Chunk           `json:"chunks"`
 	Drops          []ContextDrop     `json:"drops"`
 	Budget         []BudgetUsage     `json:"budget"`
-	Decision       json.RawMessage   `json:"decision,omitempty"`
+	Decision       *DecisionRecord   `json:"decision,omitempty"`
 	Locate         json.RawMessage   `json:"locate,omitempty"`
 	Thinking       *ThinkingSnapshot `json:"thinking,omitempty"`
 	Measurements   *TurnMeasurement  `json:"measurements,omitempty"`

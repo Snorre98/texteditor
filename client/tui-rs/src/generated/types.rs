@@ -204,6 +204,8 @@ pub enum SessionMeterComponentsItemComponent {
     Completion,
     #[serde(rename = "compaction")]
     Compaction,
+    #[serde(rename = "decision")]
+    Decision,
 }
 impl SessionMeterComponentsItemComponent {
     pub fn as_str(&self) -> &'static str {
@@ -217,6 +219,7 @@ impl SessionMeterComponentsItemComponent {
             Self::Thinking => "thinking",
             Self::Completion => "completion",
             Self::Compaction => "compaction",
+            Self::Decision => "decision",
         }
     }
 }
@@ -1107,6 +1110,39 @@ pub struct WordEdit {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub insertions: Option<Vec<String>>,
 }
+/**The engine's global decision-layer policy (ADR-0053), read from `config/pipeline.json` and returned by GET /decision. One global policy; never a preset field (ADR-0045). Off by default.
+*/
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct DecisionPolicy {
+    ///Maps the planner's `breadth` choice to the retrieval topK.
+    #[serde(rename = "breadthTopK")]
+    pub breadth_top_k: DecisionPolicyBreadthTopK,
+    ///Whether the Laya decision layer is enabled globally.
+    pub enabled: bool,
+    /**The engine-applied keep threshold τ on the gate's per-chunk P(relevant) `noul` answer. Chunks at or above are kept.
+*/
+    #[serde(rename = "gateThreshold")]
+    pub gate_threshold: f64,
+    ///The maximum number of candidate chunks sent to the gate (bounded by Laya's batch cap).
+    #[serde(rename = "maxCandidates")]
+    pub max_candidates: i64,
+    ///The number of recent history turns the planner sees.
+    #[serde(rename = "maxHistoryTurns")]
+    pub max_history_turns: i64,
+    /**The Laya service resolved by name via Fleet (the nomic-embed / needle-router pattern). Laya's own Router selects the checkpoint per request by script/language.
+*/
+    pub model: String,
+    ///The per-call deadline for a Laya request; a timeout degrades fail-open and labeled.
+    #[serde(rename = "timeoutMs")]
+    pub timeout_ms: i64,
+}
+///Maps the planner's `breadth` choice to the retrieval topK.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct DecisionPolicyBreadthTopK {
+    pub few: i64,
+    pub many: i64,
+    pub none: i64,
+}
 ///A workspace's corpus scope, per-document status, and job progress (ADR-0049 §4/§16).
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct CorpusState {
@@ -1259,6 +1295,10 @@ pub struct ContextPolicy {
 */
     #[serde(rename = "autoRag", skip_serializing_if = "Option::is_none")]
     pub auto_rag: Option<bool>,
+    /**The session/per-turn override for the Laya decision layer (ADR-0053). When absent the persisted session policy, else the global `config/pipeline.json` default (off), applies. `off` disables the layer (no Laya call); `on` enables it. Human/policy outranks Laya: an explicit override wins over the model's answers, and a session `autoRag: false` still disables retrieval (Laya cannot re-enable it).
+*/
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decision: Option<ContextPolicyDecision>,
     /**Retrieved chunks to drop from the payload, matched by `chunkKey` (or by canonical `path` when only a path is given); each removal is recorded as a labeled drop.
 */
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1307,6 +1347,34 @@ impl AsRef<str> for ContextPolicyThinking {
         self.as_str()
     }
 }
+/**The session/per-turn override for the Laya decision layer (ADR-0053). When absent the persisted session policy, else the global `config/pipeline.json` default (off), applies. `off` disables the layer (no Laya call); `on` enables it. Human/policy outranks Laya: an explicit override wins over the model's answers, and a session `autoRag: false` still disables retrieval (Laya cannot re-enable it).
+*/
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, Default)]
+pub enum ContextPolicyDecision {
+    #[default]
+    #[serde(rename = "off")]
+    Off,
+    #[serde(rename = "on")]
+    On,
+}
+impl ContextPolicyDecision {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::On => "on",
+        }
+    }
+}
+impl ::std::fmt::Display for ContextPolicyDecision {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+impl AsRef<str> for ContextPolicyDecision {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
 /**A stable reference to one indexed chunk, used by the context tray for pin/exclude decisions (ADR-0049 §8). `chunkKey` is path#index for corpus files and documentID#index for versioned documents; `path` is the canonical absolute file path. When `chunkKey` is omitted the ref names every chunk under `path`; `hash` optionally pins the chunk's content hash so a stale pin is detectable (advisory in Phase C4).
 */
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -1318,7 +1386,7 @@ pub struct ChunkRef {
     pub path: String,
 }
 pub type ContextEvent = ContextSnapshot;
-/**The engine-owned, persisted record of one turn's assembled context (ADR-0044 §4, ADR-0049 §7): every assembled message with its component and provenance, the retrieved chunks, the labeled drops, and the budget accounting. The snapshot itself is the contract — clients render it and never reconstruct provenance, budgets, or drops. The optional `decision` (Phase F) and `locate` (Phase D) records are reserved and not implemented in Phase C3.
+/**The engine-owned, persisted record of one turn's assembled context (ADR-0044 §4, ADR-0049 §7): every assembled message with its component and provenance, the retrieved chunks, the labeled drops, and the budget accounting. The snapshot itself is the contract — clients render it and never reconstruct provenance, budgets, or drops. The optional `decision` (ADR-0053) and `locate` (ADR-0048) records are typed; `decision` is present only when the Laya layer ran (or degraded) on the turn.
 */
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ContextSnapshot {
@@ -1334,9 +1402,8 @@ pub struct ContextSnapshot {
     pub compacted: Option<CompactionRecord>,
     #[serde(rename = "createdAt")]
     pub created_at: i64,
-    ///Reserved for Phase F decision records; not implemented in Phase C3.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub decision: Option<serde_json::Value>,
+    pub decision: Option<DecisionRecord>,
     pub drops: Vec<ContextDrop>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub locate: Option<LocateResult>,
@@ -1558,6 +1625,245 @@ pub struct LocateCandidate {
     pub stale: Option<bool>,
     #[serde(rename = "textPreview")]
     pub text_preview: String,
+}
+/**The engine-owned record of the Laya decision layer for one turn (ADR-0053). Present in the context snapshot only when the layer ran (or degraded). Explains retrieve-or-not, the thinking level, and every per-chunk gate outcome; every drop is labeled.
+*/
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct DecisionRecord {
+    ///True when a Laya call failed and the turn proceeded ungated (fail-open).
+    pub degraded: bool,
+    ///The effective enablement for the turn (policy/override resolved).
+    pub enabled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gate: Option<DecisionGate>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub planner: Option<DecisionPlanner>,
+    ///The labeled degradation reason when `degraded` is true.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<DecisionRecordReason>,
+}
+///The labeled degradation reason when `degraded` is true.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, Default)]
+pub enum DecisionRecordReason {
+    #[default]
+    #[serde(rename = "unreachable")]
+    Unreachable,
+    #[serde(rename = "timeout")]
+    Timeout,
+    #[serde(rename = "protocol")]
+    Protocol,
+    #[serde(rename = "low-confidence")]
+    LowConfidence,
+}
+impl DecisionRecordReason {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Unreachable => "unreachable",
+            Self::Timeout => "timeout",
+            Self::Protocol => "protocol",
+            Self::LowConfidence => "low-confidence",
+        }
+    }
+}
+impl ::std::fmt::Display for DecisionRecordReason {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+impl AsRef<str> for DecisionRecordReason {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+/**The planner call's outcome (ADR-0053): the retrieve-or-not, thinking, and breadth answers, with the routed checkpoint that produced them.
+*/
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct DecisionPlanner {
+    ///The requested retrieval breadth, mapped to a topK by DecisionPolicy.breadthTopK.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub breadth: Option<DecisionPlannerBreadth>,
+    ///The Laya checkpoint Laya's Router selected (english | multilingual | typed-decisions).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub checkpoint: Option<String>,
+    #[serde(rename = "completionTokens", skip_serializing_if = "Option::is_none")]
+    pub completion_tokens: Option<i64>,
+    ///True when this call failed (the record falls back to policy defaults).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub degraded: Option<bool>,
+    #[serde(rename = "promptTokens", skip_serializing_if = "Option::is_none")]
+    pub prompt_tokens: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<DecisionPlannerReason>,
+    ///Whether the turn needs corpus retrieval (the `noul` answer thresholded).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retrieve: Option<bool>,
+    ///The thinking level Laya selected (overridden by an explicit ContextPolicy.thinking).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<DecisionPlannerThinking>,
+}
+///The thinking level Laya selected (overridden by an explicit ContextPolicy.thinking).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, Default)]
+pub enum DecisionPlannerThinking {
+    #[default]
+    #[serde(rename = "off")]
+    Off,
+    #[serde(rename = "auto")]
+    Auto,
+    #[serde(rename = "on")]
+    On,
+}
+impl DecisionPlannerThinking {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Auto => "auto",
+            Self::On => "on",
+        }
+    }
+}
+impl ::std::fmt::Display for DecisionPlannerThinking {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+impl AsRef<str> for DecisionPlannerThinking {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, Default)]
+pub enum DecisionPlannerReason {
+    #[default]
+    #[serde(rename = "unreachable")]
+    Unreachable,
+    #[serde(rename = "timeout")]
+    Timeout,
+    #[serde(rename = "protocol")]
+    Protocol,
+    #[serde(rename = "low-confidence")]
+    LowConfidence,
+}
+impl DecisionPlannerReason {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Unreachable => "unreachable",
+            Self::Timeout => "timeout",
+            Self::Protocol => "protocol",
+            Self::LowConfidence => "low-confidence",
+        }
+    }
+}
+impl ::std::fmt::Display for DecisionPlannerReason {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+impl AsRef<str> for DecisionPlannerReason {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+///The requested retrieval breadth, mapped to a topK by DecisionPolicy.breadthTopK.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, Default)]
+pub enum DecisionPlannerBreadth {
+    #[default]
+    #[serde(rename = "none")]
+    None,
+    #[serde(rename = "few")]
+    Few,
+    #[serde(rename = "many")]
+    Many,
+}
+impl DecisionPlannerBreadth {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Few => "few",
+            Self::Many => "many",
+        }
+    }
+}
+impl ::std::fmt::Display for DecisionPlannerBreadth {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+impl AsRef<str> for DecisionPlannerBreadth {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+/**The gate call's outcome (ADR-0053): the threshold applied and one decision per candidate chunk, with the routed checkpoint.
+*/
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct DecisionGate {
+    ///The Laya checkpoint Laya's Router selected for the gate.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub checkpoint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chunks: Option<Vec<DecisionChunk>>,
+    #[serde(rename = "completionTokens", skip_serializing_if = "Option::is_none")]
+    pub completion_tokens: Option<i64>,
+    ///True when this call failed (all chunks kept, fail-open).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub degraded: Option<bool>,
+    #[serde(rename = "promptTokens", skip_serializing_if = "Option::is_none")]
+    pub prompt_tokens: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<DecisionGateReason>,
+    ///The τ applied to each chunk's P(relevant) score.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub threshold: Option<f64>,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, Default)]
+pub enum DecisionGateReason {
+    #[default]
+    #[serde(rename = "unreachable")]
+    Unreachable,
+    #[serde(rename = "timeout")]
+    Timeout,
+    #[serde(rename = "protocol")]
+    Protocol,
+    #[serde(rename = "low-confidence")]
+    LowConfidence,
+}
+impl DecisionGateReason {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Unreachable => "unreachable",
+            Self::Timeout => "timeout",
+            Self::Protocol => "protocol",
+            Self::LowConfidence => "low-confidence",
+        }
+    }
+}
+impl ::std::fmt::Display for DecisionGateReason {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+impl AsRef<str> for DecisionGateReason {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+///One candidate chunk's gate decision (ADR-0053).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct DecisionChunk {
+    ///The chunk's stable key (path#index for corpus files).
+    #[serde(rename = "chunkKey")]
+    pub chunk_key: String,
+    ///Whether the chunk entered the payload (score >= threshold, or fail-open).
+    pub keep: bool,
+    ///The canonical file path, when known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    ///An optional label (e.g. below-threshold, low-confidence-kept).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    ///The gate's P(relevant) for this chunk.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub score: Option<f64>,
 }
 /**One assembled message's component and provenance. `tool`/`thinking` are components but not messages, so they appear in the budget accounting.
 */

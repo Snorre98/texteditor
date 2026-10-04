@@ -167,6 +167,9 @@ func (stubMeter) Attribute(context.Context, string, string, string, dto.Breakdow
 func (stubMeter) AttributeCompaction(context.Context, string, string, string, dto.ProviderCounts) error {
 	return nil
 }
+func (stubMeter) AttributeDecision(context.Context, string, string, string, string, dto.ProviderCounts) error {
+	return nil
+}
 func (stubMeter) SessionUsage(context.Context, string) (int, error) { return 5, nil }
 func (stubMeter) SessionBreakdown(_ context.Context, sessionID string) (dto.SessionMeter, error) {
 	return dto.SessionMeter{
@@ -300,6 +303,7 @@ func newTestServer(t *testing.T) (*Server, *fakeBus) {
 		Workspaces: stubWorkspaces{},
 		Shards:     stubShards{svc: &shard.Services{Sessions: stubSessions{}}},
 		Loop:       loop,
+		Pipeline:   stubPipeline{},
 	}, bus)
 	if err != nil {
 		t.Fatal(err)
@@ -327,6 +331,51 @@ func (*stubLoopEmitter) ResolveLocate(string, dto.LocateChoice) error { return n
 
 // Cancel satisfies loop.Interface; these stubs never cancel.
 func (*stubLoopEmitter) Cancel(string) error { return nil }
+
+// stubPipeline supplies a fixed decision policy for GET /decision (ADR-0053).
+type stubPipeline struct{}
+
+func (stubPipeline) Policy() dto.PipelinePolicy {
+	return dto.PipelinePolicy{Decision: dto.DecisionPolicy{
+		Enabled:         true,
+		Model:           "laya",
+		GateThreshold:   0.5,
+		MaxCandidates:   24,
+		MaxHistoryTurns: 4,
+		BreadthTopK:     dto.DecisionBreadthTopK{None: 0, Few: 3, Many: 8},
+		TimeoutMs:       3000,
+	}}
+}
+
+func TestGetDecisionPolicy(t *testing.T) {
+	srv, _ := newTestServer(t)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/decision", nil)
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("decision = %d, body %s", rec.Code, rec.Body.String())
+	}
+	var got struct {
+		Enabled         bool    `json:"enabled"`
+		Model           string  `json:"model"`
+		GateThreshold   float64 `json:"gateThreshold"`
+		MaxCandidates   int     `json:"maxCandidates"`
+		MaxHistoryTurns int     `json:"maxHistoryTurns"`
+		BreadthTopK     struct {
+			None int `json:"none"`
+			Few  int `json:"few"`
+			Many int `json:"many"`
+		} `json:"breadthTopK"`
+		TimeoutMs int `json:"timeoutMs"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if !got.Enabled || got.Model != "laya" || got.GateThreshold != 0.5 || got.MaxCandidates != 24 ||
+		got.MaxHistoryTurns != 4 || got.BreadthTopK.Few != 3 || got.BreadthTopK.Many != 8 || got.TimeoutMs != 3000 {
+		t.Fatalf("decision policy = %+v", got)
+	}
+}
 
 func TestHealth(t *testing.T) {
 	srv, _ := newTestServer(t)

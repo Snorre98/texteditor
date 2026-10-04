@@ -1044,6 +1044,12 @@ type ContextPolicy struct {
 	// thinking-off and escalates once after a structured failure; `on` always thinks. Never a preset field
 	// (ADR-0045).
 	Thinking OptContextPolicyThinking `json:"thinking"`
+	// The session/per-turn override for the Laya decision layer (ADR-0053). When absent the persisted
+	// session policy, else the global `config/pipeline.json` default (off), applies. `off` disables the
+	// layer (no Laya call); `on` enables it. Human/policy outranks Laya: an explicit override wins over
+	// the model's answers, and a session `autoRag: false` still disables retrieval (Laya cannot re-enable
+	// it).
+	Decision OptContextPolicyDecision `json:"decision"`
 }
 
 // GetPinned returns the value of Pinned.
@@ -1071,6 +1077,11 @@ func (s *ContextPolicy) GetThinking() OptContextPolicyThinking {
 	return s.Thinking
 }
 
+// GetDecision returns the value of Decision.
+func (s *ContextPolicy) GetDecision() OptContextPolicyDecision {
+	return s.Decision
+}
+
 // SetPinned sets the value of Pinned.
 func (s *ContextPolicy) SetPinned(val []ChunkRef) {
 	s.Pinned = val
@@ -1094,6 +1105,57 @@ func (s *ContextPolicy) SetRetrievalQuery(val OptString) {
 // SetThinking sets the value of Thinking.
 func (s *ContextPolicy) SetThinking(val OptContextPolicyThinking) {
 	s.Thinking = val
+}
+
+// SetDecision sets the value of Decision.
+func (s *ContextPolicy) SetDecision(val OptContextPolicyDecision) {
+	s.Decision = val
+}
+
+// The session/per-turn override for the Laya decision layer (ADR-0053). When absent the persisted
+// session policy, else the global `config/pipeline.json` default (off), applies. `off` disables the
+// layer (no Laya call); `on` enables it. Human/policy outranks Laya: an explicit override wins over
+// the model's answers, and a session `autoRag: false` still disables retrieval (Laya cannot re-enable
+// it).
+type ContextPolicyDecision string
+
+const (
+	ContextPolicyDecisionOff ContextPolicyDecision = "off"
+	ContextPolicyDecisionOn  ContextPolicyDecision = "on"
+)
+
+// AllValues returns all ContextPolicyDecision values.
+func (ContextPolicyDecision) AllValues() []ContextPolicyDecision {
+	return []ContextPolicyDecision{
+		ContextPolicyDecisionOff,
+		ContextPolicyDecisionOn,
+	}
+}
+
+// MarshalText implements encoding.TextMarshaler.
+func (s ContextPolicyDecision) MarshalText() ([]byte, error) {
+	switch s {
+	case ContextPolicyDecisionOff:
+		return []byte(s), nil
+	case ContextPolicyDecisionOn:
+		return []byte(s), nil
+	default:
+		return nil, errors.Errorf("invalid value: %q", s)
+	}
+}
+
+// UnmarshalText implements encoding.TextUnmarshaler.
+func (s *ContextPolicyDecision) UnmarshalText(data []byte) error {
+	switch ContextPolicyDecision(data) {
+	case ContextPolicyDecisionOff:
+		*s = ContextPolicyDecisionOff
+		return nil
+	case ContextPolicyDecisionOn:
+		*s = ContextPolicyDecisionOn
+		return nil
+	default:
+		return errors.Errorf("invalid value: %q", data)
+	}
 }
 
 // The turn's thinking policy (ADR-0051 §1). When absent the persisted session policy, else the
@@ -1151,28 +1213,28 @@ func (s *ContextPolicyThinking) UnmarshalText(data []byte) error {
 // The engine-owned, persisted record of one turn's assembled context (ADR-0044 §4, ADR-0049 §7):
 // every assembled message with its component and provenance, the retrieved chunks, the labeled drops,
 // and the budget accounting. The snapshot itself is the contract — clients render it and never
-// reconstruct provenance, budgets, or drops. The optional `decision` (Phase F) and `locate` (Phase D)
-// records are reserved and not implemented in Phase C3.
+// reconstruct provenance, budgets, or drops. The optional `decision` (ADR-0053) and `locate`
+// (ADR-0048) records are typed; `decision` is present only when the Laya layer ran (or degraded) on
+// the turn.
 // Ref: #/components/schemas/ContextSnapshot
 type ContextSnapshot struct {
 	TurnId      string `json:"turnId"`
 	SessionId   string `json:"sessionId"`
 	WorkspaceId string `json:"workspaceId"`
 	// The query auto-RAG ran (the turn's user input).
-	RetrievalQuery string           `json:"retrievalQuery"`
-	AutoRag        bool             `json:"autoRag"`
-	Messages       []ContextMessage `json:"messages"`
-	Chunks         []ContextChunk   `json:"chunks"`
-	Drops          []ContextDrop    `json:"drops"`
-	Budget         []BudgetUsage    `json:"budget"`
-	// Reserved for Phase F decision records; not implemented in Phase C3.
-	Decision      *ContextSnapshotDecision `json:"decision"`
-	Locate        OptLocateResult          `json:"locate"`
-	Thinking      OptThinkingSnapshot      `json:"thinking"`
-	Measurements  OptTurnMeasurement       `json:"measurements"`
-	Compacted     OptCompactionRecord      `json:"compacted"`
-	Window        OptWindowUsage           `json:"window"`
-	SessionBudget OptSessionBudget         `json:"sessionBudget"`
+	RetrievalQuery string              `json:"retrievalQuery"`
+	AutoRag        bool                `json:"autoRag"`
+	Messages       []ContextMessage    `json:"messages"`
+	Chunks         []ContextChunk      `json:"chunks"`
+	Drops          []ContextDrop       `json:"drops"`
+	Budget         []BudgetUsage       `json:"budget"`
+	Decision       OptDecisionRecord   `json:"decision"`
+	Locate         OptLocateResult     `json:"locate"`
+	Thinking       OptThinkingSnapshot `json:"thinking"`
+	Measurements   OptTurnMeasurement  `json:"measurements"`
+	Compacted      OptCompactionRecord `json:"compacted"`
+	Window         OptWindowUsage      `json:"window"`
+	SessionBudget  OptSessionBudget    `json:"sessionBudget"`
 	// True when the turn was cancelled by the user (POST /turns/{id}/cancel); the snapshot remains
 	// retrievable and records the partial usage. Absent/false for a normal turn.
 	Cancelled OptBool `json:"cancelled"`
@@ -1225,7 +1287,7 @@ func (s *ContextSnapshot) GetBudget() []BudgetUsage {
 }
 
 // GetDecision returns the value of Decision.
-func (s *ContextSnapshot) GetDecision() *ContextSnapshotDecision {
+func (s *ContextSnapshot) GetDecision() OptDecisionRecord {
 	return s.Decision
 }
 
@@ -1315,7 +1377,7 @@ func (s *ContextSnapshot) SetBudget(val []BudgetUsage) {
 }
 
 // SetDecision sets the value of Decision.
-func (s *ContextSnapshot) SetDecision(val *ContextSnapshotDecision) {
+func (s *ContextSnapshot) SetDecision(val OptDecisionRecord) {
 	s.Decision = val
 }
 
@@ -1360,9 +1422,6 @@ func (s *ContextSnapshot) SetCreatedAt(val int64) {
 }
 
 func (*ContextSnapshot) getTurnContextRes() {}
-
-// Reserved for Phase F decision records; not implemented in Phase C3.
-type ContextSnapshotDecision struct{}
 
 // One corpus file's index status. Corpus files are never documents rows and never versioned (ADR-0049
 // §4); `id` is the stable path-derived identity (sha256 prefix of the canonical path).
@@ -1876,6 +1935,714 @@ func (s *CreateWorkspaceRequest) SetRoot(val string) {
 // SetName sets the value of Name.
 func (s *CreateWorkspaceRequest) SetName(val OptString) {
 	s.Name = val
+}
+
+// One candidate chunk's gate decision (ADR-0053).
+// Ref: #/components/schemas/DecisionChunk
+type DecisionChunk struct {
+	// The chunk's stable key (path#index for corpus files).
+	ChunkKey string `json:"chunkKey"`
+	// The canonical file path, when known.
+	Path OptString `json:"path"`
+	// The gate's P(relevant) for this chunk.
+	Score OptFloat64 `json:"score"`
+	// Whether the chunk entered the payload (score >= threshold, or fail-open).
+	Keep bool `json:"keep"`
+	// An optional label (e.g. below-threshold, low-confidence-kept).
+	Reason OptString `json:"reason"`
+}
+
+// GetChunkKey returns the value of ChunkKey.
+func (s *DecisionChunk) GetChunkKey() string {
+	return s.ChunkKey
+}
+
+// GetPath returns the value of Path.
+func (s *DecisionChunk) GetPath() OptString {
+	return s.Path
+}
+
+// GetScore returns the value of Score.
+func (s *DecisionChunk) GetScore() OptFloat64 {
+	return s.Score
+}
+
+// GetKeep returns the value of Keep.
+func (s *DecisionChunk) GetKeep() bool {
+	return s.Keep
+}
+
+// GetReason returns the value of Reason.
+func (s *DecisionChunk) GetReason() OptString {
+	return s.Reason
+}
+
+// SetChunkKey sets the value of ChunkKey.
+func (s *DecisionChunk) SetChunkKey(val string) {
+	s.ChunkKey = val
+}
+
+// SetPath sets the value of Path.
+func (s *DecisionChunk) SetPath(val OptString) {
+	s.Path = val
+}
+
+// SetScore sets the value of Score.
+func (s *DecisionChunk) SetScore(val OptFloat64) {
+	s.Score = val
+}
+
+// SetKeep sets the value of Keep.
+func (s *DecisionChunk) SetKeep(val bool) {
+	s.Keep = val
+}
+
+// SetReason sets the value of Reason.
+func (s *DecisionChunk) SetReason(val OptString) {
+	s.Reason = val
+}
+
+// The gate call's outcome (ADR-0053): the threshold applied and one decision per candidate chunk, with
+// the routed checkpoint.
+// Ref: #/components/schemas/DecisionGate
+type DecisionGate struct {
+	// The Laya checkpoint Laya's Router selected for the gate.
+	Checkpoint OptString `json:"checkpoint"`
+	// The τ applied to each chunk's P(relevant) score.
+	Threshold OptFloat64 `json:"threshold"`
+	// True when this call failed (all chunks kept, fail-open).
+	Degraded         OptBool               `json:"degraded"`
+	Reason           OptDecisionGateReason `json:"reason"`
+	Chunks           []DecisionChunk       `json:"chunks"`
+	PromptTokens     OptInt                `json:"promptTokens"`
+	CompletionTokens OptInt                `json:"completionTokens"`
+}
+
+// GetCheckpoint returns the value of Checkpoint.
+func (s *DecisionGate) GetCheckpoint() OptString {
+	return s.Checkpoint
+}
+
+// GetThreshold returns the value of Threshold.
+func (s *DecisionGate) GetThreshold() OptFloat64 {
+	return s.Threshold
+}
+
+// GetDegraded returns the value of Degraded.
+func (s *DecisionGate) GetDegraded() OptBool {
+	return s.Degraded
+}
+
+// GetReason returns the value of Reason.
+func (s *DecisionGate) GetReason() OptDecisionGateReason {
+	return s.Reason
+}
+
+// GetChunks returns the value of Chunks.
+func (s *DecisionGate) GetChunks() []DecisionChunk {
+	return s.Chunks
+}
+
+// GetPromptTokens returns the value of PromptTokens.
+func (s *DecisionGate) GetPromptTokens() OptInt {
+	return s.PromptTokens
+}
+
+// GetCompletionTokens returns the value of CompletionTokens.
+func (s *DecisionGate) GetCompletionTokens() OptInt {
+	return s.CompletionTokens
+}
+
+// SetCheckpoint sets the value of Checkpoint.
+func (s *DecisionGate) SetCheckpoint(val OptString) {
+	s.Checkpoint = val
+}
+
+// SetThreshold sets the value of Threshold.
+func (s *DecisionGate) SetThreshold(val OptFloat64) {
+	s.Threshold = val
+}
+
+// SetDegraded sets the value of Degraded.
+func (s *DecisionGate) SetDegraded(val OptBool) {
+	s.Degraded = val
+}
+
+// SetReason sets the value of Reason.
+func (s *DecisionGate) SetReason(val OptDecisionGateReason) {
+	s.Reason = val
+}
+
+// SetChunks sets the value of Chunks.
+func (s *DecisionGate) SetChunks(val []DecisionChunk) {
+	s.Chunks = val
+}
+
+// SetPromptTokens sets the value of PromptTokens.
+func (s *DecisionGate) SetPromptTokens(val OptInt) {
+	s.PromptTokens = val
+}
+
+// SetCompletionTokens sets the value of CompletionTokens.
+func (s *DecisionGate) SetCompletionTokens(val OptInt) {
+	s.CompletionTokens = val
+}
+
+type DecisionGateReason string
+
+const (
+	DecisionGateReasonUnreachable   DecisionGateReason = "unreachable"
+	DecisionGateReasonTimeout       DecisionGateReason = "timeout"
+	DecisionGateReasonProtocol      DecisionGateReason = "protocol"
+	DecisionGateReasonLowConfidence DecisionGateReason = "low-confidence"
+)
+
+// AllValues returns all DecisionGateReason values.
+func (DecisionGateReason) AllValues() []DecisionGateReason {
+	return []DecisionGateReason{
+		DecisionGateReasonUnreachable,
+		DecisionGateReasonTimeout,
+		DecisionGateReasonProtocol,
+		DecisionGateReasonLowConfidence,
+	}
+}
+
+// MarshalText implements encoding.TextMarshaler.
+func (s DecisionGateReason) MarshalText() ([]byte, error) {
+	switch s {
+	case DecisionGateReasonUnreachable:
+		return []byte(s), nil
+	case DecisionGateReasonTimeout:
+		return []byte(s), nil
+	case DecisionGateReasonProtocol:
+		return []byte(s), nil
+	case DecisionGateReasonLowConfidence:
+		return []byte(s), nil
+	default:
+		return nil, errors.Errorf("invalid value: %q", s)
+	}
+}
+
+// UnmarshalText implements encoding.TextUnmarshaler.
+func (s *DecisionGateReason) UnmarshalText(data []byte) error {
+	switch DecisionGateReason(data) {
+	case DecisionGateReasonUnreachable:
+		*s = DecisionGateReasonUnreachable
+		return nil
+	case DecisionGateReasonTimeout:
+		*s = DecisionGateReasonTimeout
+		return nil
+	case DecisionGateReasonProtocol:
+		*s = DecisionGateReasonProtocol
+		return nil
+	case DecisionGateReasonLowConfidence:
+		*s = DecisionGateReasonLowConfidence
+		return nil
+	default:
+		return errors.Errorf("invalid value: %q", data)
+	}
+}
+
+// The planner call's outcome (ADR-0053): the retrieve-or-not, thinking, and breadth answers, with the
+// routed checkpoint that produced them.
+// Ref: #/components/schemas/DecisionPlanner
+type DecisionPlanner struct {
+	// The Laya checkpoint Laya's Router selected (english | multilingual | typed-decisions).
+	Checkpoint OptString `json:"checkpoint"`
+	// Whether the turn needs corpus retrieval (the `noul` answer thresholded).
+	Retrieve OptBool `json:"retrieve"`
+	// The thinking level Laya selected (overridden by an explicit ContextPolicy.thinking).
+	Thinking OptDecisionPlannerThinking `json:"thinking"`
+	// The requested retrieval breadth, mapped to a topK by DecisionPolicy.breadthTopK.
+	Breadth OptDecisionPlannerBreadth `json:"breadth"`
+	// True when this call failed (the record falls back to policy defaults).
+	Degraded         OptBool                  `json:"degraded"`
+	Reason           OptDecisionPlannerReason `json:"reason"`
+	PromptTokens     OptInt                   `json:"promptTokens"`
+	CompletionTokens OptInt                   `json:"completionTokens"`
+}
+
+// GetCheckpoint returns the value of Checkpoint.
+func (s *DecisionPlanner) GetCheckpoint() OptString {
+	return s.Checkpoint
+}
+
+// GetRetrieve returns the value of Retrieve.
+func (s *DecisionPlanner) GetRetrieve() OptBool {
+	return s.Retrieve
+}
+
+// GetThinking returns the value of Thinking.
+func (s *DecisionPlanner) GetThinking() OptDecisionPlannerThinking {
+	return s.Thinking
+}
+
+// GetBreadth returns the value of Breadth.
+func (s *DecisionPlanner) GetBreadth() OptDecisionPlannerBreadth {
+	return s.Breadth
+}
+
+// GetDegraded returns the value of Degraded.
+func (s *DecisionPlanner) GetDegraded() OptBool {
+	return s.Degraded
+}
+
+// GetReason returns the value of Reason.
+func (s *DecisionPlanner) GetReason() OptDecisionPlannerReason {
+	return s.Reason
+}
+
+// GetPromptTokens returns the value of PromptTokens.
+func (s *DecisionPlanner) GetPromptTokens() OptInt {
+	return s.PromptTokens
+}
+
+// GetCompletionTokens returns the value of CompletionTokens.
+func (s *DecisionPlanner) GetCompletionTokens() OptInt {
+	return s.CompletionTokens
+}
+
+// SetCheckpoint sets the value of Checkpoint.
+func (s *DecisionPlanner) SetCheckpoint(val OptString) {
+	s.Checkpoint = val
+}
+
+// SetRetrieve sets the value of Retrieve.
+func (s *DecisionPlanner) SetRetrieve(val OptBool) {
+	s.Retrieve = val
+}
+
+// SetThinking sets the value of Thinking.
+func (s *DecisionPlanner) SetThinking(val OptDecisionPlannerThinking) {
+	s.Thinking = val
+}
+
+// SetBreadth sets the value of Breadth.
+func (s *DecisionPlanner) SetBreadth(val OptDecisionPlannerBreadth) {
+	s.Breadth = val
+}
+
+// SetDegraded sets the value of Degraded.
+func (s *DecisionPlanner) SetDegraded(val OptBool) {
+	s.Degraded = val
+}
+
+// SetReason sets the value of Reason.
+func (s *DecisionPlanner) SetReason(val OptDecisionPlannerReason) {
+	s.Reason = val
+}
+
+// SetPromptTokens sets the value of PromptTokens.
+func (s *DecisionPlanner) SetPromptTokens(val OptInt) {
+	s.PromptTokens = val
+}
+
+// SetCompletionTokens sets the value of CompletionTokens.
+func (s *DecisionPlanner) SetCompletionTokens(val OptInt) {
+	s.CompletionTokens = val
+}
+
+// The requested retrieval breadth, mapped to a topK by DecisionPolicy.breadthTopK.
+type DecisionPlannerBreadth string
+
+const (
+	DecisionPlannerBreadthNone DecisionPlannerBreadth = "none"
+	DecisionPlannerBreadthFew  DecisionPlannerBreadth = "few"
+	DecisionPlannerBreadthMany DecisionPlannerBreadth = "many"
+)
+
+// AllValues returns all DecisionPlannerBreadth values.
+func (DecisionPlannerBreadth) AllValues() []DecisionPlannerBreadth {
+	return []DecisionPlannerBreadth{
+		DecisionPlannerBreadthNone,
+		DecisionPlannerBreadthFew,
+		DecisionPlannerBreadthMany,
+	}
+}
+
+// MarshalText implements encoding.TextMarshaler.
+func (s DecisionPlannerBreadth) MarshalText() ([]byte, error) {
+	switch s {
+	case DecisionPlannerBreadthNone:
+		return []byte(s), nil
+	case DecisionPlannerBreadthFew:
+		return []byte(s), nil
+	case DecisionPlannerBreadthMany:
+		return []byte(s), nil
+	default:
+		return nil, errors.Errorf("invalid value: %q", s)
+	}
+}
+
+// UnmarshalText implements encoding.TextUnmarshaler.
+func (s *DecisionPlannerBreadth) UnmarshalText(data []byte) error {
+	switch DecisionPlannerBreadth(data) {
+	case DecisionPlannerBreadthNone:
+		*s = DecisionPlannerBreadthNone
+		return nil
+	case DecisionPlannerBreadthFew:
+		*s = DecisionPlannerBreadthFew
+		return nil
+	case DecisionPlannerBreadthMany:
+		*s = DecisionPlannerBreadthMany
+		return nil
+	default:
+		return errors.Errorf("invalid value: %q", data)
+	}
+}
+
+type DecisionPlannerReason string
+
+const (
+	DecisionPlannerReasonUnreachable   DecisionPlannerReason = "unreachable"
+	DecisionPlannerReasonTimeout       DecisionPlannerReason = "timeout"
+	DecisionPlannerReasonProtocol      DecisionPlannerReason = "protocol"
+	DecisionPlannerReasonLowConfidence DecisionPlannerReason = "low-confidence"
+)
+
+// AllValues returns all DecisionPlannerReason values.
+func (DecisionPlannerReason) AllValues() []DecisionPlannerReason {
+	return []DecisionPlannerReason{
+		DecisionPlannerReasonUnreachable,
+		DecisionPlannerReasonTimeout,
+		DecisionPlannerReasonProtocol,
+		DecisionPlannerReasonLowConfidence,
+	}
+}
+
+// MarshalText implements encoding.TextMarshaler.
+func (s DecisionPlannerReason) MarshalText() ([]byte, error) {
+	switch s {
+	case DecisionPlannerReasonUnreachable:
+		return []byte(s), nil
+	case DecisionPlannerReasonTimeout:
+		return []byte(s), nil
+	case DecisionPlannerReasonProtocol:
+		return []byte(s), nil
+	case DecisionPlannerReasonLowConfidence:
+		return []byte(s), nil
+	default:
+		return nil, errors.Errorf("invalid value: %q", s)
+	}
+}
+
+// UnmarshalText implements encoding.TextUnmarshaler.
+func (s *DecisionPlannerReason) UnmarshalText(data []byte) error {
+	switch DecisionPlannerReason(data) {
+	case DecisionPlannerReasonUnreachable:
+		*s = DecisionPlannerReasonUnreachable
+		return nil
+	case DecisionPlannerReasonTimeout:
+		*s = DecisionPlannerReasonTimeout
+		return nil
+	case DecisionPlannerReasonProtocol:
+		*s = DecisionPlannerReasonProtocol
+		return nil
+	case DecisionPlannerReasonLowConfidence:
+		*s = DecisionPlannerReasonLowConfidence
+		return nil
+	default:
+		return errors.Errorf("invalid value: %q", data)
+	}
+}
+
+// The thinking level Laya selected (overridden by an explicit ContextPolicy.thinking).
+type DecisionPlannerThinking string
+
+const (
+	DecisionPlannerThinkingOff  DecisionPlannerThinking = "off"
+	DecisionPlannerThinkingAuto DecisionPlannerThinking = "auto"
+	DecisionPlannerThinkingOn   DecisionPlannerThinking = "on"
+)
+
+// AllValues returns all DecisionPlannerThinking values.
+func (DecisionPlannerThinking) AllValues() []DecisionPlannerThinking {
+	return []DecisionPlannerThinking{
+		DecisionPlannerThinkingOff,
+		DecisionPlannerThinkingAuto,
+		DecisionPlannerThinkingOn,
+	}
+}
+
+// MarshalText implements encoding.TextMarshaler.
+func (s DecisionPlannerThinking) MarshalText() ([]byte, error) {
+	switch s {
+	case DecisionPlannerThinkingOff:
+		return []byte(s), nil
+	case DecisionPlannerThinkingAuto:
+		return []byte(s), nil
+	case DecisionPlannerThinkingOn:
+		return []byte(s), nil
+	default:
+		return nil, errors.Errorf("invalid value: %q", s)
+	}
+}
+
+// UnmarshalText implements encoding.TextUnmarshaler.
+func (s *DecisionPlannerThinking) UnmarshalText(data []byte) error {
+	switch DecisionPlannerThinking(data) {
+	case DecisionPlannerThinkingOff:
+		*s = DecisionPlannerThinkingOff
+		return nil
+	case DecisionPlannerThinkingAuto:
+		*s = DecisionPlannerThinkingAuto
+		return nil
+	case DecisionPlannerThinkingOn:
+		*s = DecisionPlannerThinkingOn
+		return nil
+	default:
+		return errors.Errorf("invalid value: %q", data)
+	}
+}
+
+// The engine's global decision-layer policy (ADR-0053), read from `config/pipeline.json` and returned
+// by GET /decision. One global policy; never a preset field (ADR-0045). Off by default.
+// Ref: #/components/schemas/DecisionPolicy
+type DecisionPolicy struct {
+	// Whether the Laya decision layer is enabled globally.
+	Enabled bool `json:"enabled"`
+	// The Laya service resolved by name via Fleet (the nomic-embed / needle-router pattern). Laya's own
+	// Router selects the checkpoint per request by script/language.
+	Model string `json:"model"`
+	// The engine-applied keep threshold τ on the gate's per-chunk P(relevant) `noul` answer. Chunks at or
+	// above are kept.
+	GateThreshold float64 `json:"gateThreshold"`
+	// The maximum number of candidate chunks sent to the gate (bounded by Laya's batch cap).
+	MaxCandidates int `json:"maxCandidates"`
+	// The number of recent history turns the planner sees.
+	MaxHistoryTurns int `json:"maxHistoryTurns"`
+	// Maps the planner's `breadth` choice to the retrieval topK.
+	BreadthTopK DecisionPolicyBreadthTopK `json:"breadthTopK"`
+	// The per-call deadline for a Laya request; a timeout degrades fail-open and labeled.
+	TimeoutMs int `json:"timeoutMs"`
+}
+
+// GetEnabled returns the value of Enabled.
+func (s *DecisionPolicy) GetEnabled() bool {
+	return s.Enabled
+}
+
+// GetModel returns the value of Model.
+func (s *DecisionPolicy) GetModel() string {
+	return s.Model
+}
+
+// GetGateThreshold returns the value of GateThreshold.
+func (s *DecisionPolicy) GetGateThreshold() float64 {
+	return s.GateThreshold
+}
+
+// GetMaxCandidates returns the value of MaxCandidates.
+func (s *DecisionPolicy) GetMaxCandidates() int {
+	return s.MaxCandidates
+}
+
+// GetMaxHistoryTurns returns the value of MaxHistoryTurns.
+func (s *DecisionPolicy) GetMaxHistoryTurns() int {
+	return s.MaxHistoryTurns
+}
+
+// GetBreadthTopK returns the value of BreadthTopK.
+func (s *DecisionPolicy) GetBreadthTopK() DecisionPolicyBreadthTopK {
+	return s.BreadthTopK
+}
+
+// GetTimeoutMs returns the value of TimeoutMs.
+func (s *DecisionPolicy) GetTimeoutMs() int {
+	return s.TimeoutMs
+}
+
+// SetEnabled sets the value of Enabled.
+func (s *DecisionPolicy) SetEnabled(val bool) {
+	s.Enabled = val
+}
+
+// SetModel sets the value of Model.
+func (s *DecisionPolicy) SetModel(val string) {
+	s.Model = val
+}
+
+// SetGateThreshold sets the value of GateThreshold.
+func (s *DecisionPolicy) SetGateThreshold(val float64) {
+	s.GateThreshold = val
+}
+
+// SetMaxCandidates sets the value of MaxCandidates.
+func (s *DecisionPolicy) SetMaxCandidates(val int) {
+	s.MaxCandidates = val
+}
+
+// SetMaxHistoryTurns sets the value of MaxHistoryTurns.
+func (s *DecisionPolicy) SetMaxHistoryTurns(val int) {
+	s.MaxHistoryTurns = val
+}
+
+// SetBreadthTopK sets the value of BreadthTopK.
+func (s *DecisionPolicy) SetBreadthTopK(val DecisionPolicyBreadthTopK) {
+	s.BreadthTopK = val
+}
+
+// SetTimeoutMs sets the value of TimeoutMs.
+func (s *DecisionPolicy) SetTimeoutMs(val int) {
+	s.TimeoutMs = val
+}
+
+// Maps the planner's `breadth` choice to the retrieval topK.
+type DecisionPolicyBreadthTopK struct {
+	None int `json:"none"`
+	Few  int `json:"few"`
+	Many int `json:"many"`
+}
+
+// GetNone returns the value of None.
+func (s *DecisionPolicyBreadthTopK) GetNone() int {
+	return s.None
+}
+
+// GetFew returns the value of Few.
+func (s *DecisionPolicyBreadthTopK) GetFew() int {
+	return s.Few
+}
+
+// GetMany returns the value of Many.
+func (s *DecisionPolicyBreadthTopK) GetMany() int {
+	return s.Many
+}
+
+// SetNone sets the value of None.
+func (s *DecisionPolicyBreadthTopK) SetNone(val int) {
+	s.None = val
+}
+
+// SetFew sets the value of Few.
+func (s *DecisionPolicyBreadthTopK) SetFew(val int) {
+	s.Few = val
+}
+
+// SetMany sets the value of Many.
+func (s *DecisionPolicyBreadthTopK) SetMany(val int) {
+	s.Many = val
+}
+
+// The engine-owned record of the Laya decision layer for one turn (ADR-0053). Present in the context
+// snapshot only when the layer ran (or degraded). Explains retrieve-or-not, the thinking level, and
+// every per-chunk gate outcome; every drop is labeled.
+// Ref: #/components/schemas/DecisionRecord
+type DecisionRecord struct {
+	// The effective enablement for the turn (policy/override resolved).
+	Enabled bool `json:"enabled"`
+	// True when a Laya call failed and the turn proceeded ungated (fail-open).
+	Degraded bool `json:"degraded"`
+	// The labeled degradation reason when `degraded` is true.
+	Reason  OptDecisionRecordReason `json:"reason"`
+	Planner OptDecisionPlanner      `json:"planner"`
+	Gate    OptDecisionGate         `json:"gate"`
+}
+
+// GetEnabled returns the value of Enabled.
+func (s *DecisionRecord) GetEnabled() bool {
+	return s.Enabled
+}
+
+// GetDegraded returns the value of Degraded.
+func (s *DecisionRecord) GetDegraded() bool {
+	return s.Degraded
+}
+
+// GetReason returns the value of Reason.
+func (s *DecisionRecord) GetReason() OptDecisionRecordReason {
+	return s.Reason
+}
+
+// GetPlanner returns the value of Planner.
+func (s *DecisionRecord) GetPlanner() OptDecisionPlanner {
+	return s.Planner
+}
+
+// GetGate returns the value of Gate.
+func (s *DecisionRecord) GetGate() OptDecisionGate {
+	return s.Gate
+}
+
+// SetEnabled sets the value of Enabled.
+func (s *DecisionRecord) SetEnabled(val bool) {
+	s.Enabled = val
+}
+
+// SetDegraded sets the value of Degraded.
+func (s *DecisionRecord) SetDegraded(val bool) {
+	s.Degraded = val
+}
+
+// SetReason sets the value of Reason.
+func (s *DecisionRecord) SetReason(val OptDecisionRecordReason) {
+	s.Reason = val
+}
+
+// SetPlanner sets the value of Planner.
+func (s *DecisionRecord) SetPlanner(val OptDecisionPlanner) {
+	s.Planner = val
+}
+
+// SetGate sets the value of Gate.
+func (s *DecisionRecord) SetGate(val OptDecisionGate) {
+	s.Gate = val
+}
+
+// The labeled degradation reason when `degraded` is true.
+type DecisionRecordReason string
+
+const (
+	DecisionRecordReasonUnreachable   DecisionRecordReason = "unreachable"
+	DecisionRecordReasonTimeout       DecisionRecordReason = "timeout"
+	DecisionRecordReasonProtocol      DecisionRecordReason = "protocol"
+	DecisionRecordReasonLowConfidence DecisionRecordReason = "low-confidence"
+)
+
+// AllValues returns all DecisionRecordReason values.
+func (DecisionRecordReason) AllValues() []DecisionRecordReason {
+	return []DecisionRecordReason{
+		DecisionRecordReasonUnreachable,
+		DecisionRecordReasonTimeout,
+		DecisionRecordReasonProtocol,
+		DecisionRecordReasonLowConfidence,
+	}
+}
+
+// MarshalText implements encoding.TextMarshaler.
+func (s DecisionRecordReason) MarshalText() ([]byte, error) {
+	switch s {
+	case DecisionRecordReasonUnreachable:
+		return []byte(s), nil
+	case DecisionRecordReasonTimeout:
+		return []byte(s), nil
+	case DecisionRecordReasonProtocol:
+		return []byte(s), nil
+	case DecisionRecordReasonLowConfidence:
+		return []byte(s), nil
+	default:
+		return nil, errors.Errorf("invalid value: %q", s)
+	}
+}
+
+// UnmarshalText implements encoding.TextUnmarshaler.
+func (s *DecisionRecordReason) UnmarshalText(data []byte) error {
+	switch DecisionRecordReason(data) {
+	case DecisionRecordReasonUnreachable:
+		*s = DecisionRecordReasonUnreachable
+		return nil
+	case DecisionRecordReasonTimeout:
+		*s = DecisionRecordReasonTimeout
+		return nil
+	case DecisionRecordReasonProtocol:
+		*s = DecisionRecordReasonProtocol
+		return nil
+	case DecisionRecordReasonLowConfidence:
+		*s = DecisionRecordReasonLowConfidence
+		return nil
+	default:
+		return errors.Errorf("invalid value: %q", data)
+	}
 }
 
 // A shallow, non-recursive directory listing (ADR-0035 §2).
@@ -3927,6 +4694,52 @@ func (o OptContextPolicy) Or(d ContextPolicy) ContextPolicy {
 	return d
 }
 
+// NewOptContextPolicyDecision returns new OptContextPolicyDecision with value set to v.
+func NewOptContextPolicyDecision(v ContextPolicyDecision) OptContextPolicyDecision {
+	return OptContextPolicyDecision{
+		Value: v,
+		Set:   true,
+	}
+}
+
+// OptContextPolicyDecision is optional ContextPolicyDecision.
+type OptContextPolicyDecision struct {
+	Value ContextPolicyDecision
+	Set   bool
+}
+
+// IsSet returns true if OptContextPolicyDecision was set.
+func (o OptContextPolicyDecision) IsSet() bool { return o.Set }
+
+// Reset unsets value.
+func (o *OptContextPolicyDecision) Reset() {
+	var v ContextPolicyDecision
+	o.Value = v
+	o.Set = false
+}
+
+// SetTo sets value to v.
+func (o *OptContextPolicyDecision) SetTo(v ContextPolicyDecision) {
+	o.Set = true
+	o.Value = v
+}
+
+// Get returns value and boolean that denotes whether value was set.
+func (o OptContextPolicyDecision) Get() (v ContextPolicyDecision, ok bool) {
+	if !o.Set {
+		return v, false
+	}
+	return o.Value, true
+}
+
+// Or returns value if set, or given parameter if does not.
+func (o OptContextPolicyDecision) Or(d ContextPolicyDecision) ContextPolicyDecision {
+	if v, ok := o.Get(); ok {
+		return v
+	}
+	return d
+}
+
 // NewOptContextPolicyThinking returns new OptContextPolicyThinking with value set to v.
 func NewOptContextPolicyThinking(v ContextPolicyThinking) OptContextPolicyThinking {
 	return OptContextPolicyThinking{
@@ -4013,6 +4826,374 @@ func (o OptCorpusJob) Get() (v CorpusJob, ok bool) {
 
 // Or returns value if set, or given parameter if does not.
 func (o OptCorpusJob) Or(d CorpusJob) CorpusJob {
+	if v, ok := o.Get(); ok {
+		return v
+	}
+	return d
+}
+
+// NewOptDecisionGate returns new OptDecisionGate with value set to v.
+func NewOptDecisionGate(v DecisionGate) OptDecisionGate {
+	return OptDecisionGate{
+		Value: v,
+		Set:   true,
+	}
+}
+
+// OptDecisionGate is optional DecisionGate.
+type OptDecisionGate struct {
+	Value DecisionGate
+	Set   bool
+}
+
+// IsSet returns true if OptDecisionGate was set.
+func (o OptDecisionGate) IsSet() bool { return o.Set }
+
+// Reset unsets value.
+func (o *OptDecisionGate) Reset() {
+	var v DecisionGate
+	o.Value = v
+	o.Set = false
+}
+
+// SetTo sets value to v.
+func (o *OptDecisionGate) SetTo(v DecisionGate) {
+	o.Set = true
+	o.Value = v
+}
+
+// Get returns value and boolean that denotes whether value was set.
+func (o OptDecisionGate) Get() (v DecisionGate, ok bool) {
+	if !o.Set {
+		return v, false
+	}
+	return o.Value, true
+}
+
+// Or returns value if set, or given parameter if does not.
+func (o OptDecisionGate) Or(d DecisionGate) DecisionGate {
+	if v, ok := o.Get(); ok {
+		return v
+	}
+	return d
+}
+
+// NewOptDecisionGateReason returns new OptDecisionGateReason with value set to v.
+func NewOptDecisionGateReason(v DecisionGateReason) OptDecisionGateReason {
+	return OptDecisionGateReason{
+		Value: v,
+		Set:   true,
+	}
+}
+
+// OptDecisionGateReason is optional DecisionGateReason.
+type OptDecisionGateReason struct {
+	Value DecisionGateReason
+	Set   bool
+}
+
+// IsSet returns true if OptDecisionGateReason was set.
+func (o OptDecisionGateReason) IsSet() bool { return o.Set }
+
+// Reset unsets value.
+func (o *OptDecisionGateReason) Reset() {
+	var v DecisionGateReason
+	o.Value = v
+	o.Set = false
+}
+
+// SetTo sets value to v.
+func (o *OptDecisionGateReason) SetTo(v DecisionGateReason) {
+	o.Set = true
+	o.Value = v
+}
+
+// Get returns value and boolean that denotes whether value was set.
+func (o OptDecisionGateReason) Get() (v DecisionGateReason, ok bool) {
+	if !o.Set {
+		return v, false
+	}
+	return o.Value, true
+}
+
+// Or returns value if set, or given parameter if does not.
+func (o OptDecisionGateReason) Or(d DecisionGateReason) DecisionGateReason {
+	if v, ok := o.Get(); ok {
+		return v
+	}
+	return d
+}
+
+// NewOptDecisionPlanner returns new OptDecisionPlanner with value set to v.
+func NewOptDecisionPlanner(v DecisionPlanner) OptDecisionPlanner {
+	return OptDecisionPlanner{
+		Value: v,
+		Set:   true,
+	}
+}
+
+// OptDecisionPlanner is optional DecisionPlanner.
+type OptDecisionPlanner struct {
+	Value DecisionPlanner
+	Set   bool
+}
+
+// IsSet returns true if OptDecisionPlanner was set.
+func (o OptDecisionPlanner) IsSet() bool { return o.Set }
+
+// Reset unsets value.
+func (o *OptDecisionPlanner) Reset() {
+	var v DecisionPlanner
+	o.Value = v
+	o.Set = false
+}
+
+// SetTo sets value to v.
+func (o *OptDecisionPlanner) SetTo(v DecisionPlanner) {
+	o.Set = true
+	o.Value = v
+}
+
+// Get returns value and boolean that denotes whether value was set.
+func (o OptDecisionPlanner) Get() (v DecisionPlanner, ok bool) {
+	if !o.Set {
+		return v, false
+	}
+	return o.Value, true
+}
+
+// Or returns value if set, or given parameter if does not.
+func (o OptDecisionPlanner) Or(d DecisionPlanner) DecisionPlanner {
+	if v, ok := o.Get(); ok {
+		return v
+	}
+	return d
+}
+
+// NewOptDecisionPlannerBreadth returns new OptDecisionPlannerBreadth with value set to v.
+func NewOptDecisionPlannerBreadth(v DecisionPlannerBreadth) OptDecisionPlannerBreadth {
+	return OptDecisionPlannerBreadth{
+		Value: v,
+		Set:   true,
+	}
+}
+
+// OptDecisionPlannerBreadth is optional DecisionPlannerBreadth.
+type OptDecisionPlannerBreadth struct {
+	Value DecisionPlannerBreadth
+	Set   bool
+}
+
+// IsSet returns true if OptDecisionPlannerBreadth was set.
+func (o OptDecisionPlannerBreadth) IsSet() bool { return o.Set }
+
+// Reset unsets value.
+func (o *OptDecisionPlannerBreadth) Reset() {
+	var v DecisionPlannerBreadth
+	o.Value = v
+	o.Set = false
+}
+
+// SetTo sets value to v.
+func (o *OptDecisionPlannerBreadth) SetTo(v DecisionPlannerBreadth) {
+	o.Set = true
+	o.Value = v
+}
+
+// Get returns value and boolean that denotes whether value was set.
+func (o OptDecisionPlannerBreadth) Get() (v DecisionPlannerBreadth, ok bool) {
+	if !o.Set {
+		return v, false
+	}
+	return o.Value, true
+}
+
+// Or returns value if set, or given parameter if does not.
+func (o OptDecisionPlannerBreadth) Or(d DecisionPlannerBreadth) DecisionPlannerBreadth {
+	if v, ok := o.Get(); ok {
+		return v
+	}
+	return d
+}
+
+// NewOptDecisionPlannerReason returns new OptDecisionPlannerReason with value set to v.
+func NewOptDecisionPlannerReason(v DecisionPlannerReason) OptDecisionPlannerReason {
+	return OptDecisionPlannerReason{
+		Value: v,
+		Set:   true,
+	}
+}
+
+// OptDecisionPlannerReason is optional DecisionPlannerReason.
+type OptDecisionPlannerReason struct {
+	Value DecisionPlannerReason
+	Set   bool
+}
+
+// IsSet returns true if OptDecisionPlannerReason was set.
+func (o OptDecisionPlannerReason) IsSet() bool { return o.Set }
+
+// Reset unsets value.
+func (o *OptDecisionPlannerReason) Reset() {
+	var v DecisionPlannerReason
+	o.Value = v
+	o.Set = false
+}
+
+// SetTo sets value to v.
+func (o *OptDecisionPlannerReason) SetTo(v DecisionPlannerReason) {
+	o.Set = true
+	o.Value = v
+}
+
+// Get returns value and boolean that denotes whether value was set.
+func (o OptDecisionPlannerReason) Get() (v DecisionPlannerReason, ok bool) {
+	if !o.Set {
+		return v, false
+	}
+	return o.Value, true
+}
+
+// Or returns value if set, or given parameter if does not.
+func (o OptDecisionPlannerReason) Or(d DecisionPlannerReason) DecisionPlannerReason {
+	if v, ok := o.Get(); ok {
+		return v
+	}
+	return d
+}
+
+// NewOptDecisionPlannerThinking returns new OptDecisionPlannerThinking with value set to v.
+func NewOptDecisionPlannerThinking(v DecisionPlannerThinking) OptDecisionPlannerThinking {
+	return OptDecisionPlannerThinking{
+		Value: v,
+		Set:   true,
+	}
+}
+
+// OptDecisionPlannerThinking is optional DecisionPlannerThinking.
+type OptDecisionPlannerThinking struct {
+	Value DecisionPlannerThinking
+	Set   bool
+}
+
+// IsSet returns true if OptDecisionPlannerThinking was set.
+func (o OptDecisionPlannerThinking) IsSet() bool { return o.Set }
+
+// Reset unsets value.
+func (o *OptDecisionPlannerThinking) Reset() {
+	var v DecisionPlannerThinking
+	o.Value = v
+	o.Set = false
+}
+
+// SetTo sets value to v.
+func (o *OptDecisionPlannerThinking) SetTo(v DecisionPlannerThinking) {
+	o.Set = true
+	o.Value = v
+}
+
+// Get returns value and boolean that denotes whether value was set.
+func (o OptDecisionPlannerThinking) Get() (v DecisionPlannerThinking, ok bool) {
+	if !o.Set {
+		return v, false
+	}
+	return o.Value, true
+}
+
+// Or returns value if set, or given parameter if does not.
+func (o OptDecisionPlannerThinking) Or(d DecisionPlannerThinking) DecisionPlannerThinking {
+	if v, ok := o.Get(); ok {
+		return v
+	}
+	return d
+}
+
+// NewOptDecisionRecord returns new OptDecisionRecord with value set to v.
+func NewOptDecisionRecord(v DecisionRecord) OptDecisionRecord {
+	return OptDecisionRecord{
+		Value: v,
+		Set:   true,
+	}
+}
+
+// OptDecisionRecord is optional DecisionRecord.
+type OptDecisionRecord struct {
+	Value DecisionRecord
+	Set   bool
+}
+
+// IsSet returns true if OptDecisionRecord was set.
+func (o OptDecisionRecord) IsSet() bool { return o.Set }
+
+// Reset unsets value.
+func (o *OptDecisionRecord) Reset() {
+	var v DecisionRecord
+	o.Value = v
+	o.Set = false
+}
+
+// SetTo sets value to v.
+func (o *OptDecisionRecord) SetTo(v DecisionRecord) {
+	o.Set = true
+	o.Value = v
+}
+
+// Get returns value and boolean that denotes whether value was set.
+func (o OptDecisionRecord) Get() (v DecisionRecord, ok bool) {
+	if !o.Set {
+		return v, false
+	}
+	return o.Value, true
+}
+
+// Or returns value if set, or given parameter if does not.
+func (o OptDecisionRecord) Or(d DecisionRecord) DecisionRecord {
+	if v, ok := o.Get(); ok {
+		return v
+	}
+	return d
+}
+
+// NewOptDecisionRecordReason returns new OptDecisionRecordReason with value set to v.
+func NewOptDecisionRecordReason(v DecisionRecordReason) OptDecisionRecordReason {
+	return OptDecisionRecordReason{
+		Value: v,
+		Set:   true,
+	}
+}
+
+// OptDecisionRecordReason is optional DecisionRecordReason.
+type OptDecisionRecordReason struct {
+	Value DecisionRecordReason
+	Set   bool
+}
+
+// IsSet returns true if OptDecisionRecordReason was set.
+func (o OptDecisionRecordReason) IsSet() bool { return o.Set }
+
+// Reset unsets value.
+func (o *OptDecisionRecordReason) Reset() {
+	var v DecisionRecordReason
+	o.Value = v
+	o.Set = false
+}
+
+// SetTo sets value to v.
+func (o *OptDecisionRecordReason) SetTo(v DecisionRecordReason) {
+	o.Set = true
+	o.Value = v
+}
+
+// Get returns value and boolean that denotes whether value was set.
+func (o OptDecisionRecordReason) Get() (v DecisionRecordReason, ok bool) {
+	if !o.Set {
+		return v, false
+	}
+	return o.Value, true
+}
+
+// Or returns value if set, or given parameter if does not.
+func (o OptDecisionRecordReason) Or(d DecisionRecordReason) DecisionRecordReason {
 	if v, ok := o.Get(); ok {
 		return v
 	}
@@ -5363,6 +6544,7 @@ const (
 	SessionMeterComponentsItemComponentThinking   SessionMeterComponentsItemComponent = "thinking"
 	SessionMeterComponentsItemComponentCompletion SessionMeterComponentsItemComponent = "completion"
 	SessionMeterComponentsItemComponentCompaction SessionMeterComponentsItemComponent = "compaction"
+	SessionMeterComponentsItemComponentDecision   SessionMeterComponentsItemComponent = "decision"
 )
 
 // AllValues returns all SessionMeterComponentsItemComponent values.
@@ -5377,6 +6559,7 @@ func (SessionMeterComponentsItemComponent) AllValues() []SessionMeterComponentsI
 		SessionMeterComponentsItemComponentThinking,
 		SessionMeterComponentsItemComponentCompletion,
 		SessionMeterComponentsItemComponentCompaction,
+		SessionMeterComponentsItemComponentDecision,
 	}
 }
 
@@ -5400,6 +6583,8 @@ func (s SessionMeterComponentsItemComponent) MarshalText() ([]byte, error) {
 	case SessionMeterComponentsItemComponentCompletion:
 		return []byte(s), nil
 	case SessionMeterComponentsItemComponentCompaction:
+		return []byte(s), nil
+	case SessionMeterComponentsItemComponentDecision:
 		return []byte(s), nil
 	default:
 		return nil, errors.Errorf("invalid value: %q", s)
@@ -5435,6 +6620,9 @@ func (s *SessionMeterComponentsItemComponent) UnmarshalText(data []byte) error {
 		return nil
 	case SessionMeterComponentsItemComponentCompaction:
 		*s = SessionMeterComponentsItemComponentCompaction
+		return nil
+	case SessionMeterComponentsItemComponentDecision:
+		*s = SessionMeterComponentsItemComponentDecision
 		return nil
 	default:
 		return errors.Errorf("invalid value: %q", data)

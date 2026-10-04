@@ -79,6 +79,19 @@ func parse(schemaBytes, data []byte) (dto.PipelinePolicy, error) {
 			TriggerHistoryTokens int  `json:"triggerHistoryTokens"`
 			KeepRecentTurns      int  `json:"keepRecentTurns"`
 		} `json:"compaction"`
+		Decision struct {
+			Enabled         bool    `json:"enabled"`
+			Model           string  `json:"model"`
+			GateThreshold   float64 `json:"gateThreshold"`
+			MaxCandidates   int     `json:"maxCandidates"`
+			MaxHistoryTurns int     `json:"maxHistoryTurns"`
+			BreadthTopK     struct {
+				None int `json:"none"`
+				Few  int `json:"few"`
+				Many int `json:"many"`
+			} `json:"breadthTopK"`
+			TimeoutMs int `json:"timeoutMs"`
+		} `json:"decision"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return dto.PipelinePolicy{}, fmt.Errorf("%w: %v", ErrInvalid, err)
@@ -97,6 +110,19 @@ func parse(schemaBytes, data []byte) (dto.PipelinePolicy, error) {
 			Enabled:              raw.Compaction.Enabled,
 			TriggerHistoryTokens: raw.Compaction.TriggerHistoryTokens,
 			KeepRecentTurns:      raw.Compaction.KeepRecentTurns,
+		},
+		Decision: dto.DecisionPolicy{
+			Enabled:         raw.Decision.Enabled,
+			Model:           raw.Decision.Model,
+			GateThreshold:   raw.Decision.GateThreshold,
+			MaxCandidates:   raw.Decision.MaxCandidates,
+			MaxHistoryTurns: raw.Decision.MaxHistoryTurns,
+			BreadthTopK: dto.DecisionBreadthTopK{
+				None: raw.Decision.BreadthTopK.None,
+				Few:  raw.Decision.BreadthTopK.Few,
+				Many: raw.Decision.BreadthTopK.Many,
+			},
+			TimeoutMs: raw.Decision.TimeoutMs,
 		},
 	}, nil
 }

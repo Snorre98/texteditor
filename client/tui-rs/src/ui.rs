@@ -748,6 +748,49 @@ fn render_inspector(frame: &mut Frame, area: Rect, app: &AppState) {
                 },
             )));
         }
+        if let Some(d) = &snap.decision {
+            let degraded = if d.degraded {
+                format!(
+                    " · degraded ({})",
+                    d.reason.as_ref().map(|r| r.as_str()).unwrap_or("?")
+                )
+            } else {
+                String::new()
+            };
+            lines.push(Line::from(format!(
+                "decision · {}{}",
+                if d.enabled { "on" } else { "off" },
+                degraded,
+            )));
+            if let Some(p) = &d.planner {
+                lines.push(Line::from(format!(
+                    "  planner · retrieve {} · thinking {} · breadth {} · {}",
+                    p.retrieve.unwrap_or(false),
+                    p.thinking.as_ref().map(|t| t.as_str()).unwrap_or("auto"),
+                    p.breadth.as_ref().map(|b| b.as_str()).unwrap_or("few"),
+                    p.checkpoint.as_deref().unwrap_or("-"),
+                )));
+            }
+            if let Some(g) = &d.gate {
+                let chunks = g.chunks.as_deref().unwrap_or(&[]);
+                let kept = chunks.iter().filter(|c| c.keep).count();
+                lines.push(Line::from(format!(
+                    "  gate · {}/{} kept @ {:.2} · {}",
+                    kept,
+                    chunks.len(),
+                    g.threshold.unwrap_or(0.0),
+                    g.checkpoint.as_deref().unwrap_or("-"),
+                )));
+                for c in chunks {
+                    lines.push(Line::from(format!(
+                        "    {} {:.2} {}",
+                        if c.keep { "keep" } else { "drop" },
+                        c.score.unwrap_or(0.0),
+                        c.chunk_key,
+                    )));
+                }
+            }
+        }
     }
     if let Some(l) = &app.last_locate {
         lines.push(Line::from(format!(
@@ -764,8 +807,9 @@ fn render_inspector(frame: &mut Frame, area: Rect, app: &AppState) {
     }
     if let Some(p) = &app.session_policy {
         lines.push(Line::from(format!(
-            "tray · autoRag {} · pins {} · excludes {} · query {}",
+            "tray · autoRag {} · decision {} · pins {} · excludes {} · query {}",
             p.auto_rag.unwrap_or(true),
+            p.decision.as_ref().map(|d| d.as_str()).unwrap_or("global"),
             p.pinned.as_ref().map_or(0, |v| v.len()),
             p.excluded.as_ref().map_or(0, |v| v.len()),
             p.retrieval_query.as_deref().unwrap_or("(user input)"),
@@ -1097,12 +1141,18 @@ fn render_tray_overlay(frame: &mut Frame, area: Rect, app: &AppState) {
         .as_ref()
         .and_then(|p| p.auto_rag)
         .unwrap_or(true);
+    let decision = app
+        .session_policy
+        .as_ref()
+        .and_then(|p| p.decision.as_ref())
+        .map(|d| d.as_str())
+        .unwrap_or("global");
     lines.push(Line::from(format!(
-        "auto-RAG: {auto}  ·  override next turn: {}",
+        "auto-RAG: {auto}  ·  decision: {decision}  ·  override next turn: {}",
         app.override_next_turn
     )));
     lines.push(Line::from(
-        "p pin · x exclude · u remove · a toggle auto-RAG · q query · o override · Esc close",
+        "p pin · x exclude · u remove · a auto-RAG · d decision · q query · o override · Esc close",
     ));
     let paragraph = Paragraph::new(lines)
         .block(Block::default().borders(Borders::ALL).title("Context tray"))
@@ -1371,6 +1421,19 @@ fn session_policy_with_auto_rag(app: &AppState) -> crate::gen::ContextPolicy {
     policy
 }
 
+/// Toggle the Laya decision layer for the session (ADR-0053): global default
+/// (off) → on → off. The engine resolves precedence; the client sends a decision.
+fn session_policy_with_decision(app: &AppState) -> crate::gen::ContextPolicy {
+    let mut policy = base_policy(app);
+    policy.decision = match policy.decision {
+        Some(crate::gen::ContextPolicyDecision::On) => {
+            Some(crate::gen::ContextPolicyDecision::Off)
+        }
+        _ => Some(crate::gen::ContextPolicyDecision::On),
+    };
+    policy
+}
+
 fn chunk_ref(chunk: &crate::gen::ContextChunk) -> crate::gen::ChunkRef {
     crate::gen::ChunkRef {
         chunk_key: chunk.chunk_key.clone(),
@@ -1439,6 +1502,10 @@ fn handle_tray_key(key: KeyEvent, app: &mut AppState, bridge: &Bridge) {
         }
         KeyCode::Char('a') => {
             let policy = session_policy_with_auto_rag(app);
+            bridge.send(Command::PutSessionContext { policy });
+        }
+        KeyCode::Char('d') => {
+            let policy = session_policy_with_decision(app);
             bridge.send(Command::PutSessionContext { policy });
         }
         KeyCode::Char('q') => {
@@ -1616,6 +1683,25 @@ mod tests {
         let app = app_with_policy(Some(false), None);
         let policy = session_policy_with_auto_rag(&app);
         assert_eq!(policy.auto_rag, Some(true));
+    }
+
+    #[test]
+    fn decision_toggle_cycles_global_on_off() {
+        // Global default (absent) reads as off, so the first toggle turns it on.
+        let app = AppState::default();
+        let policy = session_policy_with_decision(&app);
+        assert_eq!(
+            policy.decision,
+            Some(crate::gen::ContextPolicyDecision::On)
+        );
+
+        let mut app = app;
+        app.session_policy = Some(policy);
+        let policy = session_policy_with_decision(&app);
+        assert_eq!(
+            policy.decision,
+            Some(crate::gen::ContextPolicyDecision::Off)
+        );
     }
 
     #[test]

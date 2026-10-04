@@ -930,6 +930,25 @@ paths:
               schema:
                 $ref: '#/components/schemas/NotFound'
 
+  /decision:
+    get:
+      operationId: getDecisionPolicy
+      summary: Read the engine's global decision-layer policy (ADR-0053)
+      description: >
+        The global decision policy from `config/pipeline.json`: whether the Laya
+        decision layer is enabled, the resolved model name, the gate threshold,
+        the candidate cap, the planner history window, the breadth->topK
+        mapping, and the timeout. The effective per-turn state also appears in a
+        turn's context snapshot DecisionRecord; a session/per-turn override
+        rides ContextPolicy.decision. Off by default.
+      responses:
+        '200':
+          description: the global decision policy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DecisionPolicy'
+
 components:
   parameters:
     Name:
@@ -1643,7 +1662,7 @@ components:
             properties:
               component:
                 type: string
-                enum: [system, tools, rag, history, mentions, user, thinking, completion, compaction]
+                enum: [system, tools, rag, history, mentions, user, thinking, completion, compaction, decision]
               promptTokens:
                 type: integer
               completionTokens:
@@ -2071,6 +2090,16 @@ components:
             runner to disable its thinking channel; `auto` runs thinking-off and
             escalates once after a structured failure; `on` always thinks. Never
             a preset field (ADR-0045).
+        decision:
+          type: string
+          enum: ["off", "on"]
+          description: >
+            The session/per-turn override for the Laya decision layer (ADR-0053).
+            When absent the persisted session policy, else the global
+            `config/pipeline.json` default (off), applies. `off` disables the
+            layer (no Laya call); `on` enables it. Human/policy outranks Laya:
+            an explicit override wins over the model's answers, and a session
+            `autoRag: false` still disables retrieval (Laya cannot re-enable it).
 
     ContextSnapshot:
       type: object
@@ -2080,8 +2109,9 @@ components:
         and provenance, the retrieved chunks, the labeled drops, and the budget
         accounting. The snapshot itself is the contract — clients render it and
         never reconstruct provenance, budgets, or drops. The optional
-        `decision` (Phase F) and `locate` (Phase D) records are reserved and
-        not implemented in Phase C3.
+        `decision` (ADR-0053) and `locate` (ADR-0048) records are typed;
+        `decision` is present only when the Laya layer ran (or degraded) on the
+        turn.
       required: [turnId, sessionId, workspaceId, retrievalQuery, autoRag, messages, chunks, drops, budget, createdAt]
       properties:
         turnId:
@@ -2112,8 +2142,7 @@ components:
           items:
             $ref: '#/components/schemas/BudgetUsage'
         decision:
-          type: object
-          description: Reserved for Phase F decision records; not implemented in Phase C3.
+          $ref: '#/components/schemas/DecisionRecord'
         locate:
           $ref: '#/components/schemas/LocateResult'
         thinking:
@@ -2135,6 +2164,152 @@ components:
         createdAt:
           type: integer
           format: int64
+
+    DecisionPolicy:
+      type: object
+      description: >
+        The engine's global decision-layer policy (ADR-0053), read from
+        `config/pipeline.json` and returned by GET /decision. One global policy;
+        never a preset field (ADR-0045). Off by default.
+      required: [enabled, model, gateThreshold, maxCandidates, maxHistoryTurns, breadthTopK, timeoutMs]
+      properties:
+        enabled:
+          type: boolean
+          description: Whether the Laya decision layer is enabled globally.
+        model:
+          type: string
+          description: >
+            The Laya service resolved by name via Fleet (the nomic-embed /
+            needle-router pattern). Laya's own Router selects the checkpoint per
+            request by script/language.
+        gateThreshold:
+          type: number
+          description: >
+            The engine-applied keep threshold τ on the gate's per-chunk
+            P(relevant) `noul` answer. Chunks at or above are kept.
+        maxCandidates:
+          type: integer
+          description: The maximum number of candidate chunks sent to the gate (bounded by Laya's batch cap).
+        maxHistoryTurns:
+          type: integer
+          description: The number of recent history turns the planner sees.
+        breadthTopK:
+          type: object
+          description: Maps the planner's `breadth` choice to the retrieval topK.
+          required: [none, few, many]
+          properties:
+            none:
+              type: integer
+            few:
+              type: integer
+            many:
+              type: integer
+        timeoutMs:
+          type: integer
+          description: The per-call deadline for a Laya request; a timeout degrades fail-open and labeled.
+
+    DecisionRecord:
+      type: object
+      description: >
+        The engine-owned record of the Laya decision layer for one turn
+        (ADR-0053). Present in the context snapshot only when the layer ran (or
+        degraded). Explains retrieve-or-not, the thinking level, and every
+        per-chunk gate outcome; every drop is labeled.
+      required: [enabled, degraded]
+      properties:
+        enabled:
+          type: boolean
+          description: The effective enablement for the turn (policy/override resolved).
+        degraded:
+          type: boolean
+          description: True when a Laya call failed and the turn proceeded ungated (fail-open).
+        reason:
+          type: string
+          enum: [unreachable, timeout, protocol, low-confidence]
+          description: The labeled degradation reason when `degraded` is true.
+        planner:
+          $ref: '#/components/schemas/DecisionPlanner'
+        gate:
+          $ref: '#/components/schemas/DecisionGate'
+
+    DecisionPlanner:
+      type: object
+      description: >
+        The planner call's outcome (ADR-0053): the retrieve-or-not, thinking,
+        and breadth answers, with the routed checkpoint that produced them.
+      properties:
+        checkpoint:
+          type: string
+          description: The Laya checkpoint Laya's Router selected (english | multilingual | typed-decisions).
+        retrieve:
+          type: boolean
+          description: Whether the turn needs corpus retrieval (the `noul` answer thresholded).
+        thinking:
+          type: string
+          enum: ["off", "auto", "on"]
+          description: The thinking level Laya selected (overridden by an explicit ContextPolicy.thinking).
+        breadth:
+          type: string
+          enum: [none, few, many]
+          description: The requested retrieval breadth, mapped to a topK by DecisionPolicy.breadthTopK.
+        degraded:
+          type: boolean
+          description: True when this call failed (the record falls back to policy defaults).
+        reason:
+          type: string
+          enum: [unreachable, timeout, protocol, low-confidence]
+        promptTokens:
+          type: integer
+        completionTokens:
+          type: integer
+
+    DecisionGate:
+      type: object
+      description: >
+        The gate call's outcome (ADR-0053): the threshold applied and one
+        decision per candidate chunk, with the routed checkpoint.
+      properties:
+        checkpoint:
+          type: string
+          description: The Laya checkpoint Laya's Router selected for the gate.
+        threshold:
+          type: number
+          description: The τ applied to each chunk's P(relevant) score.
+        degraded:
+          type: boolean
+          description: True when this call failed (all chunks kept, fail-open).
+        reason:
+          type: string
+          enum: [unreachable, timeout, protocol, low-confidence]
+        chunks:
+          type: array
+          items:
+            $ref: '#/components/schemas/DecisionChunk'
+        promptTokens:
+          type: integer
+        completionTokens:
+          type: integer
+
+    DecisionChunk:
+      type: object
+      description: One candidate chunk's gate decision (ADR-0053).
+      required: [chunkKey, keep]
+      properties:
+        chunkKey:
+          type: string
+          description: The chunk's stable key (path#index for corpus files).
+        path:
+          type: string
+          description: The canonical file path, when known.
+        score:
+          type: number
+          description: The gate's P(relevant) for this chunk.
+        keep:
+          type: boolean
+          description: Whether the chunk entered the payload (score >= threshold, or fail-open).
+        reason:
+          type: string
+          description: An optional label (e.g. below-threshold, low-confidence-kept).
 
     SessionBudget:
       type: object

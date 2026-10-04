@@ -218,6 +218,19 @@ func encodeGetCorpusResponse(response *CorpusState, w http.ResponseWriter, span 
 	return nil
 }
 
+func encodeGetDecisionPolicyResponse(response *DecisionPolicy, w http.ResponseWriter, span trace.Span) error {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(200)
+
+	e := new(jx.Encoder)
+	response.Encode(e)
+	if _, err := e.WriteTo(w); err != nil {
+		return errors.Wrap(err, "write")
+	}
+
+	return nil
+}
+
 func encodeGetDiffResponse(response []WordEdit, w http.ResponseWriter, span trace.Span) error {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(200)

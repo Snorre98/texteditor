@@ -21,6 +21,7 @@ import (
 	"texteditor/internal/loop"
 	"texteditor/internal/mode"
 	"texteditor/internal/pathutil"
+	"texteditor/internal/pipeline"
 	"texteditor/internal/session"
 	"texteditor/internal/shard"
 	"texteditor/internal/tool"
@@ -42,6 +43,7 @@ type Deps struct {
 	Workspaces  workspace.Interface // registry: workspace + session routing
 	Shards      shard.Resolver      // workspace-scoped sessions/meter/index
 	Corpus      corpus.Interface    // corpus scope/status/index/evict (ADR-0049 §4)
+	Pipeline    pipeline.Interface  // global decision-layer policy (ADR-0053)
 	BaseURL     string
 	CORSOrigins []string
 }
@@ -94,6 +96,27 @@ func (h *handler) GetHealth(ctx context.Context) (*genapi.Health, error) {
 		res.BaseUrl = genapi.NewOptString(h.d.BaseURL)
 	}
 	return res, nil
+}
+
+// GetDecisionPolicy backs GET /decision (ADR-0053): the one global Laya
+// decision-layer policy. The effective per-turn state also appears in a turn's
+// context snapshot DecisionRecord; a session/per-turn override rides
+// ContextPolicy.decision.
+func (h *handler) GetDecisionPolicy(ctx context.Context) (*genapi.DecisionPolicy, error) {
+	p := h.d.Pipeline.Policy().Decision
+	return &genapi.DecisionPolicy{
+		Enabled:         p.Enabled,
+		Model:           p.Model,
+		GateThreshold:   p.GateThreshold,
+		MaxCandidates:   p.MaxCandidates,
+		MaxHistoryTurns: p.MaxHistoryTurns,
+		BreadthTopK: genapi.DecisionPolicyBreadthTopK{
+			None: p.BreadthTopK.None,
+			Few:  p.BreadthTopK.Few,
+			Many: p.BreadthTopK.Many,
+		},
+		TimeoutMs: p.TimeoutMs,
+	}, nil
 }
 
 func (h *handler) ListModels(ctx context.Context) ([]genapi.Model, error) {

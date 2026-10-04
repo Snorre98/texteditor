@@ -321,6 +321,49 @@ func TestAttributeCompactionSeparateRow(t *testing.T) {
 	}
 }
 
+// TestAttributeDecisionSeparateRow: each Laya call is its own metered model row
+// with component "decision" and the routed checkpoint as the model (ADR-0053).
+func TestAttributeDecisionSeparateRow(t *testing.T) {
+	m, _, db := newTestMeter(t)
+	if err := m.AttributeDecision(context.Background(), "t1", "s1", "english", "planner", dto.ProviderCounts{InputTokens: 120, OutputTokens: 3}); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.AttributeDecision(context.Background(), "t1", "s1", "english", "gate", dto.ProviderCounts{InputTokens: 200, OutputTokens: 2}); err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM meter_events WHERE turn_id = 't1' AND component = 'decision'`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 2 {
+		t.Fatalf("decision rows = %d, want 2 (planner + gate)", n)
+	}
+	var model string
+	if err := db.QueryRow(`SELECT model FROM meter_events WHERE turn_id = 't1' AND component = 'decision' LIMIT 1`).Scan(&model); err != nil {
+		t.Fatal(err)
+	}
+	if model != "english" {
+		t.Fatalf("decision model = %q, want the routed checkpoint", model)
+	}
+
+	sb, err := m.SessionBreakdown(context.Background(), "s1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, c := range sb.Components {
+		if c.Component == "decision" {
+			found = true
+			if c.PromptTokens != 320 || c.CompletionTokens != 5 {
+				t.Fatalf("decision component = %+v", c)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("decision component missing from session meter: %+v", sb.Components)
+	}
+}
+
 // TestSessionBudgetState: soft warns and proceeds; hard refuses (ADR-0051 §7).
 func TestSessionBudgetState(t *testing.T) {
 	budget := 100

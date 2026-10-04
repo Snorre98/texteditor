@@ -4,7 +4,7 @@
   "title": "PipelinePolicy",
   "description": "The one global turn pipeline policy (ADR-0045 §3, ADR-0051): step cap + context budgets + auto-RAG top-k + thinking/window/session-budget/compaction policy.",
   "type": "object",
-  "required": ["maxSteps", "maxHistoryTokens", "maxRagTokens", "maxMentionTokens", "autoRagTopK", "thinking", "maxThinkingTokens", "reserveOutputTokens", "sessionBudgetSoftRatio", "compaction"],
+  "required": ["maxSteps", "maxHistoryTokens", "maxRagTokens", "maxMentionTokens", "autoRagTopK", "thinking", "maxThinkingTokens", "reserveOutputTokens", "sessionBudgetSoftRatio", "compaction", "decision"],
   "additionalProperties": false,
   "properties": {
     "maxSteps": {
@@ -72,6 +72,55 @@
           "type": "integer",
           "minimum": 0,
           "description": "Number of most-recent turns that survive compaction."
+        }
+      }
+    },
+    "decision": {
+      "type": "object",
+      "description": "The one global Laya decision-layer policy (ADR-0053). Off by default; never per-preset.",
+      "required": ["enabled", "model", "gateThreshold", "maxCandidates", "maxHistoryTurns", "breadthTopK", "timeoutMs"],
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Whether the Laya decision layer is enabled globally (a session/per-turn ContextPolicy.decision may override)."
+        },
+        "model": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The Laya service resolved by name via Fleet."
+        },
+        "gateThreshold": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "description": "Engine-applied keep threshold τ on the gate's per-chunk P(relevant)."
+        },
+        "maxCandidates": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Maximum candidate chunks sent to the gate (bounded by Laya's batch cap)."
+        },
+        "maxHistoryTurns": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Recent history turns the planner sees."
+        },
+        "breadthTopK": {
+          "type": "object",
+          "description": "Maps the planner's breadth choice to a retrieval topK.",
+          "required": ["none", "few", "many"],
+          "additionalProperties": false,
+          "properties": {
+            "none": { "type": "integer", "minimum": 0 },
+            "few": { "type": "integer", "minimum": 0 },
+            "many": { "type": "integer", "minimum": 0 }
+          }
+        },
+        "timeoutMs": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Per-call deadline for a Laya request; a timeout degrades fail-open and labeled."
         }
       }
     }

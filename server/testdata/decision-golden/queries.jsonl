@@ -1,0 +1,6 @@
+{"query":"Explain how scaling stabilises the gradients in attention.","relevant":["attention.md#Scaled dot-product attention"]}
+{"query":"Why do transformer layers use several attention heads in parallel?","relevant":["attention.md#Multi-head attention"]}
+{"query":"How is sequence order represented when attention is permutation-invariant?","relevant":["attention.md#Positional encodings"]}
+{"query":"Describe the baseline that injects every retrieved passage.","relevant":["methods.md#Retrieval baseline"]}
+{"query":"What does the typed-decision model decide for each candidate passage?","relevant":["methods.md#Gated retrieval"]}
+{"query":"How does the keep threshold trade recall against token savings?","relevant":["evaluation.md#Threshold tuning"]}

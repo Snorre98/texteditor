@@ -28,6 +28,11 @@ type TokenMeter interface {
 	// its own model row (component "compaction", ADR-0051 §8). It is a separate
 	// metered model call, not folded into the turn's components.
 	AttributeCompaction(ctx context.Context, turnID, sessionID, model string, counts dto.ProviderCounts) error
+	// AttributeDecision records one Laya decision call as its own model row
+	// (component "decision", model = the routed checkpoint, ADR-0053). role
+	// ("planner" | "gate") only disambiguates the internal measurement key; the
+	// meter_events ledger is role-free (the role lives in the snapshot record).
+	AttributeDecision(ctx context.Context, turnID, sessionID, model, role string, counts dto.ProviderCounts) error
 	// SessionUsage returns a session's cumulative token total (prompt + completion
 	// across all its turns). It backs the per-session budget check (ADR-0026 §5) —
 	// the meter owns the cumulative tally, so the loop reads it from here.
@@ -151,6 +156,29 @@ func (m *meter) AttributeCompaction(ctx context.Context, turnID, sessionID, mode
 	})
 }
 
+// AttributeDecision persists one Laya decision call as its own metered row
+// (component "decision", model = the routed checkpoint) plus a measurement row
+// keyed by role (ADR-0053). It emits no meter event: the decision is part of the
+// enclosing turn's record, not a separate client-visible turn.
+func (m *meter) AttributeDecision(ctx context.Context, turnID, sessionID, model, role string, counts dto.ProviderCounts) error {
+	ts := time.Now().UnixMilli()
+	if counts.InputTokens != 0 || counts.OutputTokens != 0 {
+		if _, err := m.db.ExecContext(ctx,
+			`INSERT INTO meter_events (ts, session_id, turn_id, component, prompt_tokens, completion_tokens, approx, model)
+			 VALUES (?, ?, ?, ?, ?, ?, 0, ?)`,
+			ts, sessionID, turnID, "decision", counts.InputTokens, counts.OutputTokens, model,
+		); err != nil {
+			return err
+		}
+	}
+	return m.recordMeasurement(ctx, turnID+":decision:"+role, sessionID, model, dto.TurnMeasurement{
+		PromptTokens:     counts.InputTokens,
+		ThinkingTokens:   counts.ThinkingTokens,
+		CompletionTokens: counts.OutputTokens,
+		Model:            model,
+	})
+}
+
 // scalePrompt scales the six components proportionally onto total, with the
 // largest component absorbing rounding so the scaled sum equals total exactly
 // (Q1, ADR-0022).
@@ -229,7 +257,7 @@ func (m *meter) SessionUsage(ctx context.Context, sessionID string) (int, error)
 
 // meterComponents is the canonical component order for SessionBreakdown, so the
 // response shape is deterministic regardless of row insertion order.
-var meterComponents = []string{"system", "tools", "rag", "history", "mentions", "user", "thinking", "completion", "compaction"}
+var meterComponents = []string{"system", "tools", "rag", "history", "mentions", "user", "thinking", "completion", "compaction", "decision"}
 
 // SessionBreakdown aggregates a session's meter_events by component and returns
 // the cumulative per-component totals plus the overall total (interface.md §6).

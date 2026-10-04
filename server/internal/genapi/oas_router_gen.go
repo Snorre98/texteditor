@@ -14,10 +14,10 @@ var (
 	rn20AllowedHeaders = map[string]string{
 		"PUT": "Content-Type",
 	}
-	rn39AllowedHeaders = map[string]string{
+	rn41AllowedHeaders = map[string]string{
 		"POST": "Content-Type",
 	}
-	rn48AllowedHeaders = map[string]string{
+	rn49AllowedHeaders = map[string]string{
 		"POST": "Content-Type",
 	}
 	rn5AllowedHeaders = map[string]string{
@@ -29,28 +29,28 @@ var (
 	rn7AllowedHeaders = map[string]string{
 		"POST": "Content-Type",
 	}
-	rn49AllowedHeaders = map[string]string{
+	rn50AllowedHeaders = map[string]string{
 		"POST": "Content-Type",
 	}
-	rn56AllowedHeaders = map[string]string{
+	rn57AllowedHeaders = map[string]string{
 		"PUT": "Content-Type",
 	}
-	rn47AllowedHeaders = map[string]string{
+	rn48AllowedHeaders = map[string]string{
 		"POST": "Content-Type",
 	}
 	rn13AllowedHeaders = map[string]string{
 		"POST": "Content-Type",
 	}
-	rn30AllowedHeaders = map[string]string{
+	rn32AllowedHeaders = map[string]string{
 		"PUT": "Content-Type",
 	}
-	rn53AllowedHeaders = map[string]string{
+	rn54AllowedHeaders = map[string]string{
 		"PUT": "Content-Type",
 	}
-	rn59AllowedHeaders = map[string]string{
+	rn60AllowedHeaders = map[string]string{
 		"POST": "Content-Type",
 	}
-	rn55AllowedHeaders = map[string]string{
+	rn56AllowedHeaders = map[string]string{
 		"POST": "Content-Type",
 	}
 	rn14AllowedHeaders = map[string]string{
@@ -199,7 +199,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 							default:
 								s.notAllowed(w, r, notAllowedParams{
 									allowedMethods: "POST",
-									allowedHeaders: rn39AllowedHeaders,
+									allowedHeaders: rn41AllowedHeaders,
 									acceptPost:     "application/json",
 									acceptPatch:    "",
 								})
@@ -224,6 +224,31 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					break
 				}
 				switch elem[0] {
+				case 'e': // Prefix: "ecision"
+
+					if l := len("ecision"); len(elem) >= l && elem[0:l] == "ecision" {
+						elem = elem[l:]
+					} else {
+						break
+					}
+
+					if len(elem) == 0 {
+						// Leaf node.
+						switch r.Method {
+						case "GET":
+							s.handleGetDecisionPolicyRequest([0]string{}, elemIsEscaped, w, r)
+						default:
+							s.notAllowed(w, r, notAllowedParams{
+								allowedMethods: "GET",
+								allowedHeaders: nil,
+								acceptPost:     "",
+								acceptPatch:    "",
+							})
+						}
+
+						return
+					}
+
 				case 'i': // Prefix: "irectories"
 
 					if l := len("irectories"); len(elem) >= l && elem[0:l] == "irectories" {
@@ -264,7 +289,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 						default:
 							s.notAllowed(w, r, notAllowedParams{
 								allowedMethods: "POST",
-								allowedHeaders: rn48AllowedHeaders,
+								allowedHeaders: rn49AllowedHeaders,
 								acceptPost:     "application/json",
 								acceptPatch:    "",
 							})
@@ -553,7 +578,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 									default:
 										s.notAllowed(w, r, notAllowedParams{
 											allowedMethods: "POST",
-											allowedHeaders: rn49AllowedHeaders,
+											allowedHeaders: rn50AllowedHeaders,
 											acceptPost:     "application/json",
 											acceptPatch:    "",
 										})
@@ -580,7 +605,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 									default:
 										s.notAllowed(w, r, notAllowedParams{
 											allowedMethods: "PUT",
-											allowedHeaders: rn56AllowedHeaders,
+											allowedHeaders: rn57AllowedHeaders,
 											acceptPost:     "",
 											acceptPatch:    "",
 										})
@@ -926,7 +951,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					default:
 						s.notAllowed(w, r, notAllowedParams{
 							allowedMethods: "POST",
-							allowedHeaders: rn47AllowedHeaders,
+							allowedHeaders: rn48AllowedHeaders,
 							acceptPost:     "application/json",
 							acceptPatch:    "",
 						})
@@ -987,7 +1012,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 						default:
 							s.notAllowed(w, r, notAllowedParams{
 								allowedMethods: "PUT",
-								allowedHeaders: rn30AllowedHeaders,
+								allowedHeaders: rn32AllowedHeaders,
 								acceptPost:     "",
 								acceptPatch:    "",
 							})
@@ -1026,7 +1051,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 								default:
 									s.notAllowed(w, r, notAllowedParams{
 										allowedMethods: "PUT",
-										allowedHeaders: rn53AllowedHeaders,
+										allowedHeaders: rn54AllowedHeaders,
 										acceptPost:     "",
 										acceptPatch:    "",
 									})
@@ -1161,7 +1186,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 						default:
 							s.notAllowed(w, r, notAllowedParams{
 								allowedMethods: "POST",
-								allowedHeaders: rn59AllowedHeaders,
+								allowedHeaders: rn60AllowedHeaders,
 								acceptPost:     "application/json",
 								acceptPatch:    "",
 							})
@@ -1289,7 +1314,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 									default:
 										s.notAllowed(w, r, notAllowedParams{
 											allowedMethods: "POST",
-											allowedHeaders: rn55AllowedHeaders,
+											allowedHeaders: rn56AllowedHeaders,
 											acceptPost:     "application/json",
 											acceptPatch:    "",
 										})
@@ -1590,6 +1615,31 @@ func (s *Server) FindPath(method string, u *url.URL) (r Route, _ bool) {
 					break
 				}
 				switch elem[0] {
+				case 'e': // Prefix: "ecision"
+
+					if l := len("ecision"); len(elem) >= l && elem[0:l] == "ecision" {
+						elem = elem[l:]
+					} else {
+						break
+					}
+
+					if len(elem) == 0 {
+						// Leaf node.
+						switch method {
+						case "GET":
+							r.name = GetDecisionPolicyOperation
+							r.summary = "Read the engine's global decision-layer policy (ADR-0053)"
+							r.operationID = "getDecisionPolicy"
+							r.operationGroup = ""
+							r.pathPattern = "/decision"
+							r.args = args
+							r.count = 0
+							return r, true
+						default:
+							return
+						}
+					}
+
 				case 'i': // Prefix: "irectories"
 
 					if l := len("irectories"); len(elem) >= l && elem[0:l] == "irectories" {

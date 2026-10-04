@@ -2,16 +2,20 @@ package pipeline
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"texteditor/config"
 	"texteditor/shared/dto"
 )
 
-// baseValid is a minimal policy carrying every required ADR-0051 field.
+// decValid is the shipped decision block (ADR-0053).
+const decValid = `"decision":{"enabled":false,"model":"laya","gateThreshold":0.5,"maxCandidates":24,"maxHistoryTurns":4,"breadthTopK":{"none":0,"few":3,"many":8},"timeoutMs":3000}`
+
+// baseValid is a minimal policy carrying every required field.
 const baseValid = `{"maxSteps":1,"maxHistoryTokens":0,"maxRagTokens":0,"maxMentionTokens":0,"autoRagTopK":1,` +
 	`"thinking":"auto","maxThinkingTokens":0,"reserveOutputTokens":0,"sessionBudgetSoftRatio":0.5,` +
-	`"compaction":{"enabled":false,"triggerHistoryTokens":0,"keepRecentTurns":0}}`
+	`"compaction":{"enabled":false,"triggerHistoryTokens":0,"keepRecentTurns":0},` + decValid + `}`
 
 // TestNewLoadsPolicy pins the shipped starting values (tuned in Phase F).
 func TestNewLoadsPolicy(t *testing.T) {
@@ -31,6 +35,15 @@ func TestNewLoadsPolicy(t *testing.T) {
 		ReserveOutputTokens:    4096,
 		SessionBudgetSoftRatio: 0.8,
 		Compaction:             dto.CompactionPolicy{Enabled: true, TriggerHistoryTokens: 24000, KeepRecentTurns: 4},
+		Decision: dto.DecisionPolicy{
+			Enabled:         false,
+			Model:           "laya",
+			GateThreshold:   0.5,
+			MaxCandidates:   24,
+			MaxHistoryTurns: 4,
+			BreadthTopK:     dto.DecisionBreadthTopK{None: 0, Few: 3, Many: 8},
+			TimeoutMs:       3000,
+		},
 	}
 	if got != want {
 		t.Fatalf("policy = %+v, want %+v", got, want)
@@ -38,17 +51,27 @@ func TestNewLoadsPolicy(t *testing.T) {
 }
 
 func TestParseRejectsInvalidPolicy(t *testing.T) {
+	// withDecision appends the required decision block so each case fails for
+	// the reason it names, not for a missing decision block.
+	withDecision := func(s string) string {
+		if !strings.HasSuffix(s, "}") {
+			return s
+		}
+		return strings.TrimSuffix(s, "}") + "," + decValid + "}"
+	}
 	cases := []struct {
 		name string
 		data string
 	}{
 		{"missing field", `{"maxSteps":6,"maxHistoryTokens":1,"maxRagTokens":1,"maxMentionTokens":1}`},
-		{"zero steps", `{"maxSteps":0,"maxHistoryTokens":1,"maxRagTokens":1,"maxMentionTokens":1,"autoRagTopK":1,"thinking":"auto","maxThinkingTokens":0,"reserveOutputTokens":0,"sessionBudgetSoftRatio":0.5,"compaction":{"enabled":false,"triggerHistoryTokens":0,"keepRecentTurns":0}}`},
-		{"zero top-k", `{"maxSteps":6,"maxHistoryTokens":1,"maxRagTokens":1,"maxMentionTokens":1,"autoRagTopK":0,"thinking":"auto","maxThinkingTokens":0,"reserveOutputTokens":0,"sessionBudgetSoftRatio":0.5,"compaction":{"enabled":false,"triggerHistoryTokens":0,"keepRecentTurns":0}}`},
-		{"negative budget", `{"maxSteps":6,"maxHistoryTokens":-1,"maxRagTokens":1,"maxMentionTokens":1,"autoRagTopK":1,"thinking":"auto","maxThinkingTokens":0,"reserveOutputTokens":0,"sessionBudgetSoftRatio":0.5,"compaction":{"enabled":false,"triggerHistoryTokens":0,"keepRecentTurns":0}}`},
-		{"bad thinking level", `{"maxSteps":6,"maxHistoryTokens":1,"maxRagTokens":1,"maxMentionTokens":1,"autoRagTopK":1,"thinking":"maybe","maxThinkingTokens":0,"reserveOutputTokens":0,"sessionBudgetSoftRatio":0.5,"compaction":{"enabled":false,"triggerHistoryTokens":0,"keepRecentTurns":0}}`},
-		{"soft ratio out of range", `{"maxSteps":6,"maxHistoryTokens":1,"maxRagTokens":1,"maxMentionTokens":1,"autoRagTopK":1,"thinking":"auto","maxThinkingTokens":0,"reserveOutputTokens":0,"sessionBudgetSoftRatio":2,"compaction":{"enabled":false,"triggerHistoryTokens":0,"keepRecentTurns":0}}`},
-		{"unknown field", `{"maxSteps":6,"maxHistoryTokens":1,"maxRagTokens":1,"maxMentionTokens":1,"autoRagTopK":1,"thinking":"auto","maxThinkingTokens":0,"reserveOutputTokens":0,"sessionBudgetSoftRatio":0.5,"compaction":{"enabled":false,"triggerHistoryTokens":0,"keepRecentTurns":0},"extra":true}`},
+		{"zero steps", withDecision(`{"maxSteps":0,"maxHistoryTokens":1,"maxRagTokens":1,"maxMentionTokens":1,"autoRagTopK":1,"thinking":"auto","maxThinkingTokens":0,"reserveOutputTokens":0,"sessionBudgetSoftRatio":0.5,"compaction":{"enabled":false,"triggerHistoryTokens":0,"keepRecentTurns":0}}`)},
+		{"zero top-k", withDecision(`{"maxSteps":6,"maxHistoryTokens":1,"maxRagTokens":1,"maxMentionTokens":1,"autoRagTopK":0,"thinking":"auto","maxThinkingTokens":0,"reserveOutputTokens":0,"sessionBudgetSoftRatio":0.5,"compaction":{"enabled":false,"triggerHistoryTokens":0,"keepRecentTurns":0}}`)},
+		{"negative budget", withDecision(`{"maxSteps":6,"maxHistoryTokens":-1,"maxRagTokens":1,"maxMentionTokens":1,"autoRagTopK":1,"thinking":"auto","maxThinkingTokens":0,"reserveOutputTokens":0,"sessionBudgetSoftRatio":0.5,"compaction":{"enabled":false,"triggerHistoryTokens":0,"keepRecentTurns":0}}`)},
+		{"bad thinking level", withDecision(`{"maxSteps":6,"maxHistoryTokens":1,"maxRagTokens":1,"maxMentionTokens":1,"autoRagTopK":1,"thinking":"maybe","maxThinkingTokens":0,"reserveOutputTokens":0,"sessionBudgetSoftRatio":0.5,"compaction":{"enabled":false,"triggerHistoryTokens":0,"keepRecentTurns":0}}`)},
+		{"soft ratio out of range", withDecision(`{"maxSteps":6,"maxHistoryTokens":1,"maxRagTokens":1,"maxMentionTokens":1,"autoRagTopK":1,"thinking":"auto","maxThinkingTokens":0,"reserveOutputTokens":0,"sessionBudgetSoftRatio":2,"compaction":{"enabled":false,"triggerHistoryTokens":0,"keepRecentTurns":0}}`)},
+		{"unknown field", withDecision(`{"maxSteps":6,"maxHistoryTokens":1,"maxRagTokens":1,"maxMentionTokens":1,"autoRagTopK":1,"thinking":"auto","maxThinkingTokens":0,"reserveOutputTokens":0,"sessionBudgetSoftRatio":0.5,"compaction":{"enabled":false,"triggerHistoryTokens":0,"keepRecentTurns":0},"extra":true}`)},
+		{"missing decision", `{"maxSteps":6,"maxHistoryTokens":1,"maxRagTokens":1,"maxMentionTokens":1,"autoRagTopK":1,"thinking":"auto","maxThinkingTokens":0,"reserveOutputTokens":0,"sessionBudgetSoftRatio":0.5,"compaction":{"enabled":false,"triggerHistoryTokens":0,"keepRecentTurns":0}}`},
+		{"bad gate threshold", `{"maxSteps":6,"maxHistoryTokens":1,"maxRagTokens":1,"maxMentionTokens":1,"autoRagTopK":1,"thinking":"auto","maxThinkingTokens":0,"reserveOutputTokens":0,"sessionBudgetSoftRatio":0.5,"compaction":{"enabled":false,"triggerHistoryTokens":0,"keepRecentTurns":0},"decision":{"enabled":false,"model":"laya","gateThreshold":2,"maxCandidates":24,"maxHistoryTurns":4,"breadthTopK":{"none":0,"few":3,"many":8},"timeoutMs":3000}}`},
 		{"not an object", `[]`},
 	}
 	for _, tc := range cases {

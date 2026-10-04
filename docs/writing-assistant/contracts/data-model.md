@@ -146,7 +146,7 @@ Lives at `<data>/workspaces/<workspaceID>/meter.db`; no global meter total
 | `ts` | INTEGER | unix epoch ms |
 | `session_id` | TEXT | → `sessions.id` (the owning session) |
 | `turn_id` | TEXT | groups events into one turn |
-| `component` | TEXT | `system` \| `tools` \| `rag` \| `history` \| `mentions` \| `user` \| `thinking` \| `completion` \| `compaction` |
+| `component` | TEXT | `system` \| `tools` \| `rag` \| `history` \| `mentions` \| `user` \| `thinking` \| `completion` \| `compaction` \| `decision` |
 | `prompt_tokens` | INTEGER | attributed prompt tokens |
 | `completion_tokens` | INTEGER | attributed completion tokens |
 | `approx` | INTEGER | 1 when the component is a labeled approximation (thinking, ADR-0024) |
@@ -161,7 +161,7 @@ utilization, so the hardware map accumulates per model/quant. Upserted by
 
 | Column | Type | Notes |
 |---|---|---|
-| `turn_id` | TEXT PK | the turn (or `<turnID>:compaction`) |
+| `turn_id` | TEXT PK | the turn (or `<turnID>:compaction` / `<turnID>:decision:<role>`) |
 | `session_id` | TEXT | → `sessions.id` |
 | `model` | TEXT | logical model name actually used |
 | `prompt_tokens` | INTEGER | provider-reported prompt tokens |
@@ -397,6 +397,7 @@ startup). One policy for every preset.
 | `reserveOutputTokens` | integer ≥ 0 | yes | window-gate output reserve (§6) |
 | `sessionBudgetSoftRatio` | number 0–1 | yes | soft session-budget threshold ratio (§7) |
 | `compaction` | object | yes | `{enabled, triggerHistoryTokens, keepRecentTurns}` (§8) |
+| `decision` | object | yes | `{enabled, model, gateThreshold, maxCandidates, maxHistoryTurns, breadthTopK{none,few,many}, timeoutMs}` — global Laya policy, default off (ADR-0053) |
 
 Startup validation failures (typed errors): `mode-refs-unknown-model`,
 `mode-unreachable-no-tag`, `tool-has-no-handler`, `schema-invalid` (ADR-0019),

@@ -20,6 +20,28 @@ type CompactionPolicy struct {
 	KeepRecentTurns      int
 }
 
+// DecisionBreadthTopK maps the Laya planner's breadth choice to a retrieval
+// topK (ADR-0053).
+type DecisionBreadthTopK struct {
+	None int
+	Few  int
+	Many int
+}
+
+// DecisionPolicy is the one global Laya decision-layer policy (ADR-0053),
+// loaded from config/pipeline.json and validated fail-fast. Off by default;
+// never a per-preset field (ADR-0045). The engine resolves Model by name via
+// Fleet; Laya's own Router selects the checkpoint per request.
+type DecisionPolicy struct {
+	Enabled         bool
+	Model           string
+	GateThreshold   float64
+	MaxCandidates   int
+	MaxHistoryTurns int
+	BreadthTopK     DecisionBreadthTopK
+	TimeoutMs       int
+}
+
 // PipelinePolicy is the one global turn pipeline policy (ADR-0045 §3): the step
 // cap, the context budgets, the auto-RAG retrieval depth, and the ADR-0051
 // thinking/window/session-budget/compaction policy. Every preset runs this same
@@ -47,4 +69,6 @@ type PipelinePolicy struct {
 	SessionBudgetSoftRatio float64
 	// Compaction is the metered history-compaction policy (ADR-0051 §8).
 	Compaction CompactionPolicy
+	// Decision is the global Laya decision-layer policy (ADR-0053).
+	Decision DecisionPolicy
 }

@@ -203,6 +203,94 @@ type stubPipeline struct{ policy dto.PipelinePolicy }
 
 func (s stubPipeline) Policy() dto.PipelinePolicy { return s.policy }
 
+// stubDecision is a configurable Laya decision layer for loop tests (ADR-0053).
+type stubDecision struct {
+	mu         sync.Mutex
+	plan       dto.DecisionPlan
+	gate       dto.DecisionGateResult
+	planCalls  int
+	gateCalls  int
+	lastPlanIn dto.DecisionPlannerInput
+	lastGateIn dto.DecisionGateInput
+}
+
+func (s *stubDecision) Plan(_ context.Context, in dto.DecisionPlannerInput) dto.DecisionPlan {
+	s.mu.Lock()
+	s.planCalls++
+	s.lastPlanIn = in
+	s.mu.Unlock()
+	return s.plan
+}
+
+func (s *stubDecision) Gate(_ context.Context, in dto.DecisionGateInput) dto.DecisionGateResult {
+	s.mu.Lock()
+	s.gateCalls++
+	s.lastGateIn = in
+	s.mu.Unlock()
+	return s.gate
+}
+
+func (s *stubDecision) counts() (int, int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.planCalls, s.gateCalls
+}
+
+// decisionPolicy is a decision-enabled pipeline policy for tests.
+func decisionPolicy(enabled bool) dto.PipelinePolicy {
+	return dto.PipelinePolicy{
+		MaxSteps:         6,
+		MaxHistoryTokens: 32000,
+		MaxRagTokens:     16000,
+		MaxMentionTokens: 16000,
+		AutoRagTopK:      3,
+		Thinking:         dto.ThinkingAuto,
+		Decision: dto.DecisionPolicy{
+			Enabled:         enabled,
+			Model:           "laya",
+			GateThreshold:   0.5,
+			MaxCandidates:   24,
+			MaxHistoryTurns: 4,
+			BreadthTopK:     dto.DecisionBreadthTopK{None: 0, Few: 3, Many: 8},
+			TimeoutMs:       3000,
+		},
+	}
+}
+
+// snapshotFromEvents returns the last context event's snapshot.
+func snapshotFromEvents(t *testing.T, events []dto.Event) dto.ContextSnapshot {
+	t.Helper()
+	for i := len(events) - 1; i >= 0; i-- {
+		if events[i].Type == "context" {
+			var snap dto.ContextSnapshot
+			if err := json.Unmarshal(events[i].Data, &snap); err != nil {
+				t.Fatal(err)
+			}
+			return snap
+		}
+	}
+	t.Fatalf("no context event: %+v", events)
+	return dto.ContextSnapshot{}
+}
+
+// ragChunksFromEvents returns the last rag event's chunks.
+func ragChunksFromEvents(t *testing.T, events []dto.Event) []dto.Chunk {
+	t.Helper()
+	for i := len(events) - 1; i >= 0; i-- {
+		if events[i].Type == "rag" {
+			var rag struct {
+				Chunks []dto.Chunk `json:"chunks"`
+			}
+			if err := json.Unmarshal(events[i].Data, &rag); err != nil {
+				t.Fatal(err)
+			}
+			return rag.Chunks
+		}
+	}
+	t.Fatalf("no rag event: %+v", events)
+	return nil
+}
+
 // stubLocate is a configurable `/locate` resolver for loop tests.
 type stubLocate struct {
 	mu     sync.Mutex
@@ -405,6 +493,7 @@ type stubMeter struct {
 	mu          sync.Mutex
 	called      int
 	compactions int
+	decisions   int
 	measurement *dto.TurnMeasurement
 }
 
@@ -418,6 +507,12 @@ func (s *stubMeter) Attribute(_ context.Context, _, _, _ string, _ dto.Breakdown
 func (s *stubMeter) AttributeCompaction(context.Context, string, string, string, dto.ProviderCounts) error {
 	s.mu.Lock()
 	s.compactions++
+	s.mu.Unlock()
+	return nil
+}
+func (s *stubMeter) AttributeDecision(context.Context, string, string, string, string, dto.ProviderCounts) error {
+	s.mu.Lock()
+	s.decisions++
 	s.mu.Unlock()
 	return nil
 }
@@ -764,6 +859,9 @@ func (b budgetMeter) Attribute(context.Context, string, string, string, dto.Brea
 	return dto.AttributedBreakdown{}, nil
 }
 func (b budgetMeter) AttributeCompaction(context.Context, string, string, string, dto.ProviderCounts) error {
+	return nil
+}
+func (b budgetMeter) AttributeDecision(context.Context, string, string, string, string, dto.ProviderCounts) error {
 	return nil
 }
 func (b budgetMeter) SessionUsage(context.Context, string) (int, error) { return b.used, nil }
@@ -2604,5 +2702,227 @@ func TestCancelCompletedTurnIsNotRunning(t *testing.T) {
 			t.Fatalf("Cancel completed = %v, want ErrTurnNotRunning", err)
 		}
 		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// --------------------------- decision layer (ADR-0053) ---------------------------
+
+// TestDecisionGateRecordsAndMeters maps context-inspector "Decision outcomes are
+// recorded and metered": the gate keeps/drops chunks, the snapshot records the
+// decision with its score and deciding model, the rag event stays pre-gate, and
+// each Laya call is metered as its own row.
+func TestDecisionGateRecordsAndMeters(t *testing.T) {
+	bus := &stubBus{done: make(chan struct{})}
+	deps := happyPathDeps(bus)
+	deps.Pipeline = stubPipeline{policy: decisionPolicy(true)}
+	svc := shardSvc(deps)
+	svc.Retriever = &stubRetriever{chunks: []dto.Chunk{
+		{BlockID: "b1", ChunkKey: "/v/a.md#0", Path: "/v/a.md", Text: "keep", Score: 0.9},
+		{BlockID: "b2", ChunkKey: "/v/b.md#0", Path: "/v/b.md", Text: "drop", Score: 0.4},
+	}}
+	dec := &stubDecision{
+		plan: dto.DecisionPlan{Checkpoint: "english", Retrieve: true, Thinking: dto.ThinkingOn, Breadth: dto.DecisionBreadthFew, PromptTokens: 11, CompletionTokens: 2},
+		gate: dto.DecisionGateResult{Checkpoint: "english", Threshold: 0.5, PromptTokens: 20, CompletionTokens: 1, Chunks: []dto.DecisionChunkResult{
+			{ChunkKey: "/v/a.md#0", Score: 0.9, Keep: true, Reason: "kept"},
+			{ChunkKey: "/v/b.md#0", Score: 0.4, Keep: false, Reason: "below-threshold"},
+		}},
+	}
+	deps.Decision = dec
+	deps.Workspaces = &routeWorkspaces{}
+
+	l := New(deps)
+	if _, err := l.Run(context.Background(), dto.Task{SessionID: "s1", ModeName: "proofreader", DocumentID: "d1", UserInput: "expand"}); err != nil {
+		t.Fatal(err)
+	}
+	waitDone(t, bus)
+	events := busEvents(t, bus)
+
+	if got := ragChunksFromEvents(t, events); len(got) != 2 {
+		t.Fatalf("rag chunks = %d, want 2 (pre-gate candidates)", len(got))
+	}
+	snap := snapshotFromEvents(t, events)
+	if snap.Decision == nil || !snap.Decision.Enabled || snap.Decision.Degraded {
+		t.Fatalf("decision record = %+v", snap.Decision)
+	}
+	if snap.Decision.Planner == nil || !snap.Decision.Planner.Retrieve || snap.Decision.Planner.Thinking != dto.ThinkingOn || snap.Decision.Planner.Checkpoint != "english" {
+		t.Fatalf("planner = %+v", snap.Decision.Planner)
+	}
+	if snap.Decision.Gate == nil || len(snap.Decision.Gate.Chunks) != 2 ||
+		!snap.Decision.Gate.Chunks[0].Keep || snap.Decision.Gate.Chunks[1].Keep {
+		t.Fatalf("gate = %+v", snap.Decision.Gate)
+	}
+	if len(snap.Chunks) != 1 || snap.Chunks[0].ChunkKey != "/v/a.md#0" {
+		t.Fatalf("surviving chunks = %+v", snap.Chunks)
+	}
+	gateDrop := false
+	for _, d := range snap.Drops {
+		if d.Component == "rag" && d.Reason == "gate" && d.Count == 1 {
+			gateDrop = true
+		}
+	}
+	if !gateDrop {
+		t.Fatalf("no labeled gate drop: %+v", snap.Drops)
+	}
+	if pc, gc := dec.counts(); pc != 1 || gc != 1 {
+		t.Fatalf("decision calls = %d/%d, want 1/1", pc, gc)
+	}
+	if m := svc.Meter.(*stubMeter); m.decisions != 2 {
+		t.Fatalf("metered decision rows = %d, want 2", m.decisions)
+	}
+}
+
+// TestDecisionDegradedLabeled maps context-inspector "A degraded decision layer
+// is labeled": an unreachable service leaves the turn ungated and the snapshot
+// labels the degradation with its reason.
+func TestDecisionDegradedLabeled(t *testing.T) {
+	bus := &stubBus{done: make(chan struct{})}
+	deps := happyPathDeps(bus)
+	deps.Pipeline = stubPipeline{policy: decisionPolicy(true)}
+	svc := shardSvc(deps)
+	svc.Retriever = &stubRetriever{chunks: []dto.Chunk{
+		{ChunkKey: "/v/a.md#0", Path: "/v/a.md", Text: "one"},
+		{ChunkKey: "/v/b.md#0", Path: "/v/b.md", Text: "two"},
+	}}
+	dec := &stubDecision{
+		plan: dto.DecisionPlan{Degraded: true, Reason: dto.DecisionDegradedUnreachable},
+		gate: dto.DecisionGateResult{Degraded: true, Reason: dto.DecisionDegradedUnreachable},
+	}
+	deps.Decision = dec
+	deps.Workspaces = &routeWorkspaces{}
+
+	l := New(deps)
+	if _, err := l.Run(context.Background(), dto.Task{SessionID: "s1", ModeName: "proofreader", DocumentID: "d1", UserInput: "expand"}); err != nil {
+		t.Fatal(err)
+	}
+	waitDone(t, bus)
+	snap := snapshotFromEvents(t, busEvents(t, bus))
+	if snap.Decision == nil || !snap.Decision.Degraded || snap.Decision.Reason != dto.DecisionDegradedUnreachable {
+		t.Fatalf("decision record = %+v, want degraded unreachable", snap.Decision)
+	}
+	if len(snap.Chunks) != 2 {
+		t.Fatalf("degraded gate must keep all chunks: %+v", snap.Chunks)
+	}
+}
+
+// TestDecisionRetrieveFalseSkipsRetrieval: the planner's retrieve-or-not=false
+// skips retrieval and the gate entirely; the rag event is empty.
+func TestDecisionRetrieveFalseSkipsRetrieval(t *testing.T) {
+	bus := &stubBus{done: make(chan struct{})}
+	deps := happyPathDeps(bus)
+	deps.Pipeline = stubPipeline{policy: decisionPolicy(true)}
+	svc := shardSvc(deps)
+	ret := &stubRetriever{chunks: []dto.Chunk{{ChunkKey: "/v/a.md#0"}}}
+	svc.Retriever = ret
+	dec := &stubDecision{plan: dto.DecisionPlan{Retrieve: false, Thinking: dto.ThinkingOff, Breadth: dto.DecisionBreadthNone}}
+	deps.Decision = dec
+	deps.Workspaces = &routeWorkspaces{}
+
+	l := New(deps)
+	if _, err := l.Run(context.Background(), dto.Task{SessionID: "s1", ModeName: "proofreader", DocumentID: "d1", UserInput: "hello"}); err != nil {
+		t.Fatal(err)
+	}
+	waitDone(t, bus)
+	if n := len(ret.queries()); n != 0 {
+		t.Fatalf("retriever queried %d times, want 0", n)
+	}
+	if _, gc := dec.counts(); gc != 0 {
+		t.Fatalf("gate called %d times, want 0", gc)
+	}
+	if got := ragChunksFromEvents(t, busEvents(t, bus)); len(got) != 0 {
+		t.Fatalf("rag chunks = %+v, want none", got)
+	}
+}
+
+// TestDecisionDisabledRunsNoCalls: a disabled layer runs no Laya call and records
+// no decision.
+func TestDecisionDisabledRunsNoCalls(t *testing.T) {
+	bus := &stubBus{done: make(chan struct{})}
+	deps := happyPathDeps(bus)
+	deps.Pipeline = stubPipeline{policy: decisionPolicy(false)}
+	dec := &stubDecision{plan: dto.DecisionPlan{Retrieve: true}}
+	deps.Decision = dec
+	deps.Workspaces = &routeWorkspaces{}
+
+	l := New(deps)
+	if _, err := l.Run(context.Background(), dto.Task{SessionID: "s1", ModeName: "proofreader", DocumentID: "d1", UserInput: "x"}); err != nil {
+		t.Fatal(err)
+	}
+	waitDone(t, bus)
+	if pc, gc := dec.counts(); pc != 0 || gc != 0 {
+		t.Fatalf("decision calls = %d/%d, want 0/0", pc, gc)
+	}
+	if snap := snapshotFromEvents(t, busEvents(t, bus)); snap.Decision != nil {
+		t.Fatalf("snapshot decision = %+v, want nil", snap.Decision)
+	}
+}
+
+// TestDecisionOverrideOffDisables: a per-turn ContextPolicy.decision=off runs no
+// Laya call even when the global policy is on (human/policy outranks Laya).
+func TestDecisionOverrideOffDisables(t *testing.T) {
+	bus := &stubBus{done: make(chan struct{})}
+	deps := happyPathDeps(bus)
+	deps.Pipeline = stubPipeline{policy: decisionPolicy(true)}
+	dec := &stubDecision{plan: dto.DecisionPlan{Retrieve: true}}
+	deps.Decision = dec
+	deps.Workspaces = &routeWorkspaces{}
+
+	off := dto.DecisionOff
+	l := New(deps)
+	if _, err := l.Run(context.Background(), dto.Task{
+		SessionID: "s1", ModeName: "proofreader", DocumentID: "d1", UserInput: "x",
+		Context: &dto.ContextPolicy{Decision: &off},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	waitDone(t, bus)
+	if pc, gc := dec.counts(); pc != 0 || gc != 0 {
+		t.Fatalf("decision calls = %d/%d, want 0/0", pc, gc)
+	}
+}
+
+// TestDecisionPinsBypassGate: pins are human overrides that bypass the gate; the
+// gate only sees auto-retrieved candidates and the pin survives.
+func TestDecisionPinsBypassGate(t *testing.T) {
+	bus := &stubBus{done: make(chan struct{})}
+	deps := happyPathDeps(bus)
+	deps.Pipeline = stubPipeline{policy: decisionPolicy(true)}
+	svc := shardSvc(deps)
+	svc.Retriever = &stubRetriever{
+		chunks:    []dto.Chunk{{ChunkKey: "/v/auto.md#0", Path: "/v/auto.md", Text: "auto"}},
+		getChunks: []dto.Chunk{{ChunkKey: "/v/pin.md#0", Path: "/v/pin.md", Text: "pin"}},
+	}
+	dec := &stubDecision{
+		plan: dto.DecisionPlan{Retrieve: true, Thinking: dto.ThinkingOff, Breadth: dto.DecisionBreadthFew},
+		gate: dto.DecisionGateResult{Threshold: 0.5, Chunks: []dto.DecisionChunkResult{{ChunkKey: "/v/auto.md#0", Keep: false, Reason: "below-threshold"}}},
+	}
+	deps.Decision = dec
+	deps.Workspaces = &routeWorkspaces{}
+
+	l := New(deps)
+	if _, err := l.Run(context.Background(), dto.Task{
+		SessionID: "s1", ModeName: "proofreader", DocumentID: "d1", UserInput: "x",
+		Context: &dto.ContextPolicy{Pinned: []dto.ChunkRef{{Path: "/v/pin.md", ChunkKey: "/v/pin.md#0"}}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	waitDone(t, bus)
+	dec.mu.Lock()
+	gateIn := dec.lastGateIn
+	dec.mu.Unlock()
+	if len(gateIn.Chunks) != 1 || gateIn.Chunks[0].ChunkKey != "/v/auto.md#0" {
+		t.Fatalf("gate saw %+v, want only the auto candidate", gateIn.Chunks)
+	}
+	snap := snapshotFromEvents(t, busEvents(t, bus))
+	hasPin, hasAuto := false, false
+	for _, c := range snap.Chunks {
+		if c.ChunkKey == "/v/pin.md#0" && c.HumanOverride {
+			hasPin = true
+		}
+		if c.ChunkKey == "/v/auto.md#0" {
+			hasAuto = true
+		}
+	}
+	if !hasPin || hasAuto {
+		t.Fatalf("snapshot chunks = %+v, want pin kept and auto dropped", snap.Chunks)
 	}
 }

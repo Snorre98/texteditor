@@ -60,6 +60,7 @@ row: ADR-0001/0016 map to it and to §2/§5.2/§8.
 | 0050 | §3, §7 | client-swap | module-boundaries | — |
 | 0051 | §4, §5.2, §8 | context-budgets | interface (§2 `Runner`/`Thinking`/`reasoning`, §5 window gate, §6 measurements/compaction, §8c policy fields), failure-semantics (typed `context-window-exceeded`/`session-budget-exceeded`/`thinking-truncated`/`no-outcome` + `thinking-*` labels), data-model (`meter_measurements`, `compaction` component, pipeline fields); Phase C5 | Q1, Q6 |
 | 0052 | §3, §4, §5.2, §8 | client-swap, context-management, fleet-observability | interface (`POST /open`, `POST /documents/{id}/session`, `POST /documents/{id}/blocks/{bid}/accept`, `GET /events` + its event schema), failure-semantics (feed `backpressure` label; typed conflict on `accept`), module-boundaries (an engine-owned lifecycle/feed seam); Phase E4 | Q1, Q5 |
+| 0053 | §4, §5.2, §8 | context-inspector, context-management | interface (`GET /decision`, `DecisionPolicy`/`DecisionRecord`/`DecisionPlanner`/`DecisionGate`/`DecisionChunk`, `ContextSnapshot.decision`, `ContextPolicy.decision`, `AttributeDecision`), failure-semantics (`decision-degraded` reasons), data-model (`decision` meter component); Phase F | Q1, Q6 |
 
 ## Behavior contract ↔ quality scenario coverage
 
@@ -187,6 +188,13 @@ row: ADR-0001/0016 map to it and to §2/§5.2/§8.
   client becomes render-only. ADR-0002/0013 §3 are *completed* (not reversed),
   ADR-0031 (typed SSE) and ADR-0047 (approve is the write boundary) are
   *extended*, and the ADR-0040 recorded note is consumed by the fleet producer.
+- ADR-0044 §5 → *amended* by ADR-0053: the decision layer is scoped to
+  retrieve-or-not, per-chunk gating, and thinking-level selection (turn routing
+  deferred); Laya is a native typed-question engine, so ADR-0028 §7's OpenAI
+  facade is *amended* (the engine calls `/v1/systemone` directly). ADR-0028's
+  second-metered-call pattern, ADR-0049 §8/§11 (the override seam; pins bypass
+  the gate), and ADR-0051 (thinking precedence) are *extended*; ADR-0045's one
+  global policy and ADR-0003's no-CGO tenet are preserved.
 
 Superseded ADRs remain in the log, untouched; supersession is recorded in the
 superseding ADR's header and in the §9 index.

@@ -453,8 +453,9 @@ type ContextPolicy struct {
 type ThinkingLevel string
 
 // ContextSnapshot is the persisted per-turn record (GET /turns/{id}/context and
-// the `context` SSE payload). Decision (Phase F) is a reserved optional record;
-// Locate (Phase D) carries the LocateResult JSON for a `/locate` turn. The
+// the `context` SSE payload). Decision is the typed DecisionRecord (ADR-0053),
+// present only when the Laya layer ran (or degraded); Locate (Phase D) carries
+// the LocateResult JSON for a `/locate` turn. The
 // Thinking/Measurements/Compacted/Window/SessionBudget fields are the ADR-0051
 // additions: the resolved thinking outcome, the per-turn measurements, the
 // summarized range, the window accounting, and the soft/hard budget state.
@@ -466,7 +467,8 @@ type ContextSnapshot struct {
     Chunks                         []Chunk
     Drops                          []ContextDrop
     Budget                         []BudgetUsage
-    Decision, Locate               json.RawMessage // Decision reserved; Locate = LocateResult
+    Decision                       *DecisionRecord // typed (ADR-0053); nil when the layer is off
+    Locate                         json.RawMessage // LocateResult for a `/locate` turn
     Thinking                       *ThinkingSnapshot
     Measurements                   *TurnMeasurement
     Compacted                      *CompactionRecord
@@ -563,6 +565,7 @@ type AttributedBreakdown struct {
 type TokenMeter interface {
     Attribute(ctx context.Context, turnID, sessionID, model string, b Breakdown, counts ProviderCounts, m TurnMeasurement) (AttributedBreakdown, error)
     AttributeCompaction(ctx context.Context, turnID, sessionID, model string, counts ProviderCounts) error // own model row (ADR-0051 §8)
+    AttributeDecision(ctx context.Context, turnID, sessionID, model, role string, counts ProviderCounts) error // own model row, component "decision" (ADR-0053)
     SessionUsage(ctx context.Context, sessionID string) (int, error) // cumulative tokens per session (budget)
     SessionBreakdown(ctx context.Context, sessionID string) (SessionMeter, error) // per-component cumulative meter
 }
@@ -572,7 +575,7 @@ type TokenMeter interface {
 // component in canonical order, plus the cumulative prompt+completion total.
 type SessionMeter struct {
     SessionID  string
-    Components []SessionMeterComponent // system|tools|rag|history|mentions|user|thinking|completion|compaction
+    Components []SessionMeterComponent // system|tools|rag|history|mentions|user|thinking|completion|compaction|decision
     Total      int
 }
 type SessionMeterComponent struct {
@@ -866,12 +869,25 @@ type PipelinePolicy struct {
     ReserveOutputTokens    int           // window-gate output reserve (§6)
     SessionBudgetSoftRatio float64       // soft session-budget threshold ratio (§7)
     Compaction             CompactionPolicy // {Enabled, TriggerHistoryTokens, KeepRecentTurns} (§8)
+    Decision               DecisionPolicy   // global Laya decision policy (ADR-0053, §8d)
 }
 
 type CompactionPolicy struct {
     Enabled              bool
     TriggerHistoryTokens int
     KeepRecentTurns      int
+}
+
+// DecisionPolicy is the one global Laya decision-layer policy (ADR-0053),
+// schema-validated fail-fast, default off, never a preset field (ADR-0045).
+type DecisionPolicy struct {
+    Enabled         bool
+    Model           string  // resolved by name via Fleet
+    GateThreshold   float64 // engine-applied keep τ on the gate's P(relevant)
+    MaxCandidates   int
+    MaxHistoryTurns int
+    BreadthTopK     DecisionBreadthTopK // {None, Few, Many}
+    TimeoutMs       int
 }
 
 type PipelinePolicyRegistry interface {
@@ -881,6 +897,49 @@ type PipelinePolicyRegistry interface {
 
 The loop holds the registry, passes `Policy()` into `AssemblerInput`, and bounds
 its one agentic loop with `MaxSteps`; there is no per-mode policy (ADR-0045).
+
+## 8d. Laya decision layer (Go)
+
+The sealed `internal/laya` client (ADR-0053) resolves a named Laya service via
+Fleet and calls its native typed-question HTTP API — `POST /v1/systemone` (one
+state) and `POST /v1/systemone/batch` (a `states` array, results aligned by
+index). Laya's own `Router` selects the checkpoint per request. The engine
+applies the keep τ; every failure degrades fail-open with a labeled reason.
+
+```go
+type Laya interface {
+    // Plan runs the planner call: retrieve-or-not (noul), thinking (choice),
+    // breadth (choice). On failure Degraded=true + Reason; the loop falls back
+    // to policy defaults.
+    Plan(ctx context.Context, in DecisionPlannerInput) DecisionPlan
+    // Gate runs the batch gate: one noul per candidate chunk. On failure
+    // Degraded=true + Reason and no chunk decisions (the loop keeps all).
+    Gate(ctx context.Context, in DecisionGateInput) DecisionGateResult
+}
+
+type DecisionPlannerInput struct { Request string; History []Message; Selection, Mode string }
+type DecisionGateInput struct { Request string; Chunks []Chunk; Threshold float64 }
+
+type DecisionPlan struct {
+    Checkpoint string; Retrieve bool; Thinking ThinkingLevel; Breadth DecisionBreadth
+    Degraded bool; Reason DecisionDegradeReason; PromptTokens, CompletionTokens int
+}
+type DecisionChunkResult struct { ChunkKey, Path string; Score float64; Keep bool; Reason string }
+type DecisionGateResult struct {
+    Checkpoint string; Threshold float64; Degraded bool; Reason DecisionDegradeReason
+    Chunks []DecisionChunkResult; PromptTokens, CompletionTokens int
+}
+// DecisionRecord is the persisted snapshot record; Enabled/Degraded/Reason with
+// optional Planner/Gate.
+type DecisionRecord struct { Enabled, Degraded bool; Reason DecisionDegradeReason; Planner *DecisionPlan; Gate *DecisionGateResult }
+```
+
+Placement: planner → retrieve(planned topK) → exclude → gate(auto set only) →
+resolve thinking → assemble. Pins/mentions/anchor bypass the gate (ADR-0049
+§11); the `rag` event is the pre-gate candidate set; the snapshot records the
+decision and the survivors. Precedence: human/policy outranks Laya. `GET
+/decision` returns the global `DecisionPolicy`; `ContextPolicy.decision`
+(`off|on`) is the session/per-turn override.
 
 ## 9. Document store (Go)
 

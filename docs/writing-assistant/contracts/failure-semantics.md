@@ -110,6 +110,8 @@ Retries are **bounded (≤3)**; every failure is recorded in `meter_events`/logs
 | accept over an externally changed file | typed `file-changed-externally` (409), no bytes written; retry with `overwrite: true` (ADR-0047 §3, ADR-0052 §3) |
 | non-turn feed subscriber overflows | the bus drops the oldest buffered event and delivers exactly one labeled `backpressure` event; never silent (ADR-0052 §4) |
 | daemon unreachable on the fleet poller | the `fleet` feed event carries `control: "unreachable"` with every `liveState` forced to `unknown`; distinct from a per-model `provider-unreachable` (ADR-0040 §3, ADR-0052 §4) |
+| Laya service unreachable / times out / violates protocol on the planner or gate | the turn proceeds **fail-open** (retrieval uses policy defaults, the gate keeps all chunks); the snapshot labels `DecisionRecord.degraded` with a reason (`unreachable`/`timeout`/`protocol`/`low-confidence`); never a failed turn, never a silent drop (ADR-0053 §8) |
+| Laya gate answer below the calibrated confidence floor | the chunk is **kept** (fail-open) and labeled `low-confidence-kept`; never dropped on an uncertain answer (ADR-0053 §4) |
 
 ## 6. Invariants
 
