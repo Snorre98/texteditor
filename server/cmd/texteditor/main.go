@@ -284,7 +284,9 @@ func editMarkdownHandler(doc document.Interface, tf textformatter.Interface) too
 		var in struct {
 			BlockID    string `json:"blockId"`
 			Text       string `json:"text"`
+			BaseHash   string `json:"baseHash"`
 			DocumentID string `json:"documentId"`
+			ModeName   string `json:"modeName"`
 		}
 		if err := json.Unmarshal(args, &in); err != nil {
 			return nil, err
@@ -312,7 +314,15 @@ func editMarkdownHandler(doc document.Interface, tf textformatter.Interface) too
 			return structuredEdit(false, "invalid-structure", map[string]interface{}{"issues": issues}), nil
 		}
 
-		rev, err := doc.ApplyEdit(ctx, in.DocumentID, dto.BlockEdit{BlockID: in.BlockID, Text: in.Text})
+		// The target block's echoed base hash is the model-path guard (ADR-0047
+		// §6): ApplyEdit verifies it atomically with staging, so a model edit
+		// computed against stale text cannot land.
+		edit := dto.BlockEdit{BlockID: in.BlockID, Text: in.Text, Mode: in.ModeName}
+		if in.BaseHash != "" {
+			edit.Guards = []dto.Guard{{BlockID: in.BlockID, Hash: in.BaseHash}}
+		}
+
+		rev, err := doc.ApplyEdit(ctx, in.DocumentID, edit)
 		if err != nil {
 			switch {
 			case errors.Is(err, document.ErrGuardFailed):

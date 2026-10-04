@@ -162,6 +162,38 @@ func (s EventType) Validate() error {
 	}
 }
 
+func (s *FileChangedExternally) Validate() error {
+	if s == nil {
+		return validate.ErrNilPointer
+	}
+
+	var failures []validate.FieldError
+	if err := func() error {
+		if err := s.Error.Validate(); err != nil {
+			return err
+		}
+		return nil
+	}(); err != nil {
+		failures = append(failures, validate.FieldError{
+			Name:  "error",
+			Error: err,
+		})
+	}
+	if len(failures) > 0 {
+		return &validate.Error{Fields: failures}
+	}
+	return nil
+}
+
+func (s FileChangedExternallyError) Validate() error {
+	switch s {
+	case "file-changed-externally":
+		return nil
+	default:
+		return errors.Errorf("invalid value: %v", s)
+	}
+}
+
 func (s *FleetModel) Validate() error {
 	if s == nil {
 		return validate.ErrNilPointer

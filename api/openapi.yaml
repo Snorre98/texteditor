@@ -688,6 +688,12 @@ components:
             engine also mirrors the canonical markdown back to the opened file
             path (ADR-0039). Default false — the autosave only snapshots the
             engine worktree + git.
+        overwrite:
+          type: boolean
+          description: >
+            Explicit opt-in to overwrite an externally changed file (ADR-0047
+            §3). Default false: a mismatch is refused with
+            `file-changed-externally` (409).
 
     BlockWrite:
       type: object
@@ -717,6 +723,42 @@ components:
         timestamp:
           type: integer
           format: int64
+        writtenThrough:
+          type: boolean
+          description: >
+            True when the canonical markdown was mirrored to the opened file
+            during this write boundary (ADR-0047 §8). False on an empty accept /
+            engine-only autosave.
+        path:
+          type: string
+          description: The file path that was mirrored when `writtenThrough` is true.
+
+    CommitRequest:
+      type: object
+      description: Optional accept options for `commitDocument` (ADR-0047 §3).
+      properties:
+        overwrite:
+          type: boolean
+          description: >
+            Explicit opt-in to overwrite an externally changed file. Default
+            false: a mismatch is refused with `file-changed-externally` (409).
+
+    FileChangedExternally:
+      type: object
+      description: >
+        The file at `documents.path` changed externally since the engine last
+        read it; the write-through was refused and no bytes were written
+        (ADR-0047 §3). `currentHash` is the current on-disk content hash so the
+        client can show or compare it; retry with `overwrite: true` to accept it.
+      required: [error, path, currentHash]
+      properties:
+        error:
+          type: string
+          enum: [file-changed-externally]
+        path:
+          type: string
+        currentHash:
+          type: string
 
     WordEdit:
       type: object

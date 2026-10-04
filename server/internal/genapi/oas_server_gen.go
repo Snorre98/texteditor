@@ -15,8 +15,15 @@ type Handler interface {
 	ApplyEdit(ctx context.Context, req *BlockEdit, params ApplyEditParams) (*Revision, error)
 	// CommitDocument implements commitDocument operation.
 	//
+	// Accepts the staged candidates (newest-first, deterministic), re-validates each candidate's base
+	// content hash, formats, makes one git commit with an auto-derived message
+	// (`mode · blockID · diff`), and mirrors the canonical markdown back to the opened file (ADR-0047
+	// §1/§5/§8). An empty accept creates no commit. If the file on disk changed since the engine last
+	// read it, the write-through is refused with `file-changed-externally` unless `overwrite` is true —
+	// never a silent clobber.
+	//
 	// POST /documents/{id}/commits
-	CommitDocument(ctx context.Context, params CommitDocumentParams) (*Revision, error)
+	CommitDocument(ctx context.Context, req OptCommitRequest, params CommitDocumentParams) (CommitDocumentRes, error)
 	// CreateSession implements createSession operation.
 	//
 	// POST /sessions
@@ -102,9 +109,11 @@ type Handler interface {
 	// `autosave @ <ts>` iff anything changed (a no-op returns the current HEAD). A manual save of a block
 	// drops its open candidates. When `writeThrough` is true (explicit Save / Cmd+S, not the periodic
 	// autosave), the engine also mirrors the canonical markdown back to the opened file path (ADR-0039).
+	// Per ADR-0047 §4 a no-op save still re-syncs a stale disk (no new commit), and an external change
+	// surfaces as a `file-changed-externally` conflict — never a silent clobber.
 	//
 	// PUT /documents/{id}/tree
-	SaveDocument(ctx context.Context, req *SaveTreeRequest, params SaveDocumentParams) (*Revision, error)
+	SaveDocument(ctx context.Context, req *SaveTreeRequest, params SaveDocumentParams) (SaveDocumentRes, error)
 	// StartModel implements startModel operation.
 	//
 	// POST /models/{name}/start

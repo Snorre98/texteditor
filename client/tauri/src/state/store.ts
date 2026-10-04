@@ -467,7 +467,8 @@ export function createAppStore(deps: StoreDeps): AppStore {
     const candidates = await call<{ blockId?: string; text?: string }[]>(() =>
       deps.api.getCandidates(state.document!.id, blockId),
     );
-    const latest = candidates.at(-1);
+    // The engine returns candidates newest-first (ts DESC, rowid DESC — ADR-0047 §5).
+    const latest = candidates.at(0);
     if (!latest?.text) {
       for (const id of Object.keys(state.sessionStates)) {
         state.sessionStates[id].turn.error = {
@@ -492,7 +493,8 @@ export function createAppStore(deps: StoreDeps): AppStore {
     const candidates = await call<{ blockId?: string; text?: string }[]>(() =>
       deps.api.getCandidates(state.document!.id, blockId),
     );
-    return candidates.at(-1)?.text ?? null;
+    // Newest-first ordering (ADR-0047 §5).
+    return candidates.at(0)?.text ?? null;
   }
 
   // saveTree sends the manual-edit whole-tree snapshot (ADR-0038). The engine

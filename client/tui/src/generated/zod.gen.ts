@@ -117,7 +117,8 @@ export const zDocument = z.object({
     id: z.string(),
     path: z.string(),
     rootBlockId: z.string(),
-    updatedAt: z.coerce.bigint().optional()
+    updatedAt: z.coerce.bigint().optional(),
+    externalChange: z.boolean().optional()
 });
 
 export const zEntry = z.object({
@@ -172,7 +173,8 @@ export const zSaveTreeRequest = z.object({
         ]),
         text: z.string()
     })),
-    writeThrough: z.boolean().optional()
+    writeThrough: z.boolean().optional(),
+    overwrite: z.boolean().optional()
 });
 
 export const zBlockWrite = z.object({
@@ -192,7 +194,21 @@ export const zBlockWrite = z.object({
 export const zRevision = z.object({
     id: z.string().optional(),
     message: z.string().optional(),
-    timestamp: z.coerce.bigint().optional()
+    timestamp: z.coerce.bigint().optional(),
+    writtenThrough: z.boolean().optional(),
+    path: z.string().optional()
+});
+
+export const zCommitRequest = z.object({
+    overwrite: z.boolean().optional()
+});
+
+export const zFileChangedExternally = z.object({
+    error: z.enum([
+        'file-changed-externally'
+    ]),
+    path: z.string(),
+    currentHash: z.string()
 });
 
 export const zWordEdit = z.object({

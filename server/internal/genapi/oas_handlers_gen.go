@@ -191,6 +191,13 @@ func (s *Server) handleApplyEditRequest(args [1]string, argsEscaped bool, w http
 
 // handleCommitDocumentRequest handles commitDocument operation.
 //
+// Accepts the staged candidates (newest-first, deterministic), re-validates each candidate's base
+// content hash, formats, makes one git commit with an auto-derived message
+// (`mode · blockID · diff`), and mirrors the canonical markdown back to the opened file (ADR-0047
+// §1/§5/§8). An empty accept creates no commit. If the file on disk changed since the engine last
+// read it, the write-through is refused with `file-changed-externally` unless `overwrite` is true —
+// never a silent clobber.
+//
 // POST /documents/{id}/commits
 func (s *Server) handleCommitDocumentRequest(args [1]string, argsEscaped bool, w http.ResponseWriter, r *http.Request) {
 	statusWriter := &codeRecorder{ResponseWriter: w}
@@ -275,15 +282,30 @@ func (s *Server) handleCommitDocumentRequest(args [1]string, argsEscaped bool, w
 	}
 
 	var rawBody []byte
+	request, rawBody, close, err := s.decodeCommitDocumentRequest(r)
+	if err != nil {
+		err = &ogenerrors.DecodeRequestError{
+			OperationContext: opErrContext,
+			Err:              err,
+		}
+		defer recordError("DecodeRequest", err)
+		s.cfg.ErrorHandler(ctx, w, r, err)
+		return
+	}
+	defer func() {
+		if err := close(); err != nil {
+			recordError("CloseRequest", err)
+		}
+	}()
 
-	var response *Revision
+	var response CommitDocumentRes
 	if m := s.cfg.Middleware; m != nil {
 		mreq := middleware.Request{
 			Context:          ctx,
 			OperationName:    CommitDocumentOperation,
-			OperationSummary: "",
+			OperationSummary: "Accept staged candidates (one commit, write-through)",
 			OperationID:      "commitDocument",
-			Body:             nil,
+			Body:             request,
 			RawBody:          rawBody,
 			Params: middleware.Parameters{
 				{
@@ -295,9 +317,9 @@ func (s *Server) handleCommitDocumentRequest(args [1]string, argsEscaped bool, w
 		}
 
 		type (
-			Request  = struct{}
+			Request  = OptCommitRequest
 			Params   = CommitDocumentParams
-			Response = *Revision
+			Response = CommitDocumentRes
 		)
 		response, err = middleware.HookMiddleware[
 			Request,
@@ -308,12 +330,12 @@ func (s *Server) handleCommitDocumentRequest(args [1]string, argsEscaped bool, w
 			mreq,
 			unpackCommitDocumentParams,
 			func(ctx context.Context, request Request, params Params) (response Response, err error) {
-				response, err = s.h.CommitDocument(ctx, params)
+				response, err = s.h.CommitDocument(ctx, request, params)
 				return response, err
 			},
 		)
 	} else {
-		response, err = s.h.CommitDocument(ctx, params)
+		response, err = s.h.CommitDocument(ctx, request, params)
 	}
 	if err != nil {
 		defer recordError("Internal", err)
@@ -2524,6 +2546,8 @@ func (s *Server) handleProvisionModelRequest(args [1]string, argsEscaped bool, w
 // `autosave @ <ts>` iff anything changed (a no-op returns the current HEAD). A manual save of a block
 // drops its open candidates. When `writeThrough` is true (explicit Save / Cmd+S, not the periodic
 // autosave), the engine also mirrors the canonical markdown back to the opened file path (ADR-0039).
+// Per ADR-0047 §4 a no-op save still re-syncs a stale disk (no new commit), and an external change
+// surfaces as a `file-changed-externally` conflict — never a silent clobber.
 //
 // PUT /documents/{id}/tree
 func (s *Server) handleSaveDocumentRequest(args [1]string, argsEscaped bool, w http.ResponseWriter, r *http.Request) {
@@ -2625,7 +2649,7 @@ func (s *Server) handleSaveDocumentRequest(args [1]string, argsEscaped bool, w h
 		}
 	}()
 
-	var response *Revision
+	var response SaveDocumentRes
 	if m := s.cfg.Middleware; m != nil {
 		mreq := middleware.Request{
 			Context:          ctx,
@@ -2646,7 +2670,7 @@ func (s *Server) handleSaveDocumentRequest(args [1]string, argsEscaped bool, w h
 		type (
 			Request  = *SaveTreeRequest
 			Params   = SaveDocumentParams
-			Response = *Revision
+			Response = SaveDocumentRes
 		)
 		response, err = middleware.HookMiddleware[
 			Request,

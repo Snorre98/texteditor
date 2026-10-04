@@ -800,6 +800,69 @@ func (s *Capabilities) UnmarshalJSON(data []byte) error {
 }
 
 // Encode implements json.Marshaler.
+func (s *CommitRequest) Encode(e *jx.Encoder) {
+	e.ObjStart()
+	s.encodeFields(e)
+	e.ObjEnd()
+}
+
+// encodeFields encodes fields.
+func (s *CommitRequest) encodeFields(e *jx.Encoder) {
+	{
+		if s.Overwrite.Set {
+			e.FieldStart("overwrite")
+			s.Overwrite.Encode(e)
+		}
+	}
+}
+
+var jsonFieldsNameOfCommitRequest = [1]string{
+	0: "overwrite",
+}
+
+// Decode decodes CommitRequest from json.
+func (s *CommitRequest) Decode(d *jx.Decoder) error {
+	if s == nil {
+		return errors.New("invalid: unable to decode CommitRequest to nil")
+	}
+
+	if err := d.ObjBytes(func(d *jx.Decoder, k []byte) error {
+		switch string(k) {
+		case "overwrite":
+			if err := func() error {
+				s.Overwrite.Reset()
+				if err := s.Overwrite.Decode(d); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"overwrite\"")
+			}
+		default:
+			return d.Skip()
+		}
+		return nil
+	}); err != nil {
+		return errors.Wrap(err, "decode CommitRequest")
+	}
+
+	return nil
+}
+
+// MarshalJSON implements stdjson.Marshaler.
+func (s *CommitRequest) MarshalJSON() ([]byte, error) {
+	e := jx.Encoder{}
+	s.Encode(&e)
+	return e.Bytes(), nil
+}
+
+// UnmarshalJSON implements stdjson.Unmarshaler.
+func (s *CommitRequest) UnmarshalJSON(data []byte) error {
+	d := jx.DecodeBytes(data)
+	return s.Decode(d)
+}
+
+// Encode implements json.Marshaler.
 func (s *CreateSessionRequest) Encode(e *jx.Encoder) {
 	e.ObjStart()
 	s.encodeFields(e)
@@ -1079,13 +1142,20 @@ func (s *Document) encodeFields(e *jx.Encoder) {
 			s.UpdatedAt.Encode(e)
 		}
 	}
+	{
+		if s.ExternalChange.Set {
+			e.FieldStart("externalChange")
+			s.ExternalChange.Encode(e)
+		}
+	}
 }
 
-var jsonFieldsNameOfDocument = [4]string{
+var jsonFieldsNameOfDocument = [5]string{
 	0: "id",
 	1: "path",
 	2: "rootBlockId",
 	3: "updatedAt",
+	4: "externalChange",
 }
 
 // Decode decodes Document from json.
@@ -1142,6 +1212,16 @@ func (s *Document) Decode(d *jx.Decoder) error {
 				return nil
 			}(); err != nil {
 				return errors.Wrap(err, "decode field \"updatedAt\"")
+			}
+		case "externalChange":
+			if err := func() error {
+				s.ExternalChange.Reset()
+				if err := s.ExternalChange.Decode(d); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"externalChange\"")
 			}
 		default:
 			return d.Skip()
@@ -1325,6 +1405,172 @@ func (s *Entry) MarshalJSON() ([]byte, error) {
 
 // UnmarshalJSON implements stdjson.Unmarshaler.
 func (s *Entry) UnmarshalJSON(data []byte) error {
+	d := jx.DecodeBytes(data)
+	return s.Decode(d)
+}
+
+// Encode implements json.Marshaler.
+func (s *FileChangedExternally) Encode(e *jx.Encoder) {
+	e.ObjStart()
+	s.encodeFields(e)
+	e.ObjEnd()
+}
+
+// encodeFields encodes fields.
+func (s *FileChangedExternally) encodeFields(e *jx.Encoder) {
+	{
+		e.FieldStart("error")
+		s.Error.Encode(e)
+	}
+	{
+		e.FieldStart("path")
+		e.Str(s.Path)
+	}
+	{
+		e.FieldStart("currentHash")
+		e.Str(s.CurrentHash)
+	}
+}
+
+var jsonFieldsNameOfFileChangedExternally = [3]string{
+	0: "error",
+	1: "path",
+	2: "currentHash",
+}
+
+// Decode decodes FileChangedExternally from json.
+func (s *FileChangedExternally) Decode(d *jx.Decoder) error {
+	if s == nil {
+		return errors.New("invalid: unable to decode FileChangedExternally to nil")
+	}
+	var requiredBitSet [1]uint8
+
+	if err := d.ObjBytes(func(d *jx.Decoder, k []byte) error {
+		switch string(k) {
+		case "error":
+			requiredBitSet[0] |= 1 << 0
+			if err := func() error {
+				if err := s.Error.Decode(d); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"error\"")
+			}
+		case "path":
+			requiredBitSet[0] |= 1 << 1
+			if err := func() error {
+				v, err := d.Str()
+				s.Path = string(v)
+				if err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"path\"")
+			}
+		case "currentHash":
+			requiredBitSet[0] |= 1 << 2
+			if err := func() error {
+				v, err := d.Str()
+				s.CurrentHash = string(v)
+				if err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"currentHash\"")
+			}
+		default:
+			return d.Skip()
+		}
+		return nil
+	}); err != nil {
+		return errors.Wrap(err, "decode FileChangedExternally")
+	}
+	// Validate required fields.
+	var failures []validate.FieldError
+	for i, mask := range [1]uint8{
+		0b00000111,
+	} {
+		if result := (requiredBitSet[i] & mask) ^ mask; result != 0 {
+			// Mask only required fields and check equality to mask using XOR.
+			//
+			// If XOR result is not zero, result is not equal to expected, so some fields are missed.
+			// Bits of fields which would be set are actually bits of missed fields.
+			missed := bits.OnesCount8(result)
+			for bitN := 0; bitN < missed; bitN++ {
+				bitIdx := bits.TrailingZeros8(result)
+				fieldIdx := i*8 + bitIdx
+				var name string
+				if fieldIdx < len(jsonFieldsNameOfFileChangedExternally) {
+					name = jsonFieldsNameOfFileChangedExternally[fieldIdx]
+				} else {
+					name = strconv.Itoa(fieldIdx)
+				}
+				failures = append(failures, validate.FieldError{
+					Name:  name,
+					Error: validate.ErrFieldRequired,
+				})
+				// Reset bit.
+				result &^= 1 << bitIdx
+			}
+		}
+	}
+	if len(failures) > 0 {
+		return &validate.Error{Fields: failures}
+	}
+
+	return nil
+}
+
+// MarshalJSON implements stdjson.Marshaler.
+func (s *FileChangedExternally) MarshalJSON() ([]byte, error) {
+	e := jx.Encoder{}
+	s.Encode(&e)
+	return e.Bytes(), nil
+}
+
+// UnmarshalJSON implements stdjson.Unmarshaler.
+func (s *FileChangedExternally) UnmarshalJSON(data []byte) error {
+	d := jx.DecodeBytes(data)
+	return s.Decode(d)
+}
+
+// Encode encodes FileChangedExternallyError as json.
+func (s FileChangedExternallyError) Encode(e *jx.Encoder) {
+	e.Str(string(s))
+}
+
+// Decode decodes FileChangedExternallyError from json.
+func (s *FileChangedExternallyError) Decode(d *jx.Decoder) error {
+	if s == nil {
+		return errors.New("invalid: unable to decode FileChangedExternallyError to nil")
+	}
+	v, err := d.StrBytes()
+	if err != nil {
+		return err
+	}
+	// Try to use constant string.
+	switch FileChangedExternallyError(v) {
+	case FileChangedExternallyErrorFileChangedExternally:
+		*s = FileChangedExternallyErrorFileChangedExternally
+	default:
+		*s = FileChangedExternallyError(v)
+	}
+
+	return nil
+}
+
+// MarshalJSON implements stdjson.Marshaler.
+func (s FileChangedExternallyError) MarshalJSON() ([]byte, error) {
+	e := jx.Encoder{}
+	s.Encode(&e)
+	return e.Bytes(), nil
+}
+
+// UnmarshalJSON implements stdjson.Unmarshaler.
+func (s *FileChangedExternallyError) UnmarshalJSON(data []byte) error {
 	d := jx.DecodeBytes(data)
 	return s.Decode(d)
 }
@@ -3092,6 +3338,39 @@ func (s *OptCapabilities) UnmarshalJSON(data []byte) error {
 	return s.Decode(d)
 }
 
+// Encode encodes CommitRequest as json.
+func (o OptCommitRequest) Encode(e *jx.Encoder) {
+	if !o.Set {
+		return
+	}
+	o.Value.Encode(e)
+}
+
+// Decode decodes CommitRequest from json.
+func (o *OptCommitRequest) Decode(d *jx.Decoder) error {
+	if o == nil {
+		return errors.New("invalid: unable to decode OptCommitRequest to nil")
+	}
+	o.Set = true
+	if err := o.Value.Decode(d); err != nil {
+		return err
+	}
+	return nil
+}
+
+// MarshalJSON implements stdjson.Marshaler.
+func (s OptCommitRequest) MarshalJSON() ([]byte, error) {
+	e := jx.Encoder{}
+	s.Encode(&e)
+	return e.Bytes(), nil
+}
+
+// UnmarshalJSON implements stdjson.Unmarshaler.
+func (s *OptCommitRequest) UnmarshalJSON(data []byte) error {
+	d := jx.DecodeBytes(data)
+	return s.Decode(d)
+}
+
 // Encode encodes float64 as json.
 func (o OptFloat64) Encode(e *jx.Encoder) {
 	if !o.Set {
@@ -3520,12 +3799,26 @@ func (s *Revision) encodeFields(e *jx.Encoder) {
 			s.Timestamp.Encode(e)
 		}
 	}
+	{
+		if s.WrittenThrough.Set {
+			e.FieldStart("writtenThrough")
+			s.WrittenThrough.Encode(e)
+		}
+	}
+	{
+		if s.Path.Set {
+			e.FieldStart("path")
+			s.Path.Encode(e)
+		}
+	}
 }
 
-var jsonFieldsNameOfRevision = [3]string{
+var jsonFieldsNameOfRevision = [5]string{
 	0: "id",
 	1: "message",
 	2: "timestamp",
+	3: "writtenThrough",
+	4: "path",
 }
 
 // Decode decodes Revision from json.
@@ -3565,6 +3858,26 @@ func (s *Revision) Decode(d *jx.Decoder) error {
 				return nil
 			}(); err != nil {
 				return errors.Wrap(err, "decode field \"timestamp\"")
+			}
+		case "writtenThrough":
+			if err := func() error {
+				s.WrittenThrough.Reset()
+				if err := s.WrittenThrough.Decode(d); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"writtenThrough\"")
+			}
+		case "path":
+			if err := func() error {
+				s.Path.Reset()
+				if err := s.Path.Decode(d); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"path\"")
 			}
 		default:
 			return d.Skip()
@@ -3693,11 +4006,18 @@ func (s *SaveTreeRequest) encodeFields(e *jx.Encoder) {
 			s.WriteThrough.Encode(e)
 		}
 	}
+	{
+		if s.Overwrite.Set {
+			e.FieldStart("overwrite")
+			s.Overwrite.Encode(e)
+		}
+	}
 }
 
-var jsonFieldsNameOfSaveTreeRequest = [2]string{
+var jsonFieldsNameOfSaveTreeRequest = [3]string{
 	0: "blocks",
 	1: "writeThrough",
+	2: "overwrite",
 }
 
 // Decode decodes SaveTreeRequest from json.
@@ -3736,6 +4056,16 @@ func (s *SaveTreeRequest) Decode(d *jx.Decoder) error {
 				return nil
 			}(); err != nil {
 				return errors.Wrap(err, "decode field \"writeThrough\"")
+			}
+		case "overwrite":
+			if err := func() error {
+				s.Overwrite.Reset()
+				if err := s.Overwrite.Decode(d); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"overwrite\"")
 			}
 		default:
 			return d.Skip()

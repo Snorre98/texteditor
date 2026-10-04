@@ -422,6 +422,9 @@ func (l *loop) runSteps(ctx context.Context, turnID string, task dto.Task, targe
 // injectDocumentID adds task.DocumentID to the args of document-scoped tools
 // (edit_markdown, diff). The model never supplies it; the loop owns the document
 // binding (ADR-0029: edits target a block in a document the loop is scoped to).
+// For edit_markdown it also carries the turn's preset so the staged candidate's
+// derived commit message names the mode (ADR-0020 §1); the model never sees
+// either field in the tool schema.
 func injectDocumentID(name string, task dto.Task, args json.RawMessage) json.RawMessage {
 	if name != "edit_markdown" && name != "diff" {
 		return args
@@ -431,6 +434,9 @@ func injectDocumentID(name string, task dto.Task, args json.RawMessage) json.Raw
 		_ = json.Unmarshal(args, &merged)
 	}
 	merged["documentId"] = task.DocumentID
+	if name == "edit_markdown" && task.ModeName != "" {
+		merged["modeName"] = task.ModeName
+	}
 	out, _ := json.Marshal(merged)
 	return out
 }

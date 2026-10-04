@@ -91,15 +91,17 @@ func (s stubFleet) Fingerprint(string) (string, error)                      { re
 
 type stubDoc struct{}
 
-func (stubDoc) Open(string) (string, error)        { return "", nil }
-func (stubDoc) SaveTree(string, []dto.BlockWrite, bool) (dto.Revision, error) {
-	return dto.Revision{}, nil
+func (stubDoc) Open(string) (dto.OpenResult, error) { return dto.OpenResult{}, nil }
+func (stubDoc) SaveTree(string, []dto.BlockWrite, dto.SaveOptions) (dto.WriteResult, error) {
+	return dto.WriteResult{}, nil
 }
 func (stubDoc) Blocks(string) ([]dto.Block, error) { return nil, nil }
 func (stubDoc) ApplyEdit(context.Context, string, dto.BlockEdit) (dto.Revision, error) {
 	return dto.Revision{}, nil
 }
-func (stubDoc) Commit(string, string) error                         { return nil }
+func (stubDoc) Commit(string, dto.CommitOptions) (dto.WriteResult, error) {
+	return dto.WriteResult{}, nil
+}
 func (stubDoc) Diff(string, string, string) ([]dto.WordEdit, error) { return nil, nil }
 func (stubDoc) History(string) ([]dto.Revision, error)              { return nil, nil }
 func (stubDoc) Candidates(string, string) ([]dto.Candidate, error)  { return nil, nil }
@@ -860,7 +862,9 @@ func TestWireModelIDReachesAssembler(t *testing.T) {
 	var usedModel string
 	for _, ev := range bus.events {
 		if ev.Type == "done" {
-			var d struct{ UsedModel string `json:"usedModel"` }
+			var d struct {
+				UsedModel string `json:"usedModel"`
+			}
 			if err := json.Unmarshal(ev.Data, &d); err == nil {
 				usedModel = d.UsedModel
 			}
@@ -1022,4 +1026,29 @@ func hasEvent(events []dto.Event, typ string) bool {
 		}
 	}
 	return false
+}
+
+// TestInjectDocumentIDCarriesMode covers ADR-0020 §1: edit_markdown args get the
+// turn's preset (for the derived commit message) alongside the document binding;
+// other tools never see either field.
+func TestInjectDocumentIDCarriesMode(t *testing.T) {
+	task := dto.Task{DocumentID: "d1", ModeName: "proofreader"}
+
+	out := injectDocumentID("edit_markdown", task, json.RawMessage(`{"blockId":"b1","text":"x"}`))
+	var m map[string]interface{}
+	if err := json.Unmarshal(out, &m); err != nil {
+		t.Fatal(err)
+	}
+	if m["documentId"] != "d1" || m["modeName"] != "proofreader" {
+		t.Fatalf("edit args = %v, want documentId + modeName", m)
+	}
+
+	out = injectDocumentID("diff", task, json.RawMessage(`{}`))
+	m = map[string]interface{}{}
+	if err := json.Unmarshal(out, &m); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := m["modeName"]; ok {
+		t.Fatalf("diff args = %v, must not carry modeName", m)
+	}
 }

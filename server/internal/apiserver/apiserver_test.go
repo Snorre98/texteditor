@@ -2,16 +2,25 @@ package apiserver
 
 import (
 	"context"
+	"crypto/sha256"
+	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	_ "modernc.org/sqlite"
+
+	"texteditor/internal/document"
 	"texteditor/internal/fleet"
+	"texteditor/internal/textformatter"
 	"texteditor/internal/workspace"
 	"texteditor/shared/dto"
 )
@@ -85,9 +94,14 @@ func (stubTools) AllowlistFor(dto.Mode) []dto.ToolDef { return nil }
 
 type stubDoc struct{}
 
-func (stubDoc) Open(string) (string, error) { return "d1", nil }
-func (stubDoc) SaveTree(string, []dto.BlockWrite, bool) (dto.Revision, error) {
-	return dto.Revision{ID: "r1", Message: "autosave @ 1", Timestamp: 1}, nil
+func (stubDoc) Open(string) (dto.OpenResult, error) {
+	return dto.OpenResult{DocumentID: "d1", Path: "/tmp/x.md"}, nil
+}
+func (stubDoc) SaveTree(string, []dto.BlockWrite, dto.SaveOptions) (dto.WriteResult, error) {
+	return dto.WriteResult{
+		Revision:  dto.Revision{ID: "r1", Message: "autosave @ 1", Timestamp: 1},
+		Committed: true,
+	}, nil
 }
 func (stubDoc) Blocks(string) ([]dto.Block, error) {
 	return []dto.Block{{ID: "b1", Kind: dto.BlockKindParagraph, Text: "hello"}}, nil
@@ -95,7 +109,14 @@ func (stubDoc) Blocks(string) ([]dto.Block, error) {
 func (stubDoc) ApplyEdit(context.Context, string, dto.BlockEdit) (dto.Revision, error) {
 	return dto.Revision{ID: "r1", Message: "candidate", Timestamp: 1}, nil
 }
-func (stubDoc) Commit(string, string) error { return nil }
+func (stubDoc) Commit(string, dto.CommitOptions) (dto.WriteResult, error) {
+	return dto.WriteResult{
+		Revision:       dto.Revision{ID: "r1", Message: "accepted", Timestamp: 1},
+		WrittenThrough: true,
+		Path:           "/tmp/x.md",
+		Committed:      true,
+	}, nil
+}
 func (stubDoc) Diff(string, string, string) ([]dto.WordEdit, error) {
 	return []dto.WordEdit{{BlockID: "b1", Insertions: []string{"x"}, Deletions: []string{"y"}}}, nil
 }
@@ -625,4 +646,290 @@ func TestCORSPreflightRejectsUnlistedOrigin(t *testing.T) {
 	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "" {
 		t.Fatalf("unlisted preflight must not be answered, got %q", got)
 	}
+}
+
+// ------------------------- write-through E2E (ADR-0047) -------------------------
+
+// stagingLoop simulates the model path: a stubbed turn stages an edit_markdown
+// candidate through the real document store (the same seam the executor handler
+// uses, including the echoed base-hash guard), then emits done.
+type stagingLoop struct {
+	doc  document.Interface
+	bus  *fakeBus
+	text string
+
+	mu  sync.Mutex
+	err error
+}
+
+func (s *stagingLoop) Run(ctx context.Context, task dto.Task) (string, error) {
+	id := "t1"
+	blocks, err := s.doc.Blocks(task.DocumentID)
+	if err != nil {
+		s.setErr(err)
+	} else if len(blocks) > 0 {
+		if _, err := s.doc.ApplyEdit(ctx, task.DocumentID, dto.BlockEdit{
+			BlockID: blocks[0].ID,
+			Text:    s.text,
+			Mode:    task.ModeName,
+			Guards:  []dto.Guard{{BlockID: blocks[0].ID, Hash: blocks[0].Hash}},
+		}); err != nil {
+			s.setErr(err)
+		}
+	}
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		s.bus.Emit(dto.Event{TurnID: id, Type: "done", Data: json.RawMessage(`{"degraded":false}`)})
+	}()
+	return id, nil
+}
+
+func (s *stagingLoop) setErr(err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.err = err
+}
+
+func (s *stagingLoop) runErr() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.err
+}
+
+// newRealDocServer wires the API server to a real document store over a temp
+// app.db, git repo, and worktree — the HTTP-level acceptance surface.
+func newRealDocServer(t *testing.T, notePath string, loop *stagingLoop) (*Server, *fakeBus) {
+	t.Helper()
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	if err := document.Migrate(context.Background(), db); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	ds, err := document.NewStore(db, filepath.Join(dir, "git"), filepath.Join(dir, "worktree"), textformatter.New())
+	if err != nil {
+		t.Fatal(err)
+	}
+	loop.doc = ds
+	bus := &fakeBus{}
+	loop.bus = bus
+	srv, err := New(Deps{
+		Fleet:    stubFleet{},
+		Modes:    stubModes{},
+		Tools:    stubTools{},
+		Doc:      ds,
+		Sessions: stubSessions{},
+		Loop:     loop,
+	}, bus)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return srv, bus
+}
+
+// openNote opens the note over HTTP and returns the document id.
+func openNote(t *testing.T, srv *Server, notePath string) string {
+	t.Helper()
+	openBody, _ := json.Marshal(map[string]string{"path": notePath})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/documents", strings.NewReader(string(openBody)))
+	req.Header.Set("Content-Type", "application/json")
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("open = %d body %s", rec.Code, rec.Body.String())
+	}
+	var docBody struct {
+		ID   string `json:"id"`
+		Path string `json:"path"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &docBody); err != nil {
+		t.Fatal(err)
+	}
+	return docBody.ID
+}
+
+// openAndTurn opens the note over HTTP, runs one stubbed turn that stages an
+// edit, and returns the document id.
+func openAndTurn(t *testing.T, srv *Server, loop *stagingLoop, notePath string) string {
+	t.Helper()
+	docID := openNote(t, srv, notePath)
+
+	turnBody, _ := json.Marshal(map[string]string{
+		"sessionId": "s1", "modeName": "proofreader", "documentId": docID, "userInput": "rewrite",
+	})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/turn", strings.NewReader(string(turnBody)))
+	req.Header.Set("Content-Type", "application/json")
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("turn = %d body %s", rec.Code, rec.Body.String())
+	}
+	if err := loop.runErr(); err != nil {
+		t.Fatalf("staging turn failed: %v", err)
+	}
+	return docID
+}
+
+func TestWriteThroughE2E(t *testing.T) {
+	notePath := filepath.Join(t.TempDir(), "note.md")
+	if err := os.WriteFile(notePath, []byte("original paragraph"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	loop := &stagingLoop{text: "rewritten by the model"}
+	srv, _ := newRealDocServer(t, notePath, loop)
+	id := openAndTurn(t, srv, loop, notePath)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/documents/"+id+"/commits", nil)
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("commit = %d body %s", rec.Code, rec.Body.String())
+	}
+	var rev struct {
+		ID             string `json:"id"`
+		Message        string `json:"message"`
+		WrittenThrough bool   `json:"writtenThrough"`
+		Path           string `json:"path"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &rev); err != nil {
+		t.Fatal(err)
+	}
+	if rev.ID == "" {
+		t.Fatalf("commit revision not populated: %s", rec.Body.String())
+	}
+	if !rev.WrittenThrough || rev.Path == "" {
+		t.Fatalf("commit response must report write-through + path: %s", rec.Body.String())
+	}
+	if !strings.Contains(rev.Message, "proofreader") {
+		t.Fatalf("derived message = %q, want the preset", rev.Message)
+	}
+	if got := readFile(t, notePath); got != "rewritten by the model" {
+		t.Fatalf("bytes on disk = %q, want the accepted rewrite", got)
+	}
+}
+
+func TestWriteThroughConflictE2E(t *testing.T) {
+	notePath := filepath.Join(t.TempDir(), "note.md")
+	if err := os.WriteFile(notePath, []byte("original paragraph"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	loop := &stagingLoop{text: "rewritten by the model"}
+	srv, _ := newRealDocServer(t, notePath, loop)
+	id := openAndTurn(t, srv, loop, notePath)
+
+	// An external editor changes the file between the turn and the accept.
+	if err := os.WriteFile(notePath, []byte("external edit"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/documents/"+id+"/commits", nil)
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("commit = %d, want 409 (body %s)", rec.Code, rec.Body.String())
+	}
+	var conflict struct {
+		Error       string `json:"error"`
+		Path        string `json:"path"`
+		CurrentHash string `json:"currentHash"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &conflict); err != nil {
+		t.Fatal(err)
+	}
+	if conflict.Error != "file-changed-externally" {
+		t.Fatalf("error = %q", conflict.Error)
+	}
+	sum := sha256.Sum256([]byte("external edit"))
+	if want := hex.EncodeToString(sum[:]); conflict.CurrentHash != want {
+		t.Fatalf("currentHash = %q, want %q", conflict.CurrentHash, want)
+	}
+	if got := readFile(t, notePath); got != "external edit" {
+		t.Fatalf("conflict clobbered the disk: %q", got)
+	}
+
+	// The explicit overwrite escape hatch accepts the write.
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/documents/"+id+"/commits", strings.NewReader(`{"overwrite":true}`))
+	req.Header.Set("Content-Type", "application/json")
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("overwrite commit = %d body %s", rec.Code, rec.Body.String())
+	}
+	if got := readFile(t, notePath); got != "rewritten by the model" {
+		t.Fatalf("file after overwrite = %q", got)
+	}
+}
+
+// TestSaveDocumentConflictAndReopenE2E covers the ADR-0047 §4 no-op save over an
+// external change (409, no write) and the Open revalidation notice.
+func TestSaveDocumentConflictAndReopenE2E(t *testing.T) {
+	notePath := filepath.Join(t.TempDir(), "note.md")
+	if err := os.WriteFile(notePath, []byte("original paragraph"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	loop := &stagingLoop{text: "unused"}
+	srv, _ := newRealDocServer(t, notePath, loop)
+	id := openNote(t, srv, notePath)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/documents/"+id+"/blocks", nil)
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("blocks = %d body %s", rec.Code, rec.Body.String())
+	}
+	var blocks []struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &blocks); err != nil || len(blocks) == 0 {
+		t.Fatalf("blocks body = %s (%v)", rec.Body.String(), err)
+	}
+
+	// External edit, then an explicit save of the unchanged tree: 409, no clobber.
+	if err := os.WriteFile(notePath, []byte("external edit"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	treeBody, _ := json.Marshal(map[string]interface{}{
+		"blocks":       []map[string]string{{"id": blocks[0].ID, "kind": "paragraph", "text": "original paragraph"}},
+		"writeThrough": true,
+	})
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPut, "/documents/"+id+"/tree", strings.NewReader(string(treeBody)))
+	req.Header.Set("Content-Type", "application/json")
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("save = %d, want 409 (body %s)", rec.Code, rec.Body.String())
+	}
+	if got := readFile(t, notePath); got != "external edit" {
+		t.Fatalf("save conflict clobbered the disk: %q", got)
+	}
+
+	// Re-open revalidates: the external change is re-read and reported.
+	reopenBody, _ := json.Marshal(map[string]string{"path": notePath})
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/documents", strings.NewReader(string(reopenBody)))
+	req.Header.Set("Content-Type", "application/json")
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("reopen = %d body %s", rec.Code, rec.Body.String())
+	}
+	var docBody struct {
+		ExternalChange bool `json:"externalChange"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &docBody); err != nil {
+		t.Fatal(err)
+	}
+	if !docBody.ExternalChange {
+		t.Fatalf("reopen must report externalChange: %s", rec.Body.String())
+	}
+}
+
+func readFile(t *testing.T, path string) string {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
 }

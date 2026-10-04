@@ -6,7 +6,11 @@
     "type": "object",
     "properties": {
       "blockId": { "type": "string" },
-      "text": { "type": "string" }
+      "text": { "type": "string" },
+      "baseHash": {
+        "type": "string",
+        "description": "The `hash` of the block as last read. Echo it so a stale edit (the block changed since it was read) is refused with guard-failed instead of landing over newer content. Omit only if the block's hash is unknown."
+      }
     },
     "required": ["blockId", "text"]
   }

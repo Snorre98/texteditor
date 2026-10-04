@@ -378,6 +378,24 @@ func (s *Capabilities) SetSupportsSystemPrompt(val bool) {
 	s.SupportsSystemPrompt = val
 }
 
+// Optional accept options for `commitDocument` (ADR-0047 §3).
+// Ref: #/components/schemas/CommitRequest
+type CommitRequest struct {
+	// Explicit opt-in to overwrite an externally changed file. Default false: a mismatch is refused with
+	// `file-changed-externally` (409).
+	Overwrite OptBool `json:"overwrite"`
+}
+
+// GetOverwrite returns the value of Overwrite.
+func (s *CommitRequest) GetOverwrite() OptBool {
+	return s.Overwrite
+}
+
+// SetOverwrite sets the value of Overwrite.
+func (s *CommitRequest) SetOverwrite(val OptBool) {
+	s.Overwrite = val
+}
+
 // Ref: #/components/schemas/CreateSessionRequest
 type CreateSessionRequest struct {
 	DocumentId    string    `json:"documentId"`
@@ -444,10 +462,14 @@ func (s *DirectoryListing) SetEntries(val []Entry) {
 
 // Ref: #/components/schemas/Document
 type Document struct {
-	ID          string   `json:"id"`
+	ID string `json:"id"`
+	// The canonical (symlink-resolved) absolute path the engine keys the document by (ADR-0047 §2).
 	Path        string   `json:"path"`
 	RootBlockId string   `json:"rootBlockId"`
 	UpdatedAt   OptInt64 `json:"updatedAt"`
+	// True when the file changed on disk since the engine last read it and was re-read into the worktree
+	// on this open (ADR-0047 §2). Aliases of the same file resolve to one document row.
+	ExternalChange OptBool `json:"externalChange"`
 }
 
 // GetID returns the value of ID.
@@ -470,6 +492,11 @@ func (s *Document) GetUpdatedAt() OptInt64 {
 	return s.UpdatedAt
 }
 
+// GetExternalChange returns the value of ExternalChange.
+func (s *Document) GetExternalChange() OptBool {
+	return s.ExternalChange
+}
+
 // SetID sets the value of ID.
 func (s *Document) SetID(val string) {
 	s.ID = val
@@ -488,6 +515,11 @@ func (s *Document) SetRootBlockId(val string) {
 // SetUpdatedAt sets the value of UpdatedAt.
 func (s *Document) SetUpdatedAt(val OptInt64) {
 	s.UpdatedAt = val
+}
+
+// SetExternalChange sets the value of ExternalChange.
+func (s *Document) SetExternalChange(val OptBool) {
+	s.ExternalChange = val
 }
 
 // One directory entry (ADR-0035). Hidden entries are returned; display filtering is client-side.
@@ -622,6 +654,83 @@ func (s *EventType) UnmarshalText(data []byte) error {
 		return nil
 	case EventTypeBackpressure:
 		*s = EventTypeBackpressure
+		return nil
+	default:
+		return errors.Errorf("invalid value: %q", data)
+	}
+}
+
+// The file at `documents.path` changed externally since the engine last read it; the write-through was
+// refused and no bytes were written (ADR-0047 §3). `currentHash` is the current on-disk content hash
+// so the client can show or compare it; retry with `overwrite: true` to accept it.
+// Ref: #/components/schemas/FileChangedExternally
+type FileChangedExternally struct {
+	Error       FileChangedExternallyError `json:"error"`
+	Path        string                     `json:"path"`
+	CurrentHash string                     `json:"currentHash"`
+}
+
+// GetError returns the value of Error.
+func (s *FileChangedExternally) GetError() FileChangedExternallyError {
+	return s.Error
+}
+
+// GetPath returns the value of Path.
+func (s *FileChangedExternally) GetPath() string {
+	return s.Path
+}
+
+// GetCurrentHash returns the value of CurrentHash.
+func (s *FileChangedExternally) GetCurrentHash() string {
+	return s.CurrentHash
+}
+
+// SetError sets the value of Error.
+func (s *FileChangedExternally) SetError(val FileChangedExternallyError) {
+	s.Error = val
+}
+
+// SetPath sets the value of Path.
+func (s *FileChangedExternally) SetPath(val string) {
+	s.Path = val
+}
+
+// SetCurrentHash sets the value of CurrentHash.
+func (s *FileChangedExternally) SetCurrentHash(val string) {
+	s.CurrentHash = val
+}
+
+func (*FileChangedExternally) commitDocumentRes() {}
+func (*FileChangedExternally) saveDocumentRes()   {}
+
+type FileChangedExternallyError string
+
+const (
+	FileChangedExternallyErrorFileChangedExternally FileChangedExternallyError = "file-changed-externally"
+)
+
+// AllValues returns all FileChangedExternallyError values.
+func (FileChangedExternallyError) AllValues() []FileChangedExternallyError {
+	return []FileChangedExternallyError{
+		FileChangedExternallyErrorFileChangedExternally,
+	}
+}
+
+// MarshalText implements encoding.TextMarshaler.
+func (s FileChangedExternallyError) MarshalText() ([]byte, error) {
+	switch s {
+	case FileChangedExternallyErrorFileChangedExternally:
+		return []byte(s), nil
+	default:
+		return nil, errors.Errorf("invalid value: %q", s)
+	}
+}
+
+// UnmarshalText implements encoding.TextUnmarshaler.
+func (s *FileChangedExternallyError) UnmarshalText(data []byte) error {
+	switch FileChangedExternallyError(data) {
+	case FileChangedExternallyErrorFileChangedExternally:
+		*s = FileChangedExternallyErrorFileChangedExternally
 		return nil
 	default:
 		return errors.Errorf("invalid value: %q", data)
@@ -1498,6 +1607,52 @@ func (o OptCapabilities) Or(d Capabilities) Capabilities {
 	return d
 }
 
+// NewOptCommitRequest returns new OptCommitRequest with value set to v.
+func NewOptCommitRequest(v CommitRequest) OptCommitRequest {
+	return OptCommitRequest{
+		Value: v,
+		Set:   true,
+	}
+}
+
+// OptCommitRequest is optional CommitRequest.
+type OptCommitRequest struct {
+	Value CommitRequest
+	Set   bool
+}
+
+// IsSet returns true if OptCommitRequest was set.
+func (o OptCommitRequest) IsSet() bool { return o.Set }
+
+// Reset unsets value.
+func (o *OptCommitRequest) Reset() {
+	var v CommitRequest
+	o.Value = v
+	o.Set = false
+}
+
+// SetTo sets value to v.
+func (o *OptCommitRequest) SetTo(v CommitRequest) {
+	o.Set = true
+	o.Value = v
+}
+
+// Get returns value and boolean that denotes whether value was set.
+func (o OptCommitRequest) Get() (v CommitRequest, ok bool) {
+	if !o.Set {
+		return v, false
+	}
+	return o.Value, true
+}
+
+// Or returns value if set, or given parameter if does not.
+func (o OptCommitRequest) Or(d CommitRequest) CommitRequest {
+	if v, ok := o.Get(); ok {
+		return v
+	}
+	return d
+}
+
 // NewOptFloat64 returns new OptFloat64 with value set to v.
 func NewOptFloat64(v float64) OptFloat64 {
 	return OptFloat64{
@@ -1932,6 +2087,11 @@ type Revision struct {
 	ID        OptString `json:"id"`
 	Message   OptString `json:"message"`
 	Timestamp OptInt64  `json:"timestamp"`
+	// True when the canonical markdown was mirrored to the opened file during this write boundary
+	// (ADR-0047 §8). False on an empty accept / engine-only autosave.
+	WrittenThrough OptBool `json:"writtenThrough"`
+	// The file path that was mirrored when `writtenThrough` is true.
+	Path OptString `json:"path"`
 }
 
 // GetID returns the value of ID.
@@ -1949,6 +2109,16 @@ func (s *Revision) GetTimestamp() OptInt64 {
 	return s.Timestamp
 }
 
+// GetWrittenThrough returns the value of WrittenThrough.
+func (s *Revision) GetWrittenThrough() OptBool {
+	return s.WrittenThrough
+}
+
+// GetPath returns the value of Path.
+func (s *Revision) GetPath() OptString {
+	return s.Path
+}
+
 // SetID sets the value of ID.
 func (s *Revision) SetID(val OptString) {
 	s.ID = val
@@ -1963,6 +2133,19 @@ func (s *Revision) SetMessage(val OptString) {
 func (s *Revision) SetTimestamp(val OptInt64) {
 	s.Timestamp = val
 }
+
+// SetWrittenThrough sets the value of WrittenThrough.
+func (s *Revision) SetWrittenThrough(val OptBool) {
+	s.WrittenThrough = val
+}
+
+// SetPath sets the value of Path.
+func (s *Revision) SetPath(val OptString) {
+	s.Path = val
+}
+
+func (*Revision) commitDocumentRes() {}
+func (*Revision) saveDocumentRes()   {}
 
 // Ref: #/components/schemas/SamplingParams
 type SamplingParams struct {
@@ -1998,6 +2181,9 @@ type SaveTreeRequest struct {
 	// markdown back to the opened file path (ADR-0039). Default false — the autosave only snapshots the
 	// engine worktree + git.
 	WriteThrough OptBool `json:"writeThrough"`
+	// Explicit opt-in to overwrite an externally changed file (ADR-0047 §3). Default false: a mismatch is
+	// refused with `file-changed-externally` (409).
+	Overwrite OptBool `json:"overwrite"`
 }
 
 // GetBlocks returns the value of Blocks.
@@ -2010,6 +2196,11 @@ func (s *SaveTreeRequest) GetWriteThrough() OptBool {
 	return s.WriteThrough
 }
 
+// GetOverwrite returns the value of Overwrite.
+func (s *SaveTreeRequest) GetOverwrite() OptBool {
+	return s.Overwrite
+}
+
 // SetBlocks sets the value of Blocks.
 func (s *SaveTreeRequest) SetBlocks(val []BlockWrite) {
 	s.Blocks = val
@@ -2018,6 +2209,11 @@ func (s *SaveTreeRequest) SetBlocks(val []BlockWrite) {
 // SetWriteThrough sets the value of WriteThrough.
 func (s *SaveTreeRequest) SetWriteThrough(val OptBool) {
 	s.WriteThrough = val
+}
+
+// SetOverwrite sets the value of Overwrite.
+func (s *SaveTreeRequest) SetOverwrite(val OptBool) {
+	s.Overwrite = val
 }
 
 // Ref: #/components/schemas/Selection

@@ -231,20 +231,24 @@ func (h *handler) ListDirectory(ctx context.Context, p genapi.ListDirectoryParam
 }
 
 func (h *handler) OpenDocument(ctx context.Context, req *genapi.OpenDocumentRequest) (*genapi.Document, error) {
-	id, err := h.d.Doc.Open(req.Path)
+	res, err := h.d.Doc.Open(req.Path)
 	if err != nil {
 		return nil, err
 	}
-	blocks, _ := h.d.Doc.Blocks(id)
-	root := id
+	blocks, _ := h.d.Doc.Blocks(res.DocumentID)
+	root := res.DocumentID
 	if len(blocks) > 0 {
 		root = blocks[0].ID
 	}
-	return &genapi.Document{
-		ID:          id,
-		Path:        req.Path,
+	out := &genapi.Document{
+		ID:          res.DocumentID,
+		Path:        res.Path,
 		RootBlockId: root,
-	}, nil
+	}
+	if res.ExternalChange {
+		out.ExternalChange = genapi.NewOptBool(true)
+	}
+	return out, nil
 }
 
 func (h *handler) GetBlocks(ctx context.Context, p genapi.GetBlocksParams) ([]genapi.Block, error) {
@@ -271,18 +275,35 @@ func (h *handler) ApplyEdit(ctx context.Context, req *genapi.BlockEdit, p genapi
 	return revisionToGen(rev), nil
 }
 
-func (h *handler) CommitDocument(ctx context.Context, p genapi.CommitDocumentParams) (*genapi.Revision, error) {
-	if err := h.d.Doc.Commit(p.ID, "accepted"); err != nil {
+// CommitDocument backs POST /documents/{id}/commits (ADR-0047 §1): accept the
+// staged candidates, derive the commit message, mirror to the opened file, and
+// report the write-through. An externally changed file is refused with the typed
+// 409 (unless the client explicitly overwrites); an empty accept creates no
+// commit and no write.
+func (h *handler) CommitDocument(ctx context.Context, req genapi.OptCommitRequest, p genapi.CommitDocumentParams) (genapi.CommitDocumentRes, error) {
+	opts := dto.CommitOptions{}
+	if req.IsSet() {
+		if v, ok := req.Value.Overwrite.Get(); ok {
+			opts.Overwrite = v
+		}
+	}
+	res, err := h.d.Doc.Commit(p.ID, opts)
+	if err != nil {
+		if conflict, ok := asFileChanged(err); ok {
+			return conflict, nil
+		}
 		return nil, err
 	}
-	return &genapi.Revision{}, nil
+	return writeResultToGen(res), nil
 }
 
 // SaveDocument backs PUT /documents/{id}/tree (ADR-0038): the manual-edit whole-
 // tree snapshot. The engine reconciles, mints IDs for new blocks, formats, and
 // commits `autosave @ <ts>` iff changed; writeThrough mirrors the canonical
-// markdown back to the opened file (ADR-0039).
-func (h *handler) SaveDocument(ctx context.Context, req *genapi.SaveTreeRequest, p genapi.SaveDocumentParams) (*genapi.Revision, error) {
+// markdown back to the opened file (ADR-0039). Per ADR-0047 §4 a no-op save
+// still re-syncs a stale disk, and an external change is a typed 409 (unless the
+// client explicitly overwrites).
+func (h *handler) SaveDocument(ctx context.Context, req *genapi.SaveTreeRequest, p genapi.SaveDocumentParams) (genapi.SaveDocumentRes, error) {
 	tree := make([]dto.BlockWrite, 0, len(req.Blocks))
 	for _, b := range req.Blocks {
 		bw := dto.BlockWrite{
@@ -297,15 +318,35 @@ func (h *handler) SaveDocument(ctx context.Context, req *genapi.SaveTreeRequest,
 		}
 		tree = append(tree, bw)
 	}
-	writeThrough := false
+	opts := dto.SaveOptions{}
 	if v, ok := req.WriteThrough.Get(); ok {
-		writeThrough = v
+		opts.WriteThrough = v
 	}
-	rev, err := h.d.Doc.SaveTree(p.ID, tree, writeThrough)
+	if v, ok := req.Overwrite.Get(); ok {
+		opts.Overwrite = v
+	}
+	res, err := h.d.Doc.SaveTree(p.ID, tree, opts)
 	if err != nil {
+		if conflict, ok := asFileChanged(err); ok {
+			return conflict, nil
+		}
 		return nil, err
 	}
-	return revisionToGen(rev), nil
+	return writeResultToGen(res), nil
+}
+
+// asFileChanged maps the store's typed write-through conflict to the generated
+// 409 response carrying the current on-disk hash (ADR-0047 §3).
+func asFileChanged(err error) (*genapi.FileChangedExternally, bool) {
+	var fce *document.FileChangedExternallyError
+	if !errors.As(err, &fce) {
+		return nil, false
+	}
+	return &genapi.FileChangedExternally{
+		Error:       genapi.FileChangedExternallyErrorFileChangedExternally,
+		Path:        fce.Path,
+		CurrentHash: fce.CurrentHash,
+	}, true
 }
 
 func (h *handler) GetHistory(ctx context.Context, p genapi.GetHistoryParams) ([]genapi.Revision, error) {
@@ -552,11 +593,27 @@ func blockToGen(b dto.Block) genapi.Block {
 }
 
 func revisionToGen(r dto.Revision) *genapi.Revision {
-	return &genapi.Revision{
+	out := &genapi.Revision{
 		ID:        genapi.NewOptString(r.ID),
 		Message:   genapi.NewOptString(r.Message),
 		Timestamp: genapi.NewOptInt64(r.Timestamp),
 	}
+	if r.WrittenThrough {
+		out.WrittenThrough = genapi.NewOptBool(true)
+	}
+	if r.Path != "" {
+		out.Path = genapi.NewOptString(r.Path)
+	}
+	return out
+}
+
+// writeResultToGen projects a write boundary's outcome (revision + write-through
+// fields) onto the wire Revision (ADR-0047 §8).
+func writeResultToGen(res dto.WriteResult) *genapi.Revision {
+	rev := res.Revision
+	rev.WrittenThrough = res.WrittenThrough
+	rev.Path = res.Path
+	return revisionToGen(rev)
 }
 
 func sessionToGen(s dto.Session) genapi.Session {

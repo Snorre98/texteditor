@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	_ "modernc.org/sqlite"
@@ -46,11 +47,11 @@ func openDocPath(t *testing.T, s Interface, content string) (string, string) {
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	id, err := s.Open(path)
+	res, err := s.Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return id, path
+	return res.DocumentID, path
 }
 
 func TestOpenBlocksRoundTrip(t *testing.T) {
@@ -73,6 +74,90 @@ func TestOpenBlocksRoundTrip(t *testing.T) {
 	}
 	if blocks[1].Hash == "" {
 		t.Fatal("hash must be populated (guard anchor)")
+	}
+}
+
+func TestOpenRevalidatesExternalChange(t *testing.T) {
+	s := newTestStore(t)
+	id, path := openDocPath(t, s, "first version")
+
+	if err := os.WriteFile(path, []byte("external version"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res, err := s.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.DocumentID != id {
+		t.Fatalf("reopen returned a new document id %q, want %q", res.DocumentID, id)
+	}
+	if !res.ExternalChange {
+		t.Fatal("external change must be reported (ADR-0047 §2)")
+	}
+	blocks, _ := s.Blocks(id)
+	if blocks[0].Text != "external version" {
+		t.Fatalf("worktree not re-read: %q", blocks[0].Text)
+	}
+
+	// A second open with no disk change is quiet.
+	res, err = s.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.ExternalChange {
+		t.Fatal("unchanged disk must not report an external change")
+	}
+}
+
+func TestOpenAliasResolvesToOneRow(t *testing.T) {
+	s := newTestStore(t)
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target.md")
+	if err := os.WriteFile(target, []byte("aliased"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "alias.md")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+
+	viaLink, err := s.Open(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	viaTarget, err := s.Open(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if viaLink.DocumentID != viaTarget.DocumentID {
+		t.Fatalf("alias ids differ: %q vs %q", viaLink.DocumentID, viaTarget.DocumentID)
+	}
+	if viaTarget.ExternalChange {
+		t.Fatal("opening an alias of an unchanged file is not an external change")
+	}
+}
+
+func TestOpenExternalChangeRebuildsWhenCountChanges(t *testing.T) {
+	s := newTestStore(t)
+	id, path := openDocPath(t, s, "one")
+	oldBlocks, _ := s.Blocks(id)
+
+	if err := os.WriteFile(path, []byte("one\n\ntwo\n\nthree"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res, err := s.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.ExternalChange {
+		t.Fatal("external change not reported")
+	}
+	blocks, _ := s.Blocks(id)
+	if len(blocks) != 3 {
+		t.Fatalf("blocks = %d, want 3 after re-read", len(blocks))
+	}
+	if blocks[0].ID == oldBlocks[0].ID {
+		t.Fatal("changed block count must rebuild structure with fresh IDs")
 	}
 }
 
@@ -132,11 +217,20 @@ func TestCommitClearsCandidatesAndCommits(t *testing.T) {
 	id := openDoc(t, s, "before edit")
 
 	blocks, _ := s.Blocks(id)
-	if _, err := s.ApplyEdit(context.Background(), id, dto.BlockEdit{BlockID: blocks[0].ID, Text: "after edit"}); err != nil {
+	if _, err := s.ApplyEdit(context.Background(), id, dto.BlockEdit{
+		BlockID: blocks[0].ID, Text: "after edit", Mode: "proofreader",
+	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Commit(id, "proofreader · "+blocks[0].ID+" · edited"); err != nil {
+	res, err := s.Commit(id, dto.CommitOptions{})
+	if err != nil {
 		t.Fatal(err)
+	}
+	if !res.Committed || res.Revision.ID == "" {
+		t.Fatalf("commit result = %+v, want a populated revision", res)
+	}
+	if !strings.Contains(res.Revision.Message, "proofreader") || !strings.Contains(res.Revision.Message, blocks[0].ID) {
+		t.Fatalf("derived message %q must name the preset and block", res.Revision.Message)
 	}
 
 	cands, _ := s.Candidates(id, blocks[0].ID)
@@ -156,22 +250,48 @@ func TestCommitClearsCandidatesAndCommits(t *testing.T) {
 	}
 }
 
+func TestCommitWithoutCandidatesCreatesNoCommit(t *testing.T) {
+	s := newTestStore(t)
+	id, path := openDocPath(t, s, "no candidates")
+
+	res, err := s.Commit(id, dto.CommitOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Committed {
+		t.Fatal("an empty accept must create no commit (ADR-0047 §8)")
+	}
+	if res.WrittenThrough {
+		t.Fatal("an empty accept must not write through")
+	}
+	hist, _ := s.History(id)
+	if len(hist) != 0 {
+		t.Fatalf("history = %d, want 0", len(hist))
+	}
+	if got := readFile(t, path); got != "no candidates" {
+		t.Fatalf("file after empty accept = %q", got)
+	}
+}
+
 func TestDiffIsWordLevel(t *testing.T) {
 	s := newTestStore(t)
 	id := openDoc(t, s, "the quick brown fox")
 
-	// Commit 1 = base.
-	if err := s.Commit(id, "initial"); err != nil {
+	// Commit 1 = base (stage the unchanged text, then accept).
+	blocks, _ := s.Blocks(id)
+	if _, err := s.ApplyEdit(context.Background(), id, dto.BlockEdit{BlockID: blocks[0].ID, Text: "the quick brown fox"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Commit(id, dto.CommitOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	baseRev := mustHead(t, s, id)
 
 	// Edit + commit 2.
-	blocks, _ := s.Blocks(id)
 	if _, err := s.ApplyEdit(context.Background(), id, dto.BlockEdit{BlockID: blocks[0].ID, Text: "the quick red fox"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Commit(id, "edit two"); err != nil {
+	if _, err := s.Commit(id, dto.CommitOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	rev := mustHead(t, s, id)
@@ -191,6 +311,26 @@ func TestDiffIsWordLevel(t *testing.T) {
 	}
 }
 
+func TestCommitMessageCarriesDiff(t *testing.T) {
+	s := newTestStore(t)
+	id := openDoc(t, s, "old words here")
+
+	blocks, _ := s.Blocks(id)
+	if _, err := s.ApplyEdit(context.Background(), id, dto.BlockEdit{
+		BlockID: blocks[0].ID, Text: "new words here", Mode: "editor",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	res, err := s.Commit(id, dto.CommitOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	msg := res.Revision.Message
+	if !strings.Contains(msg, "editor") || !strings.Contains(msg, "+new") || !strings.Contains(msg, "-old") {
+		t.Fatalf("derived message = %q, want preset + word diff", msg)
+	}
+}
+
 func TestBlockNotFound(t *testing.T) {
 	s := newTestStore(t)
 	id := openDoc(t, s, "hello")
@@ -205,14 +345,14 @@ func TestSaveTreeAutosaves(t *testing.T) {
 	id := openDoc(t, s, "a paragraph")
 
 	blocks, _ := s.Blocks(id)
-	rev, err := s.SaveTree(id, []dto.BlockWrite{
+	res, err := s.SaveTree(id, []dto.BlockWrite{
 		{ID: &blocks[0].ID, Kind: dto.BlockKindParagraph, Text: "a changed paragraph"},
-	}, false)
+	}, dto.SaveOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if rev.ID == "" || rev.Message == "" {
-		t.Fatalf("saveTree revision = %+v, want populated", rev)
+	if res.Revision.ID == "" || res.Revision.Message == "" || !res.Committed {
+		t.Fatalf("saveTree result = %+v, want a populated revision", res)
 	}
 
 	// SaveTree is the autosave path: one snapshot commit exists.
@@ -236,7 +376,7 @@ func TestSaveTreeNoopWhenUnchanged(t *testing.T) {
 	blocks, _ := s.Blocks(id)
 	if _, err := s.SaveTree(id, []dto.BlockWrite{
 		{ID: &blocks[0].ID, Kind: dto.BlockKindParagraph, Text: "a paragraph"},
-	}, true); err != nil {
+	}, dto.SaveOptions{WriteThrough: true}); err != nil {
 		t.Fatal(err)
 	}
 	// An unchanged tree is a no-op: no new commit.
@@ -257,10 +397,10 @@ func TestSaveTreeMintsAndDrops(t *testing.T) {
 	// Reorder + mint a new block + drop the second. New block has no ID; the
 	// engine mints it (ADR-0038 §2).
 	tree := []dto.BlockWrite{
-		{Kind: dto.BlockKindParagraph, Text: "fresh block"},     // new (no id)
+		{Kind: dto.BlockKindParagraph, Text: "fresh block"},                  // new (no id)
 		{ID: &blocks[0].ID, Kind: dto.BlockKindParagraph, Text: "block one"}, // kept
 	}
-	if _, err := s.SaveTree(id, tree, false); err != nil {
+	if _, err := s.SaveTree(id, tree, dto.SaveOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	after, _ := s.Blocks(id)
@@ -293,7 +433,7 @@ func TestSaveTreeDropsOpenCandidates(t *testing.T) {
 	// A manual save of the block drops its open candidates (ADR-0038 §5).
 	if _, err := s.SaveTree(id, []dto.BlockWrite{
 		{ID: &blocks[0].ID, Kind: dto.BlockKindParagraph, Text: "human typed"},
-	}, false); err != nil {
+	}, dto.SaveOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	if cands, _ := s.Candidates(id, blocks[0].ID); len(cands) != 0 {
@@ -328,10 +468,14 @@ func TestSaveTreeWriteThrough(t *testing.T) {
 	id, path := openDocPath(t, s, "a paragraph")
 
 	blocks, _ := s.Blocks(id)
-	if _, err := s.SaveTree(id, []dto.BlockWrite{
+	res, err := s.SaveTree(id, []dto.BlockWrite{
 		{ID: &blocks[0].ID, Kind: dto.BlockKindParagraph, Text: "a changed paragraph"},
-	}, true); err != nil {
+	}, dto.SaveOptions{WriteThrough: true})
+	if err != nil {
 		t.Fatal(err)
+	}
+	if !res.WrittenThrough || res.Path == "" {
+		t.Fatalf("write-through not reported: %+v", res)
 	}
 	// Explicit save mirrors the canonical markdown back to the opened file.
 	if got := readFile(t, path); got != "a changed paragraph" {
@@ -346,7 +490,7 @@ func TestSaveTreeAutosaveDoesNotWriteBack(t *testing.T) {
 	blocks, _ := s.Blocks(id)
 	if _, err := s.SaveTree(id, []dto.BlockWrite{
 		{ID: &blocks[0].ID, Kind: dto.BlockKindParagraph, Text: "autosaved change"},
-	}, false); err != nil {
+	}, dto.SaveOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	// The periodic autosave snapshots the engine only; the disk file is untouched.
@@ -363,7 +507,7 @@ func TestSaveTreeNoopDoesNotWriteBack(t *testing.T) {
 	// Unchanged tree + writeThrough: no commit, no file write (ADR-0039 §4).
 	if _, err := s.SaveTree(id, []dto.BlockWrite{
 		{ID: &blocks[0].ID, Kind: dto.BlockKindParagraph, Text: "a paragraph"},
-	}, true); err != nil {
+	}, dto.SaveOptions{WriteThrough: true}); err != nil {
 		t.Fatal(err)
 	}
 	hist, _ := s.History(id)
@@ -372,6 +516,72 @@ func TestSaveTreeNoopDoesNotWriteBack(t *testing.T) {
 	}
 	if got := readFile(t, path); got != "a paragraph" {
 		t.Fatalf("file after no-op save = %q", got)
+	}
+}
+
+// TestSaveTreeNoopMirrorsStaleDisk covers ADR-0047 §4: an engine-only autosave
+// leaves the disk stale; a later no-op explicit save mirrors it with no commit.
+func TestSaveTreeNoopMirrorsStaleDisk(t *testing.T) {
+	s := newTestStore(t)
+	id, path := openDocPath(t, s, "a paragraph")
+	blocks, _ := s.Blocks(id)
+
+	tree := []dto.BlockWrite{
+		{ID: &blocks[0].ID, Kind: dto.BlockKindParagraph, Text: "engine change"},
+	}
+	if _, err := s.SaveTree(id, tree, dto.SaveOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if got := readFile(t, path); got != "a paragraph" {
+		t.Fatalf("autosave must not touch the disk, got %q", got)
+	}
+
+	// Same tree (no engine change) + explicit save: mirror the stale disk.
+	res, err := s.SaveTree(id, tree, dto.SaveOptions{WriteThrough: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.WrittenThrough || res.Committed {
+		t.Fatalf("no-op mirror result = %+v, want writtenThrough without a commit", res)
+	}
+	if got := readFile(t, path); got != "engine change" {
+		t.Fatalf("file after no-op mirror = %q", got)
+	}
+	hist, _ := s.History(id)
+	if len(hist) != 1 {
+		t.Fatalf("history = %d, want 1 (no new commit)", len(hist))
+	}
+}
+
+// TestSaveTreeNoopExternalConflict covers ADR-0047 §4: a no-op save over an
+// externally changed disk is a typed conflict, never a clobber.
+func TestSaveTreeNoopExternalConflict(t *testing.T) {
+	s := newTestStore(t)
+	id, path := openDocPath(t, s, "a paragraph")
+	blocks, _ := s.Blocks(id)
+
+	if err := os.WriteFile(path, []byte("external edit"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tree := []dto.BlockWrite{
+		{ID: &blocks[0].ID, Kind: dto.BlockKindParagraph, Text: "a paragraph"},
+	}
+	_, err := s.SaveTree(id, tree, dto.SaveOptions{WriteThrough: true})
+	var fce *FileChangedExternallyError
+	if !errors.As(err, &fce) {
+		t.Fatalf("want FileChangedExternallyError, got %v", err)
+	}
+	if fce.CurrentHash != contentHash([]byte("external edit")) {
+		t.Fatalf("current hash = %q, want the on-disk hash", fce.CurrentHash)
+	}
+	if got := readFile(t, path); got != "external edit" {
+		t.Fatalf("conflict must not clobber, got %q", got)
+	}
+
+	// The periodic autosave also refuses to paper over an external change.
+	_, err = s.SaveTree(id, tree, dto.SaveOptions{})
+	if !errors.Is(err, ErrFileChangedExternally) {
+		t.Fatalf("autosave over an external change = %v, want conflict", err)
 	}
 }
 
@@ -384,23 +594,150 @@ func TestCommitWritesThrough(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Accepting a candidate is a commit: the opened file must change too.
-	if err := s.Commit(id, "accepted"); err != nil {
+	res, err := s.Commit(id, dto.CommitOptions{})
+	if err != nil {
 		t.Fatal(err)
+	}
+	if !res.WrittenThrough || !res.Committed || res.Path == "" {
+		t.Fatalf("commit result = %+v, want committed write-through", res)
 	}
 	if got := readFile(t, path); got != "after edit" {
 		t.Fatalf("file after commit = %q", got)
 	}
 }
 
-func TestCommitWithoutCandidatesDoesNotWriteBack(t *testing.T) {
+// TestCommitConflictLeavesEverythingIntact covers ADR-0047 §3: an external
+// change between stage and accept refuses the write and leaves the candidate.
+func TestCommitConflictLeavesEverythingIntact(t *testing.T) {
 	s := newTestStore(t)
-	id, path := openDocPath(t, s, "no candidates")
+	id, path := openDocPath(t, s, "before edit")
 
-	if err := s.Commit(id, "empty accept"); err != nil {
+	blocks, _ := s.Blocks(id)
+	if _, err := s.ApplyEdit(context.Background(), id, dto.BlockEdit{BlockID: blocks[0].ID, Text: "after edit"}); err != nil {
 		t.Fatal(err)
 	}
-	if got := readFile(t, path); got != "no candidates" {
-		t.Fatalf("file after empty accept = %q", got)
+	if err := os.WriteFile(path, []byte("external edit"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := s.Commit(id, dto.CommitOptions{})
+	var fce *FileChangedExternallyError
+	if !errors.As(err, &fce) {
+		t.Fatalf("want FileChangedExternallyError, got %v", err)
+	}
+	if fce.CurrentHash != contentHash([]byte("external edit")) {
+		t.Fatalf("current hash = %q", fce.CurrentHash)
+	}
+	if got := readFile(t, path); got != "external edit" {
+		t.Fatalf("conflict clobbered the disk: %q", got)
+	}
+	hist, _ := s.History(id)
+	if len(hist) != 0 {
+		t.Fatalf("history = %d, want 0 (no commit on conflict)", len(hist))
+	}
+	after, _ := s.Blocks(id)
+	if after[0].Text != "before edit" {
+		t.Fatalf("worktree changed on conflict: %q", after[0].Text)
+	}
+	if cands, _ := s.Candidates(id, blocks[0].ID); len(cands) != 1 {
+		t.Fatalf("candidates = %d, want 1 left staged", len(cands))
+	}
+}
+
+// TestCommitOverwriteWins covers the explicit opt-in overwrite (ADR-0047 §3).
+func TestCommitOverwriteWins(t *testing.T) {
+	s := newTestStore(t)
+	id, path := openDocPath(t, s, "before edit")
+
+	blocks, _ := s.Blocks(id)
+	if _, err := s.ApplyEdit(context.Background(), id, dto.BlockEdit{BlockID: blocks[0].ID, Text: "after edit"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("external edit"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := s.Commit(id, dto.CommitOptions{Overwrite: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Committed || !res.WrittenThrough {
+		t.Fatalf("overwrite result = %+v", res)
+	}
+	if got := readFile(t, path); got != "after edit" {
+		t.Fatalf("file after overwrite = %q", got)
+	}
+}
+
+func TestCommitStaleCandidateGuardFailed(t *testing.T) {
+	s := newTestStore(t)
+	id, path := openDocPath(t, s, "block A")
+
+	blocks, _ := s.Blocks(id)
+	if _, err := s.ApplyEdit(context.Background(), id, dto.BlockEdit{
+		BlockID: blocks[0].ID, Text: "proposed", Mode: "editor",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// The file changes externally with the same block count; the re-read keeps
+	// stable IDs, so the staged candidate is now stale.
+	if err := os.WriteFile(path, []byte("externally changed"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res, err := s.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.ExternalChange {
+		t.Fatal("expected an external change on reopen")
+	}
+
+	_, err = s.Commit(id, dto.CommitOptions{})
+	if !errors.Is(err, ErrGuardFailed) {
+		t.Fatalf("stale candidate commit = %v, want ErrGuardFailed", err)
+	}
+	// No bytes written and no commit created.
+	if got := readFile(t, path); got != "externally changed" {
+		t.Fatalf("stale commit wrote bytes: %q", got)
+	}
+	hist, _ := s.History(id)
+	if len(hist) != 0 {
+		t.Fatalf("history = %d, want 0", len(hist))
+	}
+	after, _ := s.Blocks(id)
+	if after[0].Text != "externally changed" {
+		t.Fatalf("worktree = %q", after[0].Text)
+	}
+}
+
+func TestCandidateOrderNewestFirst(t *testing.T) {
+	s := newTestStore(t)
+	id := openDoc(t, s, "block")
+
+	blocks, _ := s.Blocks(id)
+	if _, err := s.ApplyEdit(context.Background(), id, dto.BlockEdit{BlockID: blocks[0].ID, Text: "first"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ApplyEdit(context.Background(), id, dto.BlockEdit{BlockID: blocks[0].ID, Text: "second"}); err != nil {
+		t.Fatal(err)
+	}
+	cands, err := s.Candidates(id, blocks[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cands) != 2 {
+		t.Fatalf("candidates = %d, want 2", len(cands))
+	}
+	if cands[0].Text != "second" {
+		t.Fatalf("candidates[0] = %q, want the newest (ADR-0047 §5)", cands[0].Text)
+	}
+	if _, err := s.Commit(id, dto.CommitOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	after, _ := s.Blocks(id)
+	if after[0].Text != "second" {
+		t.Fatalf("commit applied %q, want the newest candidate", after[0].Text)
 	}
 }
 
@@ -410,14 +747,14 @@ func TestWriteBackPreservesFileMode(t *testing.T) {
 	if err := os.WriteFile(path, []byte("a paragraph"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	id, err := s.Open(path)
+	res, err := s.Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	blocks, _ := s.Blocks(id)
-	if _, err := s.SaveTree(id, []dto.BlockWrite{
+	blocks, _ := s.Blocks(res.DocumentID)
+	if _, err := s.SaveTree(res.DocumentID, []dto.BlockWrite{
 		{ID: &blocks[0].ID, Kind: dto.BlockKindParagraph, Text: "changed"},
-	}, true); err != nil {
+	}, dto.SaveOptions{WriteThrough: true}); err != nil {
 		t.Fatal(err)
 	}
 	info, err := os.Stat(path)
@@ -426,5 +763,105 @@ func TestWriteBackPreservesFileMode(t *testing.T) {
 	}
 	if perm := info.Mode().Perm(); perm != 0o600 {
 		t.Fatalf("file mode = %o, want 600", perm)
+	}
+}
+
+// TestWriteBackSymlinkPreserved covers ADR-0047 §7: a symlinked vault path is
+// written through; the link is never replaced by a regular file.
+func TestWriteBackSymlinkPreserved(t *testing.T) {
+	s := newTestStore(t)
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target.md")
+	if err := os.WriteFile(target, []byte("original"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "link.md")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := s.Open(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	blocks, _ := s.Blocks(res.DocumentID)
+	if _, err := s.SaveTree(res.DocumentID, []dto.BlockWrite{
+		{ID: &blocks[0].ID, Kind: dto.BlockKindParagraph, Text: "changed through"},
+	}, dto.SaveOptions{WriteThrough: true}); err != nil {
+		t.Fatal(err)
+	}
+
+	info, err := os.Lstat(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatal("symlink was replaced by a regular file (ADR-0047 §7)")
+	}
+	if got := readFile(t, target); got != "changed through" {
+		t.Fatalf("symlink target = %q", got)
+	}
+}
+
+// TestAtomicWriteFileWritesThroughSymlink covers ADR-0047 §7 at the leaf: a
+// symlink at the write path is followed, never renamed over.
+func TestAtomicWriteFileWritesThroughSymlink(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target.md")
+	if err := os.WriteFile(target, []byte("original"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "link.md")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := atomicWriteFile(link, []byte("through the link")); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Lstat(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatal("atomicWriteFile replaced the symlink with a regular file")
+	}
+	if got := readFile(t, target); got != "through the link" {
+		t.Fatalf("target = %q", got)
+	}
+}
+
+// TestWriteBackMissingFileConflicts covers the externally-deleted case: the
+// write is refused until the client explicitly overwrites.
+func TestWriteBackMissingFileConflicts(t *testing.T) {
+	s := newTestStore(t)
+	id, path := openDocPath(t, s, "a paragraph")
+	blocks, _ := s.Blocks(id)
+
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	_, err := s.SaveTree(id, []dto.BlockWrite{
+		{ID: &blocks[0].ID, Kind: dto.BlockKindParagraph, Text: "changed"},
+	}, dto.SaveOptions{WriteThrough: true})
+	var fce *FileChangedExternallyError
+	if !errors.As(err, &fce) {
+		t.Fatalf("want FileChangedExternallyError, got %v", err)
+	}
+	if fce.CurrentHash != "" {
+		t.Fatalf("deleted file current hash = %q, want empty", fce.CurrentHash)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatal("conflict must not recreate the file")
+	}
+
+	// Explicit overwrite recreates it.
+	if _, err := s.SaveTree(id, []dto.BlockWrite{
+		{ID: &blocks[0].ID, Kind: dto.BlockKindParagraph, Text: "changed"},
+	}, dto.SaveOptions{WriteThrough: true, Overwrite: true}); err != nil {
+		t.Fatal(err)
+	}
+	if got := readFile(t, path); got != "changed" {
+		t.Fatalf("file after overwrite = %q", got)
 	}
 }

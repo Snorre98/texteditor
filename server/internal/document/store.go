@@ -26,11 +26,11 @@ import (
 // app.db (documents/blocks/candidates), the git history repo, and the engine
 // working tree (ADR-0020 §2).
 type DocumentStore interface {
-	Open(path string) (documentID string, err error)
-	SaveTree(documentID string, tree []dto.BlockWrite, writeThrough bool) (dto.Revision, error)
+	Open(path string) (dto.OpenResult, error)
+	SaveTree(documentID string, tree []dto.BlockWrite, opts dto.SaveOptions) (dto.WriteResult, error)
 	Blocks(documentID string) ([]dto.Block, error)
 	ApplyEdit(ctx context.Context, documentID string, edit dto.BlockEdit) (dto.Revision, error)
-	Commit(documentID string, msg string) error
+	Commit(documentID string, opts dto.CommitOptions) (dto.WriteResult, error)
 	Diff(documentID string, baseRev, rev string) ([]dto.WordEdit, error)
 	History(documentID string) ([]dto.Revision, error)
 	Candidates(documentID string, blockID string) ([]dto.Candidate, error)
@@ -39,14 +39,35 @@ type DocumentStore interface {
 // Interface is an alias for DocumentStore (the contracted name, interface.md §9).
 type Interface = DocumentStore
 
-// Typed errors (ADR-0029 §4, §5; failure-semantics §3).
+// Typed errors (ADR-0029 §4, §5; ADR-0047 §3; failure-semantics §3).
 var (
 	ErrGuardFailed      = errors.New("guard-failed: a guarded block's content changed")
 	ErrInvalidStructure = errors.New("invalid-structure: text failed structural validation")
 	ErrBlockNotFound    = errors.New("block not found")
 	ErrDocumentNotFound = errors.New("document not found")
 	ErrUnknownRevision  = errors.New("unknown revision")
+	// ErrFileChangedExternally is the sentinel for the write-through conflict
+	// (ADR-0047 §3): the on-disk hash differs from the engine's last-known hash.
+	ErrFileChangedExternally = errors.New("file-changed-externally: the file changed on disk since the engine last read it")
 )
+
+// FileChangedExternallyError carries the current on-disk state so the API layer
+// can return the typed 409 body (ADR-0047 §3). CurrentHash is empty when the
+// file was deleted externally.
+type FileChangedExternallyError struct {
+	Path        string
+	CurrentHash string
+}
+
+func (e *FileChangedExternallyError) Error() string {
+	if e.CurrentHash == "" {
+		return fmt.Sprintf("%s: %s (missing on disk)", ErrFileChangedExternally, e.Path)
+	}
+	return fmt.Sprintf("%s: %s (current hash %s)", ErrFileChangedExternally, e.Path, e.CurrentHash)
+}
+
+// Unwrap makes errors.Is(err, ErrFileChangedExternally) true.
+func (e *FileChangedExternallyError) Unwrap() error { return ErrFileChangedExternally }
 
 // GuardFailure names one changed block caught by a guard (ADR-0029 §4).
 type GuardFailure struct {
@@ -125,31 +146,40 @@ func (s *store) lockFor(docID string) *sync.Mutex {
 	return m
 }
 
-// Open resolves a document by absolute path: an existing row re-opens; otherwise
-// the file is parsed into a block tree, stable UUIDs are minted (ADR-0020 §3),
-// the canonical markdown is written to the worktree, and rows are inserted.
-func (s *store) Open(path string) (string, error) {
-	abs, err := filepath.Abs(path)
-	if err != nil {
-		return "", err
-	}
+// Open resolves a document by canonical path (ADR-0047 §2): an existing row
+// re-opens and revalidates the disk file against the engine's last-known hash —
+// a mismatch re-reads the file into the worktree and reports ExternalChange;
+// otherwise the file is parsed into a block tree, stable UUIDs are minted
+// (ADR-0020 §3), the canonical markdown is written to the worktree, and rows are
+// inserted. Symlink and case aliases of the same file resolve to one row.
+func (s *store) Open(path string) (dto.OpenResult, error) {
+	canonical, key := canonicalPath(path)
 
-	var id string
-	err = s.db.QueryRow(`SELECT id FROM documents WHERE path = ?`, abs).Scan(&id)
+	var id, storedPath, storedHash string
+	err := s.db.QueryRow(
+		`SELECT id, path, content_hash FROM documents WHERE path_key = ?`, key,
+	).Scan(&id, &storedPath, &storedHash)
+	if errors.Is(err, sql.ErrNoRows) {
+		// Legacy rows may predate the path_key backfill (non-ASCII case folds);
+		// fall back to the raw path so an alias still resolves to one row.
+		err = s.db.QueryRow(
+			`SELECT id, path, content_hash FROM documents WHERE path = ?`, canonical,
+		).Scan(&id, &storedPath, &storedHash)
+	}
 	if err == nil {
-		return id, nil
+		return s.reopen(id, canonical, key, storedPath, storedHash)
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
-		return "", err
+		return dto.OpenResult{}, err
 	}
 
 	var src string
-	b, err := os.ReadFile(abs)
+	b, err := os.ReadFile(canonical)
 	if err != nil {
 		if os.IsNotExist(err) {
 			src = ""
 		} else {
-			return "", err
+			return dto.OpenResult{}, err
 		}
 	} else {
 		src = string(b)
@@ -160,17 +190,17 @@ func (s *store) Open(path string) (string, error) {
 	now := time.Now().Unix()
 
 	if _, err := s.db.Exec(
-		`INSERT INTO documents (id, path, root_block_id, updated_at) VALUES (?, ?, ?, ?)`,
-		docID, abs, rootID, now,
+		`INSERT INTO documents (id, path, path_key, root_block_id, updated_at, content_hash) VALUES (?, ?, ?, ?, ?, ?)`,
+		docID, canonical, key, rootID, now, contentHash([]byte(src)),
 	); err != nil {
-		return "", err
+		return dto.OpenResult{}, err
 	}
 
 	blocks := parseBlocks(src)
 	if len(blocks) == 0 {
 		// An empty document still has a root block (a document is a tree).
 		if err := s.insertBlock(docID, rootID, nil, "", dto.BlockKindParagraph, 0); err != nil {
-			return "", err
+			return dto.OpenResult{}, err
 		}
 	} else {
 		for i, pb := range blocks {
@@ -179,7 +209,7 @@ func (s *store) Open(path string) (string, error) {
 				id = uuid.NewString()
 			}
 			if err := s.insertBlock(docID, id, nil, "", pb.Kind, i); err != nil {
-				return "", err
+				return dto.OpenResult{}, err
 			}
 		}
 	}
@@ -187,12 +217,128 @@ func (s *store) Open(path string) (string, error) {
 	// Write canonical markdown into the worktree file (the doc's single owner).
 	h, err := s.histFor(docID)
 	if err != nil {
-		return "", err
+		return dto.OpenResult{}, err
 	}
 	if err := h.writeFile(s.workfileName, []byte(src)); err != nil {
-		return "", err
+		return dto.OpenResult{}, err
 	}
-	return docID, nil
+	return dto.OpenResult{DocumentID: docID, Path: canonical}, nil
+}
+
+// reopen revalidates an existing document row (ADR-0047 §2). It normalizes the
+// stored canonical path, initializes the last-known disk hash for legacy rows,
+// and on a disk mismatch re-reads the file into the worktree.
+func (s *store) reopen(id, canonical, key, storedPath, storedHash string) (dto.OpenResult, error) {
+	s.lockFor(id).Lock()
+	defer s.lockFor(id).Unlock()
+
+	h, err := s.histFor(id)
+	if err != nil {
+		return dto.OpenResult{}, err
+	}
+
+	if storedPath != canonical {
+		if _, err := s.db.Exec(
+			`UPDATE documents SET path = ?, path_key = ? WHERE id = ?`, canonical, key, id,
+		); err != nil {
+			return dto.OpenResult{}, err
+		}
+	}
+
+	worktreeText, err := h.readFile(s.workfileName)
+	if err != nil {
+		return dto.OpenResult{}, err
+	}
+	lastKnown := storedHash
+	if lastKnown == "" {
+		// Legacy row: the worktree is the engine's copy of the last write, so it
+		// is the honest last-known baseline for the first revalidation.
+		lastKnown = contentHash([]byte(worktreeText))
+		if _, err := s.db.Exec(`UPDATE documents SET content_hash = ? WHERE id = ?`, lastKnown, id); err != nil {
+			return dto.OpenResult{}, err
+		}
+	}
+
+	disk, err := os.ReadFile(canonical)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return dto.OpenResult{DocumentID: id, Path: canonical}, nil
+		}
+		return dto.OpenResult{}, err
+	}
+	diskHash := contentHash(disk)
+	if diskHash == lastKnown {
+		return dto.OpenResult{DocumentID: id, Path: canonical}, nil
+	}
+
+	// External change: re-read the file into the worktree (ADR-0047 §2). The
+	// structure is preserved when the block count still matches (stable IDs and
+	// candidates survive; Commit re-validates their base hash), and rebuilt with
+	// fresh IDs when it does not.
+	if err := s.resyncExternal(id, h, disk); err != nil {
+		return dto.OpenResult{}, err
+	}
+	if _, err := s.db.Exec(
+		`UPDATE documents SET content_hash = ?, updated_at = ? WHERE id = ?`,
+		diskHash, time.Now().Unix(), id,
+	); err != nil {
+		return dto.OpenResult{}, err
+	}
+	return dto.OpenResult{DocumentID: id, Path: canonical, ExternalChange: true}, nil
+}
+
+// resyncExternal replaces the worktree bytes with the externally changed disk
+// content (the caller has already written them). Same block count preserves the
+// stable IDs and staged candidates; a changed count rebuilds the structure.
+func (s *store) resyncExternal(docID string, h *historyStore, content []byte) error {
+	if err := h.writeFile(s.workfileName, content); err != nil {
+		return err
+	}
+
+	parsed := parseBlocks(string(content))
+	rowIDs, err := s.blockIDs(docID)
+	if err != nil {
+		return err
+	}
+	if len(parsed) == len(rowIDs) {
+		for i, pb := range parsed {
+			if _, err := s.db.Exec(`UPDATE blocks SET kind = ? WHERE id = ?`, string(pb.Kind), rowIDs[i]); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	rootID := uuid.NewString()
+	if _, err := s.db.Exec(
+		`DELETE FROM candidates WHERE block_id IN (SELECT id FROM blocks WHERE document_id = ?)`, docID,
+	); err != nil {
+		return err
+	}
+	if _, err := s.db.Exec(`DELETE FROM blocks WHERE document_id = ?`, docID); err != nil {
+		return err
+	}
+	if len(parsed) == 0 {
+		if err := s.insertBlock(docID, rootID, nil, "", dto.BlockKindParagraph, 0); err != nil {
+			return err
+		}
+		return s.setRootBlock(docID, rootID)
+	}
+	for i, pb := range parsed {
+		bid := rootID
+		if i > 0 {
+			bid = uuid.NewString()
+		}
+		if err := s.insertBlock(docID, bid, nil, "", pb.Kind, i); err != nil {
+			return err
+		}
+	}
+	return s.setRootBlock(docID, rootID)
+}
+
+func (s *store) setRootBlock(docID, rootID string) error {
+	_, err := s.db.Exec(`UPDATE documents SET root_block_id = ? WHERE id = ?`, rootID, docID)
+	return err
 }
 
 func (s *store) insertBlock(docID, id string, parent *string, pKind string, kind dto.BlockKind, pos int) error {
@@ -208,11 +354,12 @@ func (s *store) insertBlock(docID, id string, parent *string, pKind string, kind
 // but absent from the request is dropped, a changed kind/parent retypes/moves. It
 // normalizes on write and formats on commit (ADR-0029 §6), drops every block's
 // open candidates (human keystrokes supersede AI proposals), and commits an
-// `autosave @ <ts>` snapshot iff anything changed — an unchanged tree returns the
-// current HEAD with no new commit. When writeThrough is true (explicit Save /
-// Cmd+S, not the periodic autosave), the canonical markdown is also mirrored back
-// to the opened file path (ADR-0039).
-func (s *store) SaveTree(documentID string, tree []dto.BlockWrite, writeThrough bool) (dto.Revision, error) {
+// `autosave @ <ts>` snapshot iff anything changed. When WriteThrough is true
+// (explicit Save / Cmd+S, not the periodic autosave), the canonical markdown is
+// also mirrored back to the opened file path (ADR-0039). A no-op save is no
+// longer silent: per ADR-0047 §4 it mirrors a stale disk (explicit save only) and
+// refuses an externally changed file with a typed conflict.
+func (s *store) SaveTree(documentID string, tree []dto.BlockWrite, opts dto.SaveOptions) (dto.WriteResult, error) {
 	s.lockFor(documentID).Lock()
 	defer s.lockFor(documentID).Unlock()
 
@@ -226,7 +373,7 @@ func (s *store) SaveTree(documentID string, tree []dto.BlockWrite, writeThrough 
 		documentID,
 	)
 	if err != nil {
-		return dto.Revision{}, err
+		return dto.WriteResult{}, err
 	}
 	defer rows.Close()
 	var cur []curRow
@@ -236,7 +383,7 @@ func (s *store) SaveTree(documentID string, tree []dto.BlockWrite, writeThrough 
 		var parent sql.NullString
 		var kind string
 		if err := rows.Scan(&r.id, &parent, &kind); err != nil {
-			return dto.Revision{}, err
+			return dto.WriteResult{}, err
 		}
 		if parent.Valid {
 			r.parent = &parent.String
@@ -246,7 +393,7 @@ func (s *store) SaveTree(documentID string, tree []dto.BlockWrite, writeThrough 
 		curByID[r.id] = true
 	}
 	if err := rows.Err(); err != nil {
-		return dto.Revision{}, err
+		return dto.WriteResult{}, err
 	}
 
 	type block struct {
@@ -273,7 +420,7 @@ func (s *store) SaveTree(documentID string, tree []dto.BlockWrite, writeThrough 
 
 	canonical := serializeBlocks(texts)
 
-	// changed = structure or content differs (a no-op returns the current HEAD).
+	// changed = structure or content differs.
 	changed := len(cur) != len(out)
 	if !changed {
 		for i := range cur {
@@ -286,26 +433,39 @@ func (s *store) SaveTree(documentID string, tree []dto.BlockWrite, writeThrough 
 
 	h, err := s.histFor(documentID)
 	if err != nil {
-		return dto.Revision{}, err
+		return dto.WriteResult{}, err
 	}
 	currentText, err := h.readFile(s.workfileName)
 	if err != nil {
-		return dto.Revision{}, err
+		return dto.WriteResult{}, err
 	}
 	if canonical != currentText {
 		changed = true
 	}
 	if !changed {
-		return s.currentRevision(documentID)
+		// ADR-0047 §4: the tree matches the worktree, but the disk may not.
+		rev, err := s.currentRevision(documentID)
+		if err != nil {
+			return dto.WriteResult{}, err
+		}
+		res, err := s.noopResync(documentID, canonical, opts)
+		if err != nil {
+			return dto.WriteResult{}, err
+		}
+		res.Revision = rev
+		return res, nil
 	}
 
 	// Write-through (ADR-0039 §3): mirror to the opened file *before* the
 	// worktree write / DB rewrite / git commit. A failure aborts the save —
 	// nothing is committed, the tree stays dirty, and a retry re-attempts.
-	if writeThrough {
-		if err := s.writeBack(documentID, canonical); err != nil {
-			return dto.Revision{}, err
+	res := dto.WriteResult{WrittenThrough: opts.WriteThrough}
+	if opts.WriteThrough {
+		path, err := s.writeBack(documentID, canonical, opts.Overwrite)
+		if err != nil {
+			return dto.WriteResult{}, err
 		}
+		res.Path = path
 	}
 
 	// Drop open candidates (human keystrokes supersede the AI proposal), rewrite
@@ -314,29 +474,69 @@ func (s *store) SaveTree(documentID string, tree []dto.BlockWrite, writeThrough 
 		`DELETE FROM candidates WHERE block_id IN (SELECT id FROM blocks WHERE document_id = ?)`,
 		documentID,
 	); err != nil {
-		return dto.Revision{}, err
+		return dto.WriteResult{}, err
 	}
 	if _, err := s.db.Exec(`DELETE FROM blocks WHERE document_id = ?`, documentID); err != nil {
-		return dto.Revision{}, err
+		return dto.WriteResult{}, err
 	}
 	for i, b := range out {
 		if err := s.insertBlock(documentID, b.id, b.parent, "", b.kind, i); err != nil {
-			return dto.Revision{}, err
+			return dto.WriteResult{}, err
 		}
 	}
 	if err := h.writeFile(s.workfileName, []byte(canonical)); err != nil {
-		return dto.Revision{}, err
+		return dto.WriteResult{}, err
 	}
 	now := time.Now().Unix()
 	msg := fmt.Sprintf("autosave @ %d", now)
 	hash, err := h.commit(msg)
 	if err != nil {
-		return dto.Revision{}, err
+		return dto.WriteResult{}, err
 	}
 	if _, err := s.db.Exec(`UPDATE documents SET updated_at = ? WHERE id = ?`, now, documentID); err != nil {
-		return dto.Revision{}, err
+		return dto.WriteResult{}, err
 	}
-	return dto.Revision{ID: hash, Message: msg, Timestamp: now}, nil
+	res.Revision = dto.Revision{ID: hash, Message: msg, Timestamp: now}
+	res.Committed = true
+	return res, nil
+}
+
+// noopResync implements ADR-0047 §4 for a save whose tree already matches the
+// worktree. disk == canonical is a true no-op; a stale disk (unchanged since the
+// engine last read it) is mirrored only on an explicit write-through; an
+// external change is refused with a typed conflict regardless of writeThrough.
+func (s *store) noopResync(documentID, canonical string, opts dto.SaveOptions) (dto.WriteResult, error) {
+	var path, lastKnown string
+	if err := s.db.QueryRow(`SELECT path, content_hash FROM documents WHERE id = ?`, documentID).
+		Scan(&path, &lastKnown); err != nil {
+		return dto.WriteResult{}, err
+	}
+
+	b, readErr := os.ReadFile(path)
+	missing := os.IsNotExist(readErr)
+	if readErr != nil && !missing {
+		return dto.WriteResult{}, readErr
+	}
+	if missing {
+		if !opts.Overwrite {
+			return dto.WriteResult{}, &FileChangedExternallyError{Path: path}
+		}
+	} else if contentHash(b) == contentHash([]byte(canonical)) {
+		return dto.WriteResult{}, nil // already in sync
+	} else if contentHash(b) != lastKnown && !opts.Overwrite {
+		return dto.WriteResult{}, &FileChangedExternallyError{Path: path, CurrentHash: contentHash(b)}
+	}
+
+	// A safe (or explicitly overwriting) stale disk only re-syncs on an
+	// explicit write-through; the periodic autosave never touches the disk.
+	if !opts.WriteThrough {
+		return dto.WriteResult{}, nil
+	}
+	writtenPath, err := s.writeBack(documentID, canonical, opts.Overwrite)
+	if err != nil {
+		return dto.WriteResult{}, err
+	}
+	return dto.WriteResult{WrittenThrough: true, Path: writtenPath}, nil
 }
 
 // currentRevision returns the newest revision (or a zero revision with no commits).
@@ -469,9 +669,19 @@ func (s *store) ApplyEdit(ctx context.Context, documentID string, edit dto.Block
 	if err != nil {
 		return dto.Revision{}, err
 	}
+	// The preset that produced the edit drives the derived commit message
+	// (ADR-0020 §1). A client re-stage (accept path) carries no preset; inherit
+	// the newest staged candidate's mode so it survives to Commit.
+	mode := edit.Mode
+	if mode == "" {
+		_ = s.db.QueryRow(
+			`SELECT mode FROM candidates WHERE block_id = ? ORDER BY ts DESC, rowid DESC LIMIT 1`,
+			edit.BlockID,
+		).Scan(&mode)
+	}
 	if _, err := s.db.ExecContext(ctx,
-		`INSERT INTO candidates (block_id, base_rev, text, mode, ts) VALUES (?, ?, ?, '', ?)`,
-		edit.BlockID, base, canonical, time.Now().Unix(),
+		`INSERT INTO candidates (block_id, base_rev, base_hash, text, mode, ts) VALUES (?, ?, ?, ?, ?, ?)`,
+		edit.BlockID, base, target.Hash, canonical, mode, time.Now().Unix(),
 	); err != nil {
 		return dto.Revision{}, err
 	}
@@ -480,72 +690,120 @@ func (s *store) ApplyEdit(ctx context.Context, documentID string, edit dto.Block
 	return dto.Revision{ID: base, Message: "candidate staged", Timestamp: time.Now().Unix()}, nil
 }
 
-// Commit accepts staged candidates: formats the accepted blocks (ADR-0029 §2)
-// and makes one git commit (ADR-0020 §1).
-func (s *store) Commit(documentID string, msg string) error {
+// Commit accepts staged candidates: re-validates every candidate's base content
+// hash (ADR-0047 §5), formats the accepted blocks (ADR-0029 §2), derives the
+// commit message `mode · blockID · diff` (ADR-0020 §1, ADR-0047 §8), makes one
+// git commit, and mirrors the canonical markdown to the opened file. An empty
+// accept creates no commit and touches nothing.
+func (s *store) Commit(documentID string, opts dto.CommitOptions) (dto.WriteResult, error) {
 	s.lockFor(documentID).Lock()
 	defer s.lockFor(documentID).Unlock()
 
 	blocks, err := s.Blocks(documentID)
 	if err != nil {
-		return err
+		return dto.WriteResult{}, err
 	}
 	byID := map[string]dto.Block{}
 	for _, b := range blocks {
 		byID[b.ID] = b
 	}
 
-	// Collect the latest candidate per block and apply it.
-	rows, err := s.db.Query(
-		`SELECT block_id, text FROM candidates c
-		 WHERE c.block_id IN (SELECT id FROM blocks WHERE document_id = ?)
-		 ORDER BY c.ts DESC`, documentID)
-	if err != nil {
-		return err
+	// Collect the latest candidate per block in deterministic newest-first order
+	// (ts DESC, rowid DESC — ADR-0047 §5).
+	type staged struct {
+		text, baseHash, mode string
 	}
-	applied := map[string]string{}
+	rows, err := s.db.Query(
+		`SELECT block_id, text, base_hash, mode FROM candidates c
+		 WHERE c.block_id IN (SELECT id FROM blocks WHERE document_id = ?)
+		 ORDER BY c.ts DESC, c.rowid DESC`, documentID)
+	if err != nil {
+		return dto.WriteResult{}, err
+	}
+	var order []string
+	applied := map[string]staged{}
 	for rows.Next() {
-		var blockID, text string
-		if err := rows.Scan(&blockID, &text); err != nil {
+		var blockID string
+		var st staged
+		if err := rows.Scan(&blockID, &st.text, &st.baseHash, &st.mode); err != nil {
 			rows.Close()
-			return err
+			return dto.WriteResult{}, err
 		}
-		if _, seen := applied[blockID]; !seen {
-			applied[blockID] = text
+		if _, seen := applied[blockID]; seen {
+			continue
 		}
+		applied[blockID] = st
+		order = append(order, blockID)
 	}
 	rows.Close()
+	if err := rows.Err(); err != nil {
+		return dto.WriteResult{}, err
+	}
 
-	// Rebuild the canonical markdown: apply candidates, format every block.
+	// Re-validate each candidate's base hash before touching any bytes: a stale
+	// candidate fails the whole accept with guard-failed (ADR-0047 §5).
+	var failures []GuardFailure
+	for _, blockID := range order {
+		st := applied[blockID]
+		if st.baseHash == "" {
+			continue // legacy candidate staged before base_hash existed
+		}
+		b, ok := byID[blockID]
+		if !ok {
+			failures = append(failures, GuardFailure{BlockID: blockID, Reason: "block not found"})
+			continue
+		}
+		if b.Hash != st.baseHash {
+			failures = append(failures, GuardFailure{BlockID: blockID, Reason: "content changed"})
+		}
+	}
+	if len(failures) > 0 {
+		return dto.WriteResult{}, fmt.Errorf("%w: %v", ErrGuardFailed, failures)
+	}
+
+	// Empty accept: no commit, no write (ADR-0047 §8).
+	if len(applied) == 0 {
+		rev, err := s.currentRevision(documentID)
+		if err != nil {
+			return dto.WriteResult{}, err
+		}
+		return dto.WriteResult{Revision: rev}, nil
+	}
+
+	// Rebuild the canonical markdown: apply candidates, format every block, and
+	// derive one message segment per accepted block.
 	var texts []string
+	var segments []string
 	for _, b := range blocks {
 		text := b.Text
-		if t, ok := applied[b.ID]; ok {
-			normalized, _ := s.tf.Normalize(b.Kind, t) // candidate already normalized
+		if st, ok := applied[b.ID]; ok {
+			normalized, _ := s.tf.Normalize(b.Kind, st.text) // candidate already normalized
+			segments = append(segments, commitSegment(st.mode, b.ID, text, normalized))
 			text = normalized
 		}
 		formatted, _ := s.tf.Format(b.Kind, text)
 		texts = append(texts, formatted)
 	}
 	canonical := serializeBlocks(texts)
+	msg := strings.Join(segments, "; ")
 
 	h, err := s.histFor(documentID)
 	if err != nil {
-		return err
+		return dto.WriteResult{}, err
 	}
 	// Write-through (ADR-0039): an accepted AI edit mirrors to the opened file,
-	// before the worktree write + commit. Skipped when nothing was applied — the
-	// mirror helper also no-ops when the file already holds the canonical bytes.
-	if len(applied) > 0 {
-		if err := s.writeBack(documentID, canonical); err != nil {
-			return err
-		}
+	// before the worktree write + commit. A conflict aborts the whole accept and
+	// leaves the candidates staged (ADR-0047 §3).
+	path, err := s.writeBack(documentID, canonical, opts.Overwrite)
+	if err != nil {
+		return dto.WriteResult{}, err
 	}
 	if err := h.writeFile(s.workfileName, []byte(canonical)); err != nil {
-		return err
+		return dto.WriteResult{}, err
 	}
-	if _, err := h.commit(msg); err != nil {
-		return err
+	hash, err := h.commit(msg)
+	if err != nil {
+		return dto.WriteResult{}, err
 	}
 
 	// Clear accepted candidates.
@@ -553,42 +811,109 @@ func (s *store) Commit(documentID string, msg string) error {
 		`DELETE FROM candidates WHERE block_id IN (SELECT id FROM blocks WHERE document_id = ?)`,
 		documentID,
 	); err != nil {
-		return err
+		return dto.WriteResult{}, err
 	}
-	_, err = s.db.Exec(`UPDATE documents SET updated_at = ? WHERE id = ?`, time.Now().Unix(), documentID)
-	if err != nil {
-		return err
+	now := time.Now().Unix()
+	if _, err := s.db.Exec(`UPDATE documents SET updated_at = ? WHERE id = ?`, now, documentID); err != nil {
+		return dto.WriteResult{}, err
 	}
-	return nil
+	return dto.WriteResult{
+		Revision:       dto.Revision{ID: hash, Message: msg, Timestamp: now},
+		WrittenThrough: true,
+		Path:           path,
+		Committed:      true,
+	}, nil
+}
+
+// commitSegment derives one `mode · blockID · one-line-diff-summary` message
+// segment (ADR-0020 §1, ADR-0047 §8). The mode is empty for HTTP re-stages that
+// could not inherit a preset; "accepted" is the neutral label.
+func commitSegment(mode, blockID, oldText, newText string) string {
+	if mode == "" {
+		mode = "accepted"
+	}
+	insertions, deletions := wordDiff(oldText, newText)
+	parts := make([]string, 0, len(insertions)+len(deletions))
+	for _, w := range insertions {
+		parts = append(parts, "+"+w)
+	}
+	for _, w := range deletions {
+		parts = append(parts, "-"+w)
+	}
+	summary := "no change"
+	if len(parts) > 0 {
+		summary = strings.Join(parts, " ")
+		if len(summary) > 80 {
+			summary = summary[:80] + "…"
+		}
+	}
+	return fmt.Sprintf("%s · %s · %s", mode, blockID, summary)
 }
 
 // writeBack mirrors canonical markdown to the document's opened file path
 // (ADR-0039): the file the user actually reads (Obsidian, the vault) is a
 // write-through mirror of the engine's canonical bytes, written atomically and
-// only when it differs. It must be called under the document lock, before the
-// worktree write + commit, so a write-back failure aborts the whole save.
-func (s *store) writeBack(documentID string, canonical string) error {
-	var path string
-	if err := s.db.QueryRow(`SELECT path FROM documents WHERE id = ?`, documentID).Scan(&path); err != nil {
-		return err
+// only when it differs. Immediately before the rename it compares the on-disk
+// hash to the engine's last-known hash; a mismatch aborts with a typed
+// file-changed-externally error unless overwrite is set (ADR-0047 §3). It must
+// be called under the document lock, before the worktree write + commit, so a
+// failure aborts the whole save. It returns the mirrored path.
+func (s *store) writeBack(documentID string, canonical string, overwrite bool) (string, error) {
+	var path, lastKnown string
+	if err := s.db.QueryRow(
+		`SELECT path, content_hash FROM documents WHERE id = ?`, documentID,
+	).Scan(&path, &lastKnown); err != nil {
+		return "", err
 	}
-	// No-op when the file already holds the canonical bytes (no-op saves and
-	// empty accepts never rewrite the disk file, ADR-0039 §4).
-	if b, err := os.ReadFile(path); err == nil && string(b) == canonical {
-		return nil
+
+	b, readErr := os.ReadFile(path)
+	missing := os.IsNotExist(readErr)
+	if readErr != nil && !missing {
+		return "", readErr
 	}
-	return atomicWriteFile(path, []byte(canonical))
+	canonicalHash := contentHash([]byte(canonical))
+
+	if missing {
+		// An externally deleted file is an external change, not a clobber: it
+		// requires an explicit overwrite to be recreated (ADR-0047 §3).
+		if !overwrite {
+			return "", &FileChangedExternallyError{Path: path}
+		}
+	} else if string(b) == canonical {
+		// Already holds the canonical bytes (no-op saves / empty accepts never
+		// rewrite an unchanged file, ADR-0039 §4).
+		return path, s.markSynced(documentID, canonicalHash)
+	} else if !overwrite && lastKnown != "" && contentHash(b) != lastKnown {
+		return "", &FileChangedExternallyError{Path: path, CurrentHash: contentHash(b)}
+	}
+
+	if err := atomicWriteFile(path, []byte(canonical)); err != nil {
+		return "", err
+	}
+	if err := s.markSynced(documentID, canonicalHash); err != nil {
+		return "", err
+	}
+	return path, nil
 }
 
-// atomicWriteFile writes data to path via a temp file + rename in the same
-// directory, preserving the existing file's mode (0o644 when the file is new).
-// A partial or interleaved write can never be observed at path.
+// markSynced records the engine's last-known disk hash after a write-through.
+func (s *store) markSynced(documentID, hash string) error {
+	_, err := s.db.Exec(`UPDATE documents SET content_hash = ? WHERE id = ?`, hash, documentID)
+	return err
+}
+
+// atomicWriteFile writes data to the write target via a temp file + rename in
+// the target's directory, preserving the existing file's mode (0o644 when the
+// file is new). A symlink at path is written through — the link is preserved,
+// its target is replaced (ADR-0047 §7). A partial or interleaved write can never
+// be observed at the target.
 func atomicWriteFile(path string, data []byte) error {
+	target := resolveWriteTarget(path)
 	mode := os.FileMode(0o644)
-	if info, err := os.Stat(path); err == nil {
+	if info, err := os.Stat(target); err == nil {
 		mode = info.Mode().Perm()
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".texteditor-*")
+	tmp, err := os.CreateTemp(filepath.Dir(target), ".texteditor-*")
 	if err != nil {
 		return err
 	}
@@ -605,7 +930,29 @@ func atomicWriteFile(path string, data []byte) error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tmpName, path)
+	return os.Rename(tmpName, target)
+}
+
+// resolveWriteTarget follows symlinks (bounded depth) to the path that should
+// actually receive the bytes. A dangling symlink resolves to its target so the
+// link itself survives the write.
+func resolveWriteTarget(path string) string {
+	p := path
+	for i := 0; i < 32; i++ {
+		info, err := os.Lstat(p)
+		if err != nil || info.Mode()&os.ModeSymlink == 0 {
+			return p
+		}
+		dst, err := os.Readlink(p)
+		if err != nil {
+			return p
+		}
+		if !filepath.IsAbs(dst) {
+			dst = filepath.Join(filepath.Dir(p), dst)
+		}
+		p = dst
+	}
+	return p
 }
 
 // Diff returns word-level insertions/deletions per block between two revisions
@@ -681,7 +1028,7 @@ func (s *store) Candidates(documentID string, blockID string) ([]dto.Candidate, 
 	rows, err := s.db.Query(
 		`SELECT block_id, text, base_rev FROM candidates
 		 WHERE block_id = ? AND block_id IN (SELECT id FROM blocks WHERE document_id = ?)
-		 ORDER BY ts DESC`, blockID, documentID,
+		 ORDER BY ts DESC, rowid DESC`, blockID, documentID,
 	)
 	if err != nil {
 		return nil, err
@@ -728,6 +1075,29 @@ func (s *store) blockIDs(documentID string) ([]string, error) {
 		out = append(out, id)
 	}
 	return out, rows.Err()
+}
+
+// canonicalPath resolves a path to its canonical absolute form: symlinks are
+// evaluated (falling back to a clean absolute path when the file does not exist
+// yet) and the key is case-folded so aliases of the same file resolve to one
+// document row (ADR-0047 §2).
+func canonicalPath(path string) (canonical, key string) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		abs = filepath.Clean(path)
+	}
+	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
+		abs = resolved
+	}
+	canonical = filepath.Clean(abs)
+	return canonical, strings.ToLower(canonical)
+}
+
+// contentHash returns the full SHA-256 content hash of the disk bytes — the
+// external-change / write-through comparison anchor (ADR-0047 §2/§3).
+func contentHash(b []byte) string {
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
 }
 
 // shortHash returns a short content hash for the guard anchor (ADR-0029 §4).

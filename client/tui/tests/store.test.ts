@@ -193,6 +193,23 @@ describe("createAppStore", () => {
     expect(calls).toContain("commit");
   });
 
+  // ADR-0047 §5: the engine lists candidates newest-first; the client must take
+  // the first entry, not the last.
+  test("acceptCandidate applies the newest candidate", async () => {
+    const { api, applied } = stubApi({
+      getCandidatesResult: () =>
+        ok([
+          { blockId: "b1", text: "newest" },
+          { blockId: "b1", text: "oldest" },
+        ]),
+    });
+    const store = createAppStore({ api, baseUrl: "http://x" });
+    await store.openDocument("/notes/thesis.md");
+    await store.acceptCandidate("b1");
+
+    expect(applied).toEqual(["newest"]);
+  });
+
   // serving-control.feature — "The TUI switches models by starting and
   // stopping servers": the Fleet gateway calls Start(new) and Stop(old); the
   // completion is not issued until the new server reports up; a failed start

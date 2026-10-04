@@ -34,6 +34,7 @@ export interface StubApiOptions {
 
 export function stubApi(opts: StubApiOptions = {}) {
   const calls: string[] = [];
+  const applied: string[] = [];
   const api = {
     health: async () => ok({ status: "ok" as const }),
     getFleet: async () => {
@@ -68,8 +69,9 @@ export function stubApi(opts: StubApiOptions = {}) {
     },
     getBlocks: async () =>
       ok([{ id: "b1", kind: "paragraph", position: 0, text: "hello" } satisfies Block]),
-    applyEdit: async () => {
+    applyEdit: async (_id: string, body: { blockId: string; text: string }) => {
       calls.push("applyEdit");
+      applied.push(body.text);
       return ok({ id: "r1", message: "candidate" } satisfies Revision);
     },
     commitDocument: async () => {
@@ -90,7 +92,7 @@ export function stubApi(opts: StubApiOptions = {}) {
       return ok([]);
     },
   };
-  return { api: api as unknown as Api, calls };
+  return { api: api as unknown as Api, calls, applied };
 }
 
 // A recorded fake stream that replays a canned event sequence on demand.

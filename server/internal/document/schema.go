@@ -34,4 +34,12 @@ var appSchema = []string{
 		ts       INTEGER NOT NULL
 	)`,
 	`CREATE INDEX candidates_block_idx ON candidates(block_id)`,
+	// ADR-0047 §2/§3 — disk revalidation state. path_key is the case-folded
+	// canonical path so aliases (symlinks, case variants) resolve to one row;
+	// content_hash is the engine's last-known disk content hash.
+	`ALTER TABLE documents ADD COLUMN path_key TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE documents ADD COLUMN content_hash TEXT NOT NULL DEFAULT ''`,
+	`UPDATE documents SET path_key = lower(path)`,
+	// ADR-0047 §5 — the candidate's base content hash, re-validated at Commit.
+	`ALTER TABLE candidates ADD COLUMN base_hash TEXT NOT NULL DEFAULT ''`,
 }

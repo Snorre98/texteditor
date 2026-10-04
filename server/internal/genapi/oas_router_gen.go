@@ -14,6 +14,9 @@ var (
 	rn28AllowedHeaders = map[string]string{
 		"POST": "Content-Type",
 	}
+	rn5AllowedHeaders = map[string]string{
+		"POST": "Content-Type",
+	}
 	rn3AllowedHeaders = map[string]string{
 		"POST": "Content-Type",
 	}
@@ -270,8 +273,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 									default:
 										s.notAllowed(w, r, notAllowedParams{
 											allowedMethods: "POST",
-											allowedHeaders: nil,
-											acceptPost:     "",
+											allowedHeaders: rn5AllowedHeaders,
+											acceptPost:     "application/json",
 											acceptPatch:    "",
 										})
 									}
@@ -1106,7 +1109,7 @@ func (s *Server) FindPath(method string, u *url.URL) (r Route, _ bool) {
 									switch method {
 									case "POST":
 										r.name = CommitDocumentOperation
-										r.summary = ""
+										r.summary = "Accept staged candidates (one commit, write-through)"
 										r.operationID = "commitDocument"
 										r.operationGroup = ""
 										r.pathPattern = "/documents/{id}/commits"

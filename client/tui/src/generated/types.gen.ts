@@ -77,9 +77,17 @@ export type OpenDocumentRequest = {
 
 export type Document = {
     id: string;
+    /**
+     * The canonical (symlink-resolved) absolute path the engine keys the document by (ADR-0047 §2).
+     */
     path: string;
     rootBlockId: string;
     updatedAt?: number;
+    /**
+     * True when the file changed on disk since the engine last read it and was re-read into the worktree on this open (ADR-0047 §2). Aliases of the same file resolve to one document row.
+     *
+     */
+    externalChange?: boolean;
 };
 
 /**
@@ -129,6 +137,11 @@ export type SaveTreeRequest = {
      *
      */
     writeThrough?: boolean;
+    /**
+     * Explicit opt-in to overwrite an externally changed file (ADR-0047 §3). Default false: a mismatch is refused with `file-changed-externally` (409).
+     *
+     */
+    overwrite?: boolean;
 };
 
 /**
@@ -146,6 +159,36 @@ export type Revision = {
     id?: string;
     message?: string;
     timestamp?: number;
+    /**
+     * True when the canonical markdown was mirrored to the opened file during this write boundary (ADR-0047 §8). False on an empty accept / engine-only autosave.
+     *
+     */
+    writtenThrough?: boolean;
+    /**
+     * The file path that was mirrored when `writtenThrough` is true.
+     */
+    path?: string;
+};
+
+/**
+ * Optional accept options for `commitDocument` (ADR-0047 §3).
+ */
+export type CommitRequest = {
+    /**
+     * Explicit opt-in to overwrite an externally changed file. Default false: a mismatch is refused with `file-changed-externally` (409).
+     *
+     */
+    overwrite?: boolean;
+};
+
+/**
+ * The file at `documents.path` changed externally since the engine last read it; the write-through was refused and no bytes were written (ADR-0047 §3). `currentHash` is the current on-disk content hash so the client can show or compare it; retry with `overwrite: true` to accept it.
+ *
+ */
+export type FileChangedExternally = {
+    error: 'file-changed-externally';
+    path: string;
+    currentHash: string;
 };
 
 export type WordEdit = {
@@ -522,7 +565,7 @@ export type ApplyEditResponses = {
 export type ApplyEditResponse = ApplyEditResponses[keyof ApplyEditResponses];
 
 export type CommitDocumentData = {
-    body?: never;
+    body?: CommitRequest;
     path: {
         id: string;
     };
@@ -530,9 +573,19 @@ export type CommitDocumentData = {
     url: '/documents/{id}/commits';
 };
 
+export type CommitDocumentErrors = {
+    /**
+     * The file at `documents.path` changed externally since the engine last read it; no bytes were written. Reload the document or retry with `overwrite: true`.
+     *
+     */
+    409: FileChangedExternally;
+};
+
+export type CommitDocumentError = CommitDocumentErrors[keyof CommitDocumentErrors];
+
 export type CommitDocumentResponses = {
     /**
-     * committed
+     * committed (revision populated; write-through reported)
      */
     200: Revision;
 };
@@ -547,6 +600,16 @@ export type SaveDocumentData = {
     query?: never;
     url: '/documents/{id}/tree';
 };
+
+export type SaveDocumentErrors = {
+    /**
+     * The file at `documents.path` changed externally since the engine last read it; no bytes were written. Reload the document or retry with `overwrite: true`.
+     *
+     */
+    409: FileChangedExternally;
+};
+
+export type SaveDocumentError = SaveDocumentErrors[keyof SaveDocumentErrors];
 
 export type SaveDocumentResponses = {
     /**

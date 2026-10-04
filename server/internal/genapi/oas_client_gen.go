@@ -34,8 +34,15 @@ type Invoker interface {
 	ApplyEdit(ctx context.Context, request *BlockEdit, params ApplyEditParams) (*Revision, error)
 	// CommitDocument invokes commitDocument operation.
 	//
+	// Accepts the staged candidates (newest-first, deterministic), re-validates each candidate's base
+	// content hash, formats, makes one git commit with an auto-derived message
+	// (`mode · blockID · diff`), and mirrors the canonical markdown back to the opened file (ADR-0047
+	// §1/§5/§8). An empty accept creates no commit. If the file on disk changed since the engine last
+	// read it, the write-through is refused with `file-changed-externally` unless `overwrite` is true —
+	// never a silent clobber.
+	//
 	// POST /documents/{id}/commits
-	CommitDocument(ctx context.Context, params CommitDocumentParams) (*Revision, error)
+	CommitDocument(ctx context.Context, request OptCommitRequest, params CommitDocumentParams) (CommitDocumentRes, error)
 	// CreateSession invokes createSession operation.
 	//
 	// POST /sessions
@@ -121,9 +128,11 @@ type Invoker interface {
 	// `autosave @ <ts>` iff anything changed (a no-op returns the current HEAD). A manual save of a block
 	// drops its open candidates. When `writeThrough` is true (explicit Save / Cmd+S, not the periodic
 	// autosave), the engine also mirrors the canonical markdown back to the opened file path (ADR-0039).
+	// Per ADR-0047 §4 a no-op save still re-syncs a stale disk (no new commit), and an external change
+	// surfaces as a `file-changed-externally` conflict — never a silent clobber.
 	//
 	// PUT /documents/{id}/tree
-	SaveDocument(ctx context.Context, request *SaveTreeRequest, params SaveDocumentParams) (*Revision, error)
+	SaveDocument(ctx context.Context, request *SaveTreeRequest, params SaveDocumentParams) (SaveDocumentRes, error)
 	// StartModel invokes startModel operation.
 	//
 	// POST /models/{name}/start
@@ -281,13 +290,20 @@ func (c *Client) sendApplyEdit(ctx context.Context, request *BlockEdit, params A
 
 // CommitDocument invokes commitDocument operation.
 //
+// Accepts the staged candidates (newest-first, deterministic), re-validates each candidate's base
+// content hash, formats, makes one git commit with an auto-derived message
+// (`mode · blockID · diff`), and mirrors the canonical markdown back to the opened file (ADR-0047
+// §1/§5/§8). An empty accept creates no commit. If the file on disk changed since the engine last
+// read it, the write-through is refused with `file-changed-externally` unless `overwrite` is true —
+// never a silent clobber.
+//
 // POST /documents/{id}/commits
-func (c *Client) CommitDocument(ctx context.Context, params CommitDocumentParams) (*Revision, error) {
-	res, err := c.sendCommitDocument(ctx, params)
+func (c *Client) CommitDocument(ctx context.Context, request OptCommitRequest, params CommitDocumentParams) (CommitDocumentRes, error) {
+	res, err := c.sendCommitDocument(ctx, request, params)
 	return res, err
 }
 
-func (c *Client) sendCommitDocument(ctx context.Context, params CommitDocumentParams) (res *Revision, err error) {
+func (c *Client) sendCommitDocument(ctx context.Context, request OptCommitRequest, params CommitDocumentParams) (res CommitDocumentRes, err error) {
 	otelAttrs := []attribute.KeyValue{
 		otelogen.OperationID("commitDocument"),
 		semconv.HTTPRequestMethodKey.String("POST"),
@@ -351,6 +367,9 @@ func (c *Client) sendCommitDocument(ctx context.Context, params CommitDocumentPa
 	r, err := ht.NewRequest(ctx, "POST", u)
 	if err != nil {
 		return res, errors.Wrap(err, "create request")
+	}
+	if err := encodeCommitDocumentRequest(request, r); err != nil {
+		return res, errors.Wrap(err, "encode request")
 	}
 
 	stage = "SendRequest"
@@ -1871,14 +1890,16 @@ func (c *Client) sendProvisionModel(ctx context.Context, params ProvisionModelPa
 // `autosave @ <ts>` iff anything changed (a no-op returns the current HEAD). A manual save of a block
 // drops its open candidates. When `writeThrough` is true (explicit Save / Cmd+S, not the periodic
 // autosave), the engine also mirrors the canonical markdown back to the opened file path (ADR-0039).
+// Per ADR-0047 §4 a no-op save still re-syncs a stale disk (no new commit), and an external change
+// surfaces as a `file-changed-externally` conflict — never a silent clobber.
 //
 // PUT /documents/{id}/tree
-func (c *Client) SaveDocument(ctx context.Context, request *SaveTreeRequest, params SaveDocumentParams) (*Revision, error) {
+func (c *Client) SaveDocument(ctx context.Context, request *SaveTreeRequest, params SaveDocumentParams) (SaveDocumentRes, error) {
 	res, err := c.sendSaveDocument(ctx, request, params)
 	return res, err
 }
 
-func (c *Client) sendSaveDocument(ctx context.Context, request *SaveTreeRequest, params SaveDocumentParams) (res *Revision, err error) {
+func (c *Client) sendSaveDocument(ctx context.Context, request *SaveTreeRequest, params SaveDocumentParams) (res SaveDocumentRes, err error) {
 	otelAttrs := []attribute.KeyValue{
 		otelogen.OperationID("saveDocument"),
 		semconv.HTTPRequestMethodKey.String("PUT"),

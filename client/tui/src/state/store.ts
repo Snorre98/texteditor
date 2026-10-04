@@ -373,7 +373,8 @@ export function createAppStore(deps: StoreDeps): AppStore {
     const candidates = await call<{ blockId?: string; text?: string }[]>(() =>
       deps.api.getCandidates(s.document!.id, blockId),
     );
-    const latest = candidates.at(-1);
+    // The engine returns candidates newest-first (ts DESC, rowid DESC — ADR-0047 §5).
+    const latest = candidates.at(0);
     if (!latest?.text) {
       patchTurn({
         error: { code: "no-candidate", message: `no candidate staged for ${blockId}` },
