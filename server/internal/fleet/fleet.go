@@ -103,6 +103,21 @@ type daemon struct {
 	// §3). In-memory only, never persisted; replaced on every successful list.
 	mu       sync.Mutex
 	lastGood []daemonEntry
+
+	// startTried caches a failed bounded auto-start attempt per model with a
+	// short backoff, so an un-startable model does not impose the daemon's 60 s
+	// start bound on every resolve (ADR-0040 recorded note, Phase E3).
+	startMu    sync.Mutex
+	startTried map[string]startAttempt
+}
+
+// startRetryAfter bounds how often the engine retries a failed auto-start.
+const startRetryAfter = 30 * time.Second
+
+// startAttempt records the time and labeled error of a failed auto-start.
+type startAttempt struct {
+	at  time.Time
+	err error
 }
 
 // NewDaemon returns the Fleet gateway backed by the control daemon's HTTP
@@ -110,15 +125,20 @@ type daemon struct {
 // scheme://host:port (e.g. "http://127.0.0.1:9300").
 func NewDaemon(baseURL string) FleetGateway {
 	return &daemon{
-		baseURL: strings.TrimRight(baseURL, "/"),
-		client:  &http.Client{Timeout: 70 * time.Second}, // Start blocks up to 60s
+		baseURL:    strings.TrimRight(baseURL, "/"),
+		client:     &http.Client{Timeout: 70 * time.Second}, // Start blocks up to 60s
+		startTried: map[string]startAttempt{},
 	}
 }
 
 // NewDaemonWithClient returns a daemon-backed gateway over a caller-supplied
 // client (tests).
 func NewDaemonWithClient(baseURL string, c *http.Client) FleetGateway {
-	return &daemon{baseURL: strings.TrimRight(baseURL, "/"), client: c}
+	return &daemon{
+		baseURL:    strings.TrimRight(baseURL, "/"),
+		client:     c,
+		startTried: map[string]startAttempt{},
+	}
 }
 
 // list fetches the daemon's full model projection via the `list` verb.
@@ -229,7 +249,11 @@ func (d *daemon) ListStatus() ([]dto.ModelState, error) {
 
 // Resolve merges params, enforces capability gates, and folds in the fallback
 // ladder (ADR-0015, interface.md §1). It reads the manifest projection and status
-// exclusively through the daemon.
+// exclusively through the daemon. When the requested model is not up, it makes
+// one flagged, bounded auto-start attempt before falling back (ADR-0040 recorded
+// note; Phase E3): the engine owns the lifecycle verb so every resolve caller —
+// the turn model, the embedder, and the router — self-heals instead of
+// duplicating orchestration client-side.
 func (d *daemon) Resolve(name string, opts dto.ResolveOpts) (dto.Resolution, error) {
 	entries, err := d.list()
 	if err != nil {
@@ -260,6 +284,22 @@ func (d *daemon) Resolve(name string, opts dto.ResolveOpts) (dto.Resolution, err
 		}, nil
 	}
 
+	// One bounded auto-start attempt (with a short retry backoff so an
+	// un-startable model does not pay the daemon's 60 s bound every call).
+	startErr, _ := d.tryStart(name)
+	if startErr == nil {
+		if st2, err := d.statusOf(name); err == nil && st2 == dto.LiveUp {
+			return dto.Resolution{
+				Model:           preferred.toModel(),
+				EffectiveParams: mergeParams(preferred.Defaults.Temperature, preferred.Defaults.MaxTokens, opts),
+				LiveState:       dto.LiveUp,
+				Degraded:        false,
+				UsedName:        name,
+				Started:         true,
+			}, nil
+		}
+	}
+
 	// Fallback ladder: walk models sharing opts.ModeTag in manifest order, first up.
 	for _, cand := range entries {
 		if !hasTag(cand.ModeTags, opts.ModeTag) {
@@ -276,10 +316,44 @@ func (d *daemon) Resolve(name string, opts dto.ResolveOpts) (dto.Resolution, err
 				LiveState:       dto.LiveUp,
 				Degraded:        true,
 				UsedName:        cand.Name,
+				StartError:      startErrString(startErr),
 			}, nil
 		}
 	}
+	if startErr != nil {
+		return dto.Resolution{}, fmt.Errorf("%w (start: %v)", ErrNoModelAvailable, startErr)
+	}
 	return dto.Resolution{}, ErrNoModelAvailable
+}
+
+// tryStart performs one bounded auto-start of a model unless a failed attempt
+// is still within the retry backoff. The bool reports whether a start verb was
+// actually issued (false when suppressed by the backoff).
+func (d *daemon) tryStart(name string) (error, bool) {
+	d.startMu.Lock()
+	if prev, ok := d.startTried[name]; ok && time.Since(prev.at) < startRetryAfter {
+		d.startMu.Unlock()
+		return prev.err, false
+	}
+	d.startMu.Unlock()
+
+	err := d.Start(name)
+	d.startMu.Lock()
+	if err != nil {
+		d.startTried[name] = startAttempt{at: time.Now(), err: err}
+	} else {
+		delete(d.startTried, name)
+	}
+	d.startMu.Unlock()
+	return err, true
+}
+
+// startErrString renders a labeled auto-start failure for a degraded resolution.
+func startErrString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }
 
 // Status returns a model's live state via the daemon `status` verb.

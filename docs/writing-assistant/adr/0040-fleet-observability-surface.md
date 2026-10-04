@@ -125,3 +125,28 @@ have clients consume it, eliminating the duplicated store logic in both
 clients. Not a defect in the current contract (`/fleet` + per-model verbs work
 as specified); the duplication is the symptom.
 
+## Recorded note (2026-10-04) — orchestration landed engine-side; the Ratatui TUI drops the poll
+
+*Recorded at Phase E3.1 (implementation-sequence-context-engine.md) as the
+landing of the note above, with two deviations from §4.*
+
+1. **The engine owns the one remediation that the selector used to offer
+   manually.** `fleet.Resolve` now attempts one **bounded, flagged** auto-start
+   of the requested model when it is not up, re-resolves, and only then falls
+   back; the failure is labeled on the internal `Resolution`
+   (`Started`/`StartError`) and the attempt is backoff-cached (~30 s) so an
+   un-startable model does not impose the daemon's 60 s start bound on every
+   resolve. This applies to **all** resolve callers — the turn model, the
+   embedder, and the router — per the engine-first decision (the embed and
+   router paths self-heal for free). It is internal-only: `Started`/`StartError`
+   are not projected into the client API.
+2. **The Ratatui TUI renders `/fleet` and issues raw lifecycle verbs only; it
+   does not implement the §4 10 s interval poll.** The TUI (Ctrl+F) fetches on
+   open and refetches after each verb, and renders the per-model `liveState`
+   plus the `control: "unreachable"` banner; a `model-not-found` start surfaces
+   the provision hint. This supersedes §4's "manual + interval poll" client
+   policy *for this client* — polling and busy/switch orchestration are exactly
+   the duplicated client-domain behavior the note above asked to remove. The
+   OpenTUI client (frozen) still carries the old poll; no new client copies it.
+
+

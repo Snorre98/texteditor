@@ -21,13 +21,19 @@ type fakeDaemon struct {
 	models map[string]daemonEntry
 	states map[string]dto.LiveState
 	calls  int
+	// startFails forces POST /start/{name} to fail with start-timeout for a
+	// model, modeling an un-startable runner (auto-start fallback tests).
+	startFails map[string]bool
+	// startCalls counts POST /start/{name} invocations (auto-start backoff).
+	startCalls int
 }
 
 func newFakeDaemon(t *testing.T) *fakeDaemon {
 	f := &fakeDaemon{
-		t:      t,
-		models: map[string]daemonEntry{},
-		states: map[string]dto.LiveState{},
+		t:          t,
+		models:     map[string]daemonEntry{},
+		states:     map[string]dto.LiveState{},
+		startFails: map[string]bool{},
 	}
 	f.add(daemonEntry{
 		Name: "gemma4-12b", Host: "127.0.0.1", Port: 8001,
@@ -111,9 +117,15 @@ func (f *fakeDaemon) handle(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		_, ok := f.models[name]
 		up := f.states[name] == dto.LiveUp
+		fails := f.startFails[name]
+		f.startCalls++
 		f.mu.Unlock()
 		if !ok {
 			writeJSON(404, map[string]string{"code": "unknown-server"})
+			return
+		}
+		if fails {
+			writeJSON(504, map[string]string{"code": "start-timeout", "message": "runner did not come up"})
 			return
 		}
 		if up {
@@ -200,6 +212,8 @@ func TestResolveFallbackLadder(t *testing.T) {
 	tf := newFakeDaemon(t)
 	tf.mu.Lock()
 	tf.states["gemma4-12b"] = dto.LiveDown
+	// The preferred model cannot be auto-started, so the ladder serves.
+	tf.startFails["gemma4-12b"] = true
 	tf.mu.Unlock()
 	s := tf.server()
 	fl := NewDaemonWithClient(s.URL, s.Client())
@@ -211,9 +225,71 @@ func TestResolveFallbackLadder(t *testing.T) {
 	if !res.Degraded || res.UsedName != "gemma4-26b" {
 		t.Fatalf("resolution = %+v, want degraded fallback to gemma4-26b", res)
 	}
+	if res.Started {
+		t.Fatalf("resolution = %+v, Started must be false on a fallback", res)
+	}
+	// The failed one-shot auto-start is labeled on the degraded resolution.
+	if res.StartError == "" {
+		t.Fatalf("resolution = %+v, want a labeled StartError", res)
+	}
 	// The wire id follows the model that actually serves (the fallback).
 	if res.Model.ModelID != "mlx-community/gemma-4-26B-A4B-it-OptiQ-4bit" {
 		t.Fatalf("modelId = %q, want the fallback's repo id", res.Model.ModelID)
+	}
+}
+
+func TestResolveAutoStartsPreferred(t *testing.T) {
+	tf := newFakeDaemon(t)
+	tf.mu.Lock()
+	tf.states["gemma4-12b"] = dto.LiveDown
+	tf.mu.Unlock()
+	s := tf.server()
+	fl := NewDaemonWithClient(s.URL, s.Client())
+
+	res, err := fl.Resolve("gemma4-12b", dto.ResolveOpts{ModeTag: "editor"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Started || res.Degraded || res.UsedName != "gemma4-12b" {
+		t.Fatalf("resolution = %+v, want a non-degraded auto-started gemma4-12b", res)
+	}
+}
+
+func TestResolveAutoStartBackoffSuppressesRetries(t *testing.T) {
+	tf := newFakeDaemon(t)
+	tf.mu.Lock()
+	tf.states["gemma4-12b"] = dto.LiveDown
+	tf.startFails["gemma4-12b"] = true
+	tf.mu.Unlock()
+	s := tf.server()
+	fl := NewDaemonWithClient(s.URL, s.Client())
+
+	res, err := fl.Resolve("gemma4-12b", dto.ResolveOpts{ModeTag: "editor"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Degraded {
+		t.Fatalf("resolution = %+v, want degraded fallback", res)
+	}
+	tf.mu.Lock()
+	afterFirst := tf.startCalls
+	tf.mu.Unlock()
+
+	// Two more resolves within the backoff must not re-issue a start verb.
+	for i := 0; i < 2; i++ {
+		res, err := fl.Resolve("gemma4-12b", dto.ResolveOpts{ModeTag: "editor"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !res.Degraded {
+			t.Fatalf("resolution = %+v, want degraded fallback", res)
+		}
+	}
+	tf.mu.Lock()
+	calls := tf.startCalls
+	tf.mu.Unlock()
+	if calls != afterFirst {
+		t.Fatalf("start calls = %d after backoff, want %d (no retry within the window)", calls, afterFirst)
 	}
 }
 
@@ -222,6 +298,7 @@ func TestResolveNoModelAvailable(t *testing.T) {
 	tf.mu.Lock()
 	tf.states["gemma4-12b"] = dto.LiveDown
 	tf.states["gemma4-26b"] = dto.LiveDown
+	tf.startFails["gemma4-12b"] = true
 	tf.mu.Unlock()
 	s := tf.server()
 	f := NewDaemonWithClient(s.URL, s.Client())

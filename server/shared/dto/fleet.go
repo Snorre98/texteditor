@@ -81,6 +81,14 @@ type Resolution struct {
 	LiveState       LiveState
 	Degraded        bool   // true when a fallback served
 	UsedName        string // actual serving name (== fallback when Degraded)
+	// Started is set when resolution triggered the engine's one bounded
+	// auto-start lifecycle action on the requested model (ADR-0040 recorded note;
+	// Phase E3). Internal only — never projected into the client API.
+	Started bool
+	// StartError records the labeled failure of the one bounded auto-start
+	// attempt when the preferred model could not be brought up and a fallback
+	// served (or none was available). Internal only.
+	StartError string
 }
 
 // Completion is a non-streaming provider result (interface.md §2). FinishReason

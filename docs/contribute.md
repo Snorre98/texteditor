@@ -9,7 +9,8 @@ The dev-facing complement to [`README.md`](../README.md) (which covers only buil
 ```
 api/openapi.yaml   the single contract every client codegens from (ADR-0017)
 server/            the Go engine (cmd/texteditor + internal/* + shared/dto)
-client/tui/        the OpenTUI + Solid client (frozen; ADR-0046 §9)
+client/tui/        the OpenTUI + Solid client (frozen, TS codegen only; ADR-0046
+                   §9 — not the active client)
 client/tui-rs/     the standalone Ratatui TUI (ADR-0046; own generated Rust
                    client + hand-written SSE decoder, plain cargo)
 client/tauri/      the Tauri 2 + Vue 3 editor (frozen; generated Rust client +
@@ -110,6 +111,32 @@ the engine answers `/health` and that `nomic-embed` is in the `/models`
 projection, then refuses to run otherwise. Its temp vault must live under an
 `ALLOWED_ROOTS` entry (the engine's default is `$HOME`), so `mktemp`'s macOS
 `/var/folders` default is not usable — `SMOKE_BASE` sets the parent.
+
+Manual live smoke for the Phase E2c corpus tree (ADR-0049 §4) — the routes the
+Ratatui TUI's corpus overlay (Ctrl+K) calls. Same preflight (`/health` +
+`nomic-embed`) and the same `SMOKE_BASE` constraint; it walks workspace → scope
+(`PUT /corpus`) → index/rebuild (`POST /corpus/index`, polled via `GET /corpus`)
+→ per-document status with chunk counts → an external edit reporting `stale` →
+idempotent eviction (`DELETE /corpus/documents/{id}` twice) → the typed
+`path-outside-allowed-roots` 403:
+
+```sh
+tools/smoke-corpus.sh             # ENGINE_URL defaults to http://127.0.0.1:9100
+SMOKE_BASE=/an/allowed/root tools/smoke-corpus.sh
+```
+
+Manual vault run (E2/E3 closeout; engine + daemon + a live model tagged for the
+presets). The terminal-driven checklist the automated gates cannot cover:
+
+1. start the engine and open the TUI: `cd server && go run ./cmd/texteditor --port 9100`, then `./tools/build-tui-rs.sh && client/tui-rs/target/debug/texteditor-tui-rs ~/vault`
+2. workspace opens; Ctrl+W / Ctrl+S browse and list sessions
+3. Ctrl+K corpus tree: `s` edit scope, `i` index/rebuild (watch job progress), `e` evict; confirm the on-disk markdown files are untouched
+4. Ctrl+T tray: pin, exclude, edit the retrieval query, toggle auto-RAG; confirm the inspector shows `pinned`/`humanOverride`/drops
+5. Ctrl+R reader renders the engine's markdown (read-only); Ctrl+I inspector shows meter + context + thinking/budget labels
+6. type `@` to attach a mention; run a turn; Ctrl+X cancels with a labeled `done {cancelled:true}`
+7. paste a paragraph with a leading `/locate`; resolve the ambiguity picker; approve the anchored edit
+8. Ctrl+F fleet: start/stop/provision render live state; the engine auto-starts a down preferred model on a turn
+9. confirm write-through only happens on approve (Ctrl+A); an external change is a labeled conflict (409), no clobber
 
 ## Tauri client details (frozen, ADR-0044)
 

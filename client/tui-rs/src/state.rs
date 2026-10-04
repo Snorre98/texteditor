@@ -6,7 +6,10 @@
 //! machine (token accumulation, done/degraded, candidate/conflict labels) is
 //! unit-tested without a terminal or a live engine.
 
-use crate::gen::{ContextSnapshot, DiffEvent, LocateResult, MeterEvent, Mode, Revision, Session};
+use crate::gen::{
+    ContextSnapshot, CorpusDocument, CorpusJob, CorpusState, DiffEvent, FleetState, LocateResult,
+    MeterEvent, Mode, PutCorpusRequest, Revision, Session,
+};
 use crate::sse::SseEvent;
 
 /// Connection lifecycle for the status line.
@@ -64,6 +67,125 @@ pub struct WorkspaceInfo {
     pub name: String,
 }
 
+/// The corpus scope field currently being edited (E2c).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ScopeField {
+    #[default]
+    Roots,
+    Include,
+    Exclude,
+}
+
+impl ScopeField {
+    pub fn next(self) -> Self {
+        match self {
+            Self::Roots => Self::Include,
+            Self::Include => Self::Exclude,
+            Self::Exclude => Self::Roots,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Roots => "roots",
+            Self::Include => "include",
+            Self::Exclude => "exclude",
+        }
+    }
+}
+
+/// The in-progress corpus-scope editor (E2c). One buffer per wire list; Tab
+/// cycles the active field and Enter persists all three via `PUT /corpus`.
+#[derive(Debug, Clone, Default)]
+pub struct ScopeEdit {
+    pub field: ScopeField,
+    pub roots: String,
+    pub include: String,
+    pub exclude: String,
+}
+
+impl ScopeEdit {
+    /// Seed the editor from the engine's current scope (comma-joined).
+    pub fn from_scope(corpus: Option<&CorpusState>) -> Self {
+        let (roots, include, exclude) = match corpus {
+            Some(c) => (
+                c.roots.join(", "),
+                c.include.join(", "),
+                c.exclude.join(", "),
+            ),
+            None => (String::new(), String::new(), String::new()),
+        };
+        Self {
+            field: ScopeField::Roots,
+            roots,
+            include,
+            exclude,
+        }
+    }
+
+    pub fn current(&self) -> &String {
+        match self.field {
+            ScopeField::Roots => &self.roots,
+            ScopeField::Include => &self.include,
+            ScopeField::Exclude => &self.exclude,
+        }
+    }
+
+    pub fn current_mut(&mut self) -> &mut String {
+        match self.field {
+            ScopeField::Roots => &mut self.roots,
+            ScopeField::Include => &mut self.include,
+            ScopeField::Exclude => &mut self.exclude,
+        }
+    }
+
+    pub fn next_field(&mut self) {
+        self.field = self.field.next();
+    }
+
+    /// Build the wire request; comma-separated text → trimmed, non-empty lists.
+    /// The client sends decisions, never payload text (ADR-0013 §3).
+    pub fn request(&self, workspace_id: &str) -> PutCorpusRequest {
+        PutCorpusRequest {
+            workspace_id: workspace_id.to_string(),
+            roots: Some(comma_list(&self.roots)),
+            include: Some(comma_list(&self.include)),
+            exclude: Some(comma_list(&self.exclude)),
+        }
+    }
+}
+
+/// Split a comma-separated editor value into trimmed, non-empty entries.
+pub fn comma_list(value: &str) -> Vec<String> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// A display line for one corpus document's index status (E2c): status, chunk
+/// count, and the labeled error when present.
+pub fn corpus_status_label(doc: &CorpusDocument) -> String {
+    let mut label = doc.status.as_str().to_string();
+    if let Some(chunks) = doc.chunk_count {
+        label.push_str(&format!(" · {chunks} chunks"));
+    }
+    if let Some(error) = &doc.error {
+        label.push_str(&format!(" · {error}"));
+    }
+    label
+}
+
+/// A fleet lifecycle-action failure (E3). `provision_hint` is set when a start
+/// was refused because the model is not yet provisioned (ADR-0040 §5).
+#[derive(Debug, Clone, Default)]
+pub struct FleetErrorInfo {
+    pub message: String,
+    pub provision_hint: bool,
+}
+
 /// An event from the async bridge to the UI. The UI reduces these into
 /// [`AppState`]; it never computes domain values.
 #[derive(Debug, Clone)]
@@ -109,6 +231,19 @@ pub enum UiEvent {
         path: String,
         allowed_roots: Vec<String>,
     },
+    /// The workspace corpus state (scope + per-document status + job) (E2c).
+    Corpus(CorpusState),
+    /// An accepted corpus indexing job, for immediate progress feedback (E2c).
+    CorpusJob(CorpusJob),
+    /// A corpus `path-outside-allowed-roots` refusal (scope/evict; ADR-0049 §6).
+    CorpusRefused {
+        path: String,
+        allowed_roots: Vec<String>,
+    },
+    /// Fleet observability state (`GET /fleet`) (E3).
+    Fleet(FleetState),
+    /// A fleet lifecycle verb failed (E3); rendered with the implied remediation.
+    FleetError(FleetErrorInfo),
     /// One typed SSE event.
     Turn(SseEvent),
     /// The turn stream ended (terminal event or disconnect).
@@ -135,6 +270,8 @@ pub enum Overlay {
     Tray,
     Mentions,
     Locate,
+    Corpus,
+    Fleet,
 }
 
 /// The full render-only snapshot.
@@ -162,6 +299,18 @@ pub struct AppState {
     pub directory: Option<crate::gen::DirectoryListing>,
     /// The most recent context snapshot (inspector; E2). Engine data, rendered.
     pub last_context: Option<ContextSnapshot>,
+    /// The workspace corpus state (corpus tree; E2c). Engine data, rendered.
+    pub corpus: Option<CorpusState>,
+    /// The selected corpus document in the overlay (E2c).
+    pub corpus_index: usize,
+    /// The in-progress corpus-scope edit (E2c).
+    pub scope_edit: Option<ScopeEdit>,
+    /// The fleet observability state (E3). Engine data, rendered.
+    pub fleet: Option<FleetState>,
+    /// The selected fleet model in the overlay (E3).
+    pub fleet_index: usize,
+    /// The last fleet lifecycle-verb failure (E3).
+    pub fleet_error: Option<FleetErrorInfo>,
     /// The most recent `/locate` outcome (E2).
     pub last_locate: Option<LocateResult>,
     /// The pending `@`-mention attachments for the next turn (absolute paths).
@@ -325,6 +474,46 @@ impl AppState {
                     "path-outside-allowed-roots: {path} (allowed: {allowed})"
                 ));
                 self.note(format!("path-outside-allowed-roots: {path}"));
+            }
+            UiEvent::Corpus(state) => {
+                self.corpus = Some(state);
+                // Keep the selection in range across a refresh (never reset it
+                // here — the poll must not move the cursor).
+                let len = self.corpus.as_ref().map_or(0, |c| c.documents.len());
+                if self.corpus_index >= len {
+                    self.corpus_index = len.saturating_sub(1);
+                }
+            }
+            UiEvent::CorpusJob(job) => {
+                if let Some(corpus) = self.corpus.as_mut() {
+                    corpus.job = Some(job);
+                }
+            }
+            UiEvent::CorpusRefused {
+                path,
+                allowed_roots,
+            } => {
+                // A typed refusal is rendered verbatim, never swallowed.
+                let allowed = if allowed_roots.is_empty() {
+                    "(none configured)".to_string()
+                } else {
+                    allowed_roots.join(", ")
+                };
+                self.error = Some(format!(
+                    "path-outside-allowed-roots: {path} (allowed: {allowed})"
+                ));
+                self.note(format!("path-outside-allowed-roots: {path}"));
+            }
+            UiEvent::Fleet(state) => {
+                self.fleet = Some(state);
+                self.fleet_error = None;
+                let len = self.fleet.as_ref().map_or(0, |f| f.models.len());
+                if self.fleet_index >= len {
+                    self.fleet_index = len.saturating_sub(1);
+                }
+            }
+            UiEvent::FleetError(error) => {
+                self.fleet_error = Some(error);
             }
             UiEvent::Turn(SseEvent::Turn(turn)) => {
                 self.turn_id = Some(turn.turn_id.clone());
@@ -689,5 +878,184 @@ mod tests {
         let err = app.error.as_deref().unwrap_or_default();
         assert!(err.starts_with("path-outside-allowed-roots: /etc"));
         assert!(err.contains("/home/me"));
+    }
+
+    fn corpus_doc(
+        id: &str,
+        status: crate::gen::CorpusDocumentStatus,
+    ) -> crate::gen::CorpusDocument {
+        crate::gen::CorpusDocument {
+            chunk_count: Some(3),
+            error: None,
+            id: id.to_string(),
+            indexed_at: Some(1),
+            path: format!("/v/{id}.md"),
+            status,
+        }
+    }
+
+    fn corpus_state(docs: Vec<crate::gen::CorpusDocument>) -> CorpusState {
+        CorpusState {
+            documents: docs,
+            exclude: vec![],
+            include: vec!["**/*.md".to_string()],
+            job: None,
+            roots: vec!["/v".to_string()],
+            workspace_id: "w1".to_string(),
+        }
+    }
+
+    #[test]
+    fn corpus_event_populates_state_and_clamps_selection() {
+        let mut app = AppState::default();
+        app.corpus_index = 9;
+        app.reduce(UiEvent::Corpus(corpus_state(vec![
+            corpus_doc("a", crate::gen::CorpusDocumentStatus::Indexed),
+            corpus_doc("b", crate::gen::CorpusDocumentStatus::Stale),
+        ])));
+        assert_eq!(app.corpus.as_ref().unwrap().documents.len(), 2);
+        assert_eq!(app.corpus_index, 1);
+    }
+
+    #[test]
+    fn corpus_job_reduces_progress() {
+        let mut app = AppState::default();
+        app.reduce(UiEvent::Corpus(corpus_state(vec![])));
+        app.reduce(UiEvent::CorpusJob(crate::gen::CorpusJob {
+            completed: 4,
+            error: None,
+            finished_at: None,
+            id: "j1".to_string(),
+            kind: crate::gen::CorpusJobKind::Index,
+            started_at: Some(1),
+            state: crate::gen::CorpusJobState::Running,
+            total: 10,
+            workspace_id: "w1".to_string(),
+        }));
+        let job = app.corpus.as_ref().unwrap().job.as_ref().unwrap();
+        assert_eq!((job.completed, job.total), (4, 10));
+        assert_eq!(job.state, crate::gen::CorpusJobState::Running);
+    }
+
+    #[test]
+    fn corpus_refusal_is_rendered_verbatim() {
+        let mut app = AppState::default();
+        app.reduce(UiEvent::CorpusRefused {
+            path: "/etc".to_string(),
+            allowed_roots: vec!["/home/me".to_string()],
+        });
+        let err = app.error.as_deref().unwrap_or_default();
+        assert!(err.starts_with("path-outside-allowed-roots: /etc"));
+        assert!(err.contains("/home/me"));
+    }
+
+    #[test]
+    fn corpus_status_label_renders_status_chunks_and_error() {
+        assert_eq!(
+            corpus_status_label(&corpus_doc("a", crate::gen::CorpusDocumentStatus::Indexed)),
+            "indexed · 3 chunks"
+        );
+        assert_eq!(
+            corpus_status_label(&corpus_doc("b", crate::gen::CorpusDocumentStatus::Stale)),
+            "stale · 3 chunks"
+        );
+        let mut err = corpus_doc("c", crate::gen::CorpusDocumentStatus::Error);
+        err.error = Some("boom".to_string());
+        assert_eq!(corpus_status_label(&err), "error · 3 chunks · boom");
+    }
+
+    #[test]
+    fn scope_edit_builds_the_request_and_cycles_fields() {
+        let mut edit = ScopeEdit::from_scope(Some(&CorpusState {
+            documents: vec![],
+            exclude: vec!["**/.obsidian/**".to_string()],
+            include: vec!["**/*.md".to_string()],
+            job: None,
+            roots: vec!["/v".to_string()],
+            workspace_id: "w1".to_string(),
+        }));
+        assert_eq!(edit.field, ScopeField::Roots);
+        edit.next_field();
+        assert_eq!(edit.field, ScopeField::Include);
+        edit.next_field();
+        assert_eq!(edit.field, ScopeField::Exclude);
+        edit.next_field();
+        assert_eq!(edit.field, ScopeField::Roots);
+
+        let mut edit = ScopeEdit {
+            field: ScopeField::Roots,
+            roots: " /v , /lit ,, ".to_string(),
+            include: " **/*.md ".to_string(),
+            exclude: "".to_string(),
+        };
+        let request = edit.request("w1");
+        assert_eq!(request.workspace_id, "w1");
+        assert_eq!(request.roots.unwrap(), vec!["/v", "/lit"]);
+        assert_eq!(request.include.unwrap(), vec!["**/*.md"]);
+        assert!(request.exclude.unwrap().is_empty());
+        // The active buffer is the roots field.
+        edit.current_mut().push_str(", /extra");
+        assert!(edit.roots.contains("/extra"));
+    }
+
+    #[test]
+    fn comma_list_trims_and_drops_empties() {
+        assert_eq!(comma_list(" a , b ,, c "), vec!["a", "b", "c"]);
+        assert!(comma_list("  ,  ").is_empty());
+    }
+
+    fn fleet_state(control: crate::gen::FleetStateControl) -> FleetState {
+        FleetState {
+            control,
+            models: vec![crate::gen::FleetModel {
+                base_url: "http://127.0.0.1:8001/v1".to_string(),
+                capabilities: None,
+                live_state: crate::gen::FleetModelLiveState::Down,
+                mode_tags: Some(vec!["editor".to_string()]),
+                name: "gemma4-12b".to_string(),
+            }],
+        }
+    }
+
+    #[test]
+    fn fleet_event_populates_state_and_clears_error() {
+        let mut app = AppState::default();
+        app.fleet_error = Some(FleetErrorInfo {
+            message: "old".to_string(),
+            provision_hint: true,
+        });
+        app.fleet_index = 9;
+        app.reduce(UiEvent::Fleet(fleet_state(
+            crate::gen::FleetStateControl::Up,
+        )));
+        assert_eq!(
+            app.fleet.as_ref().unwrap().control,
+            crate::gen::FleetStateControl::Up
+        );
+        assert_eq!(app.fleet_index, 0);
+        assert!(app.fleet_error.is_none());
+    }
+
+    #[test]
+    fn fleet_unreachable_is_data_not_an_error() {
+        let mut app = AppState::default();
+        app.reduce(UiEvent::Fleet(fleet_state(
+            crate::gen::FleetStateControl::Unreachable,
+        )));
+        let fleet = app.fleet.as_ref().unwrap();
+        assert_eq!(fleet.control.as_str(), "unreachable");
+        assert_eq!(fleet.models[0].live_state.as_str(), "down");
+    }
+
+    #[test]
+    fn fleet_error_carries_the_provision_hint() {
+        let mut app = AppState::default();
+        app.reduce(UiEvent::FleetError(FleetErrorInfo {
+            message: "fleet start x: model-not-found".to_string(),
+            provision_hint: true,
+        }));
+        let err = app.fleet_error.as_ref().unwrap();
+        assert!(err.provision_hint);
+        assert!(err.message.contains("model-not-found"));
     }
 }

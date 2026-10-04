@@ -137,6 +137,8 @@ type Resolution struct {
     LiveState        LiveState
     Degraded         bool            // true when a fallback served
     UsedName         string          // actual serving name (== fallback when Degraded)
+    Started          bool            // E3.1: one bounded auto-start brought the requested model up (internal)
+    StartError       string          // E3.1: labeled failure of that attempt; "" when not attempted/failed (internal)
 }
 
 type FleetGateway interface {
@@ -158,6 +160,14 @@ Semantics:
   preferred model is `down`/`not-found`, it walks the models sharing `opts.ModeTag`
   in fleet-policy order (ADR-0015), selects the first `up`, and sets
   `Degraded=true, UsedName=<fallback>`.
+- **E3.1 auto-start (ADR-0040 recorded note, 2026-10-04).** Before the fallback
+  ladder, `Resolve` makes **one bounded, flagged `Start`** of the requested model
+  and re-reads its status; if it comes up, resolution is non-degraded and
+  `Started=true`. A start failure is labeled on `StartError` and the ladder runs;
+  failed attempts are backoff-cached (~30 s) so an un-startable model does not pay
+  the daemon's 60 s start bound on every resolve. This applies to **all** resolve
+  callers (the turn model, the embedder, the router). `Started`/`StartError` are
+  internal and never projected into the client API.
 - `Resolve` never returns a live `down`/`not-found` model as `UsedName` without a
   fallback unless none exists (`Degraded=false`, and the caller surfaces
   `no-model-available`).

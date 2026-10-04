@@ -24,7 +24,7 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph, Tabs, Wrap};
 use ratatui::{Frame, Terminal};
 
 use crate::bridge::{Bridge, Command};
-use crate::state::{AppState, ConnectionState, Overlay, Role};
+use crate::state::{corpus_status_label, AppState, ConnectionState, Overlay, Role, ScopeEdit};
 
 type Tui = Terminal<CrosstermBackend<Stdout>>;
 
@@ -57,10 +57,21 @@ pub fn install_panic_hook() {
 pub fn run_loop(terminal: &mut Tui, app: &mut AppState, bridge: &Bridge) -> io::Result<()> {
     let mut scroll: u16 = 0;
     let mut follow = true;
+    let mut last_corpus_poll = std::time::Instant::now();
 
     while !app.should_quit {
         while let Ok(event) = bridge.event_rx.try_recv() {
             app.reduce(event);
+        }
+
+        // Corpus job progress is polled via GET /corpus (the Phase C pinned
+        // transport) while the overlay shows a running job (E2c).
+        if app.overlay == Overlay::Corpus
+            && corpus_job_running(app)
+            && last_corpus_poll.elapsed() >= Duration::from_secs(1)
+        {
+            bridge.send(Command::RefreshCorpus);
+            last_corpus_poll = std::time::Instant::now();
         }
 
         let desired = if follow { u16::MAX } else { scroll };
@@ -145,6 +156,44 @@ fn handle_key(
         return;
     }
 
+    // Corpus-scope editing owns the keyboard while active.
+    if app.scope_edit.is_some() {
+        match key.code {
+            KeyCode::Enter => {
+                if let Some(workspace_id) = app.workspace.as_ref().map(|w| w.id.clone()) {
+                    if let Some(edit) = app.scope_edit.take() {
+                        let request = edit.request(&workspace_id);
+                        bridge.send(Command::PutCorpus {
+                            roots: request.roots.unwrap_or_default(),
+                            include: request.include.unwrap_or_default(),
+                            exclude: request.exclude.unwrap_or_default(),
+                        });
+                    }
+                } else {
+                    app.scope_edit = None;
+                }
+            }
+            KeyCode::Esc => app.scope_edit = None,
+            KeyCode::Tab => {
+                if let Some(edit) = app.scope_edit.as_mut() {
+                    edit.next_field();
+                }
+            }
+            KeyCode::Backspace => {
+                if let Some(edit) = app.scope_edit.as_mut() {
+                    edit.current_mut().pop();
+                }
+            }
+            KeyCode::Char(ch) if !ctrl => {
+                if let Some(edit) = app.scope_edit.as_mut() {
+                    edit.current_mut().push(ch);
+                }
+            }
+            _ => {}
+        }
+        return;
+    }
+
     // Modal overlays own the keyboard while open.
     match app.overlay {
         Overlay::Directory => {
@@ -165,6 +214,14 @@ fn handle_key(
         }
         Overlay::Locate => {
             handle_locate_key(key, app, bridge);
+            return;
+        }
+        Overlay::Corpus => {
+            handle_corpus_key(key, app, bridge);
+            return;
+        }
+        Overlay::Fleet => {
+            handle_fleet_key(key, app, bridge);
             return;
         }
         Overlay::None => {}
@@ -212,6 +269,8 @@ fn handle_key(
             app.overlay = Overlay::Tray;
             app.tray_index = 0;
         }
+        KeyCode::Char('k') if ctrl => open_corpus(app, bridge),
+        KeyCode::Char('f') if ctrl => open_fleet(app, bridge),
         KeyCode::Enter => {
             if !app.turn_active {
                 if let Some(mode) = app.active_mode.clone() {
@@ -503,6 +562,8 @@ fn render(frame: &mut Frame, app: &AppState, desired_scroll: u16) -> u16 {
         Overlay::Tray => render_tray_overlay(frame, area, app),
         Overlay::Mentions => render_mentions_overlay(frame, area, app),
         Overlay::Locate => render_locate_overlay(frame, area, app),
+        Overlay::Corpus => render_corpus_overlay(frame, area, app),
+        Overlay::Fleet => render_fleet_overlay(frame, area, app),
         Overlay::None => {}
     }
     if app.rename.is_some() {
@@ -510,6 +571,9 @@ fn render(frame: &mut Frame, app: &AppState, desired_scroll: u16) -> u16 {
     }
     if app.query_edit.is_some() {
         render_query_overlay(frame, area, app);
+    }
+    if app.scope_edit.is_some() {
+        render_scope_overlay(frame, area, app);
     }
     max_scroll
 }
@@ -851,11 +915,10 @@ fn render_diff(frame: &mut Frame, area: Rect, app: &AppState) {
 }
 
 fn render_input(frame: &mut Frame, area: Rect, app: &AppState) {
-    let paragraph = Paragraph::new(app.input.as_str()).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title("Message (Enter send · Ctrl+X cancel · Ctrl+W files · Ctrl+S sessions)"),
-    );
+    let paragraph =
+        Paragraph::new(app.input.as_str()).block(Block::default().borders(Borders::ALL).title(
+            "Message (Enter · Ctrl+X cancel · Ctrl+W files · Ctrl+S sessions · Ctrl+K corpus · Ctrl+F fleet)",
+        ));
     frame.render_widget(paragraph, area);
     let cursor_x = area.x + 1 + app.input.chars().count().min(u16::MAX as usize) as u16;
     if cursor_x < area.x + area.width.saturating_sub(1) {
@@ -1109,6 +1172,182 @@ fn render_locate_overlay(frame: &mut Frame, area: Rect, app: &AppState) {
     );
 }
 
+/// The corpus tree overlay (E2c): multi-root scope, per-document status with
+/// chunk counts, job progress, and index/evict/rebuild decisions. All values are
+/// engine-sourced; the client computes no tokens or provenance.
+fn render_corpus_overlay(frame: &mut Frame, area: Rect, app: &AppState) {
+    let popup = centered_rect(76, 70, area);
+    frame.render_widget(Clear, popup);
+    let mut lines: Vec<Line> = Vec::new();
+    if let Some(corpus) = &app.corpus {
+        lines.push(Line::from(format!(
+            "roots · {}",
+            if corpus.roots.is_empty() {
+                "(none)".to_string()
+            } else {
+                corpus.roots.join(", ")
+            }
+        )));
+        lines.push(Line::from(format!(
+            "include · {}",
+            if corpus.include.is_empty() {
+                "(default **/*.md)".to_string()
+            } else {
+                corpus.include.join(", ")
+            }
+        )));
+        lines.push(Line::from(format!(
+            "exclude · {}",
+            if corpus.exclude.is_empty() {
+                "(none)".to_string()
+            } else {
+                corpus.exclude.join(", ")
+            }
+        )));
+        match &corpus.job {
+            Some(job) => lines.push(Line::from(format!(
+                "job · {} {} · {}/{}{}",
+                job.kind.as_str(),
+                job.state.as_str(),
+                job.completed,
+                job.total,
+                job.error
+                    .as_deref()
+                    .map(|e| format!(" · {e}"))
+                    .unwrap_or_default()
+            ))),
+            None => lines.push(Line::from("job · idle")),
+        }
+        for (i, doc) in corpus.documents.iter().enumerate() {
+            let cursor = if i == app.corpus_index { "› " } else { "  " };
+            lines.push(Line::from(format!(
+                "{cursor}{} · {}",
+                corpus_status_label(doc),
+                doc.path,
+            )));
+        }
+        if corpus.documents.is_empty() {
+            lines.push(Line::from("(no documents in scope — press i to index)"));
+        }
+    } else {
+        lines.push(Line::from("(no corpus state — open a workspace)"));
+    }
+    lines.push(Line::from(
+        "i index/rebuild · e evict · s edit scope · r refresh · Esc close",
+    ));
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("Corpus tree (decisions only; the engine indexes)"),
+            )
+            .wrap(Wrap { trim: true }),
+        popup,
+    );
+}
+
+/// The corpus-scope editor (E2c): Tab cycles roots/include/exclude, Enter
+/// persists via `PUT /corpus`. Comma-separated; the engine canonicalizes.
+fn render_scope_overlay(frame: &mut Frame, area: Rect, app: &AppState) {
+    let popup = centered_rect(66, 20, area);
+    frame.render_widget(Clear, popup);
+    let Some(edit) = &app.scope_edit else {
+        return;
+    };
+    let rows = ["roots", "include", "exclude"];
+    let values = [&edit.roots, &edit.include, &edit.exclude];
+    let mut lines: Vec<Line> = Vec::new();
+    for (i, (label, value)) in rows.iter().zip(values.iter()).enumerate() {
+        let marker = if i == edit.field as usize {
+            "› "
+        } else {
+            "  "
+        };
+        lines.push(Line::from(format!("{marker}{label}: {value}")));
+    }
+    lines.push(Line::from(
+        "Tab next field · Enter save (PUT /corpus) · Esc cancel",
+    ));
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("Edit corpus scope (comma-separated)"),
+            )
+            .wrap(Wrap { trim: true }),
+        popup,
+    );
+}
+
+/// The fleet observability overlay (E3): control-plane reachability, per-model
+/// live state, and the raw lifecycle verbs. No busy/poll/switch logic — the
+/// engine owns orchestration and the client refetches after each verb.
+fn render_fleet_overlay(frame: &mut Frame, area: Rect, app: &AppState) {
+    let popup = centered_rect(68, 60, area);
+    frame.render_widget(Clear, popup);
+    let mut lines: Vec<Line> = Vec::new();
+    if let Some(fleet) = &app.fleet {
+        let control = fleet.control.as_str();
+        lines.push(Line::from(if control == "unreachable" {
+            Span::styled(
+                "control · unreachable (serving daemon down; last-known states)",
+                Style::default().fg(Color::Red),
+            )
+        } else {
+            Span::styled(
+                format!("control · {control}"),
+                Style::default().fg(Color::Green),
+            )
+        }));
+        for (i, model) in fleet.models.iter().enumerate() {
+            let cursor = if i == app.fleet_index { "› " } else { "  " };
+            let tags = model
+                .mode_tags
+                .as_ref()
+                .map(|t| t.join(","))
+                .unwrap_or_default();
+            lines.push(Line::from(format!(
+                "{cursor}{} [{}] {}",
+                model.name,
+                model.live_state.as_str(),
+                tags
+            )));
+        }
+        if fleet.models.is_empty() {
+            lines.push(Line::from("(no models)"));
+        }
+    } else {
+        lines.push(Line::from("(no fleet state — press r to refresh)"));
+    }
+    if let Some(err) = &app.fleet_error {
+        lines.push(Line::from(Span::styled(
+            format!("error: {}", err.message),
+            Style::default().fg(Color::Red),
+        )));
+        if err.provision_hint {
+            lines.push(Line::from(Span::styled(
+                "hint: model not provisioned — press p to provision",
+                Style::default().fg(Color::Yellow),
+            )));
+        }
+    }
+    lines.push(Line::from(
+        "s start · t stop · p provision · r refresh · Esc close",
+    ));
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("Fleet (raw lifecycle verbs; engine orchestrates)"),
+            )
+            .wrap(Wrap { trim: true }),
+        popup,
+    );
+}
+
 /// The tray's selected snapshot chunk, if any.
 fn selected_chunk(app: &AppState) -> Option<crate::gen::ContextChunk> {
     app.last_context
@@ -1217,6 +1456,100 @@ fn handle_tray_key(key: KeyEvent, app: &mut AppState, bridge: &Bridge) {
     }
 }
 
+/// Open the corpus tree at the workspace (E2c).
+fn open_corpus(app: &mut AppState, bridge: &Bridge) {
+    if app.workspace.is_none() {
+        app.error = Some("no workspace; corpus unavailable".to_string());
+        return;
+    }
+    bridge.send(Command::GetCorpus);
+    app.overlay = Overlay::Corpus;
+    app.corpus_index = 0;
+    app.scope_edit = None;
+}
+
+/// Whether the corpus overlay should keep polling `GET /corpus` (E2c).
+fn corpus_job_running(app: &AppState) -> bool {
+    app.corpus
+        .as_ref()
+        .and_then(|c| c.job.as_ref())
+        .map(|j| j.state == crate::gen::CorpusJobState::Running)
+        .unwrap_or(false)
+}
+
+/// Corpus-tree keys (E2c): index/rebuild, evict, edit scope, refresh.
+fn handle_corpus_key(key: KeyEvent, app: &mut AppState, bridge: &Bridge) {
+    let count = app.corpus.as_ref().map_or(0, |c| c.documents.len());
+    match key.code {
+        KeyCode::Esc => app.overlay = Overlay::None,
+        KeyCode::Up => app.corpus_index = app.corpus_index.saturating_sub(1),
+        KeyCode::Down => {
+            if app.corpus_index + 1 < count {
+                app.corpus_index += 1;
+            }
+        }
+        KeyCode::Char('i') => bridge.send(Command::IndexCorpus),
+        KeyCode::Char('r') => bridge.send(Command::RefreshCorpus),
+        KeyCode::Char('s') => {
+            app.scope_edit = Some(ScopeEdit::from_scope(app.corpus.as_ref()));
+        }
+        KeyCode::Char('e') => {
+            if let Some(doc) = app
+                .corpus
+                .as_ref()
+                .and_then(|c| c.documents.get(app.corpus_index))
+            {
+                bridge.send(Command::EvictCorpusDocument { id: doc.id.clone() });
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Open the fleet observability overlay (E3). Raw verbs only; no busy/poll logic.
+fn open_fleet(app: &mut AppState, bridge: &Bridge) {
+    bridge.send(Command::GetFleet);
+    app.overlay = Overlay::Fleet;
+    app.fleet_index = 0;
+    app.fleet_error = None;
+}
+
+/// Fleet overlay keys (E3): start/stop/provision the selected model, refresh.
+fn handle_fleet_key(key: KeyEvent, app: &mut AppState, bridge: &Bridge) {
+    let count = app.fleet.as_ref().map_or(0, |f| f.models.len());
+    let selected = app
+        .fleet
+        .as_ref()
+        .and_then(|f| f.models.get(app.fleet_index))
+        .map(|m| m.name.clone());
+    match key.code {
+        KeyCode::Esc => app.overlay = Overlay::None,
+        KeyCode::Up => app.fleet_index = app.fleet_index.saturating_sub(1),
+        KeyCode::Down => {
+            if app.fleet_index + 1 < count {
+                app.fleet_index += 1;
+            }
+        }
+        KeyCode::Char('s') => {
+            if let Some(name) = selected {
+                bridge.send(Command::StartModel { name });
+            }
+        }
+        KeyCode::Char('t') => {
+            if let Some(name) = selected {
+                bridge.send(Command::StopModel { name });
+            }
+        }
+        KeyCode::Char('p') => {
+            if let Some(name) = selected {
+                bridge.send(Command::ProvisionModel { name });
+            }
+        }
+        KeyCode::Char('r') => bridge.send(Command::GetFleet),
+        _ => {}
+    }
+}
+
 fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
     let vertical = Layout::default()
         .direction(Direction::Vertical)
@@ -1312,5 +1645,34 @@ mod tests {
         };
         assert!(same_ref(&a, &b));
         assert!(!same_ref(&a, &c));
+    }
+
+    #[test]
+    fn corpus_poll_only_while_a_job_runs() {
+        let mut app = AppState::default();
+        assert!(!corpus_job_running(&app));
+        app.corpus = Some(crate::gen::CorpusState {
+            documents: vec![],
+            exclude: vec![],
+            include: vec![],
+            job: Some(crate::gen::CorpusJob {
+                completed: 0,
+                error: None,
+                finished_at: None,
+                id: "j1".to_string(),
+                kind: crate::gen::CorpusJobKind::Index,
+                started_at: Some(1),
+                state: crate::gen::CorpusJobState::Running,
+                total: 3,
+                workspace_id: "w1".to_string(),
+            }),
+            roots: vec![],
+            workspace_id: "w1".to_string(),
+        });
+        assert!(corpus_job_running(&app));
+        if let Some(job) = app.corpus.as_mut().and_then(|c| c.job.as_mut()) {
+            job.state = crate::gen::CorpusJobState::Done;
+        }
+        assert!(!corpus_job_running(&app));
     }
 }

@@ -25,11 +25,12 @@ use futures_util::StreamExt;
 use crate::discovery::{self, EngineEnv};
 use crate::gen::{
     BlockEdit, CancelTurnApiError, CommitDocumentApiError, CommitRequest, ContextPolicy,
-    CreateSessionRequest, CreateWorkspaceRequest, HttpClient, ListDirectoryApiError,
-    OpenDocumentRequest, RenameSessionRequest, Session, Task,
+    CorpusIndexRequest, CreateSessionRequest, CreateWorkspaceRequest, EvictCorpusDocumentApiError,
+    HttpClient, ListDirectoryApiError, OpenDocumentRequest, PutCorpusApiError, PutCorpusRequest,
+    RenameSessionRequest, Session, Task,
 };
 use crate::sse::{Decoded, SseDecoder};
-use crate::state::UiEvent;
+use crate::state::{FleetErrorInfo, UiEvent};
 
 /// A request from the UI thread to the worker.
 #[derive(Debug, Clone)]
@@ -70,6 +71,28 @@ pub enum Command {
     LoadBlocks,
     /// Persist the session context policy (tray; ADR-0049 §8).
     PutSessionContext { policy: ContextPolicy },
+    /// Read the workspace's corpus scope + per-document status + job progress.
+    GetCorpus,
+    /// Re-read the corpus state (job-progress poll; GET /corpus).
+    RefreshCorpus,
+    /// Set the corpus scope (idempotent, index-only; ADR-0049 §3/§4).
+    PutCorpus {
+        roots: Vec<String>,
+        include: Vec<String>,
+        exclude: Vec<String>,
+    },
+    /// Bulk (re)index the current scope.
+    IndexCorpus,
+    /// Evict one corpus document by its path-derived id.
+    EvictCorpusDocument { id: String },
+    /// Read the fleet observability state (`GET /fleet`) (E3).
+    GetFleet,
+    /// Start a model (raw lifecycle verb; the engine orchestrates).
+    StartModel { name: String },
+    /// Stop a model (raw lifecycle verb).
+    StopModel { name: String },
+    /// Provision a model (raw lifecycle verb).
+    ProvisionModel { name: String },
     /// Accept the staged candidate for `block_id` (stage + commit + write-through).
     Approve { block_id: String },
     /// Retry an approve with the explicit `overwrite: true` opt-in.
@@ -179,6 +202,18 @@ async fn run_worker(
             } => worker.resolve_locate(turn_id, chunk_key, cancel).await,
             Command::LoadBlocks => worker.load_blocks().await,
             Command::PutSessionContext { policy } => worker.put_session_context(policy).await,
+            Command::GetCorpus | Command::RefreshCorpus => worker.refresh_corpus().await,
+            Command::PutCorpus {
+                roots,
+                include,
+                exclude,
+            } => worker.put_corpus(roots, include, exclude).await,
+            Command::IndexCorpus => worker.index_corpus().await,
+            Command::EvictCorpusDocument { id } => worker.evict_corpus_document(id).await,
+            Command::GetFleet => worker.refresh_fleet().await,
+            Command::StartModel { name } => worker.start_model(name).await,
+            Command::StopModel { name } => worker.stop_model(name).await,
+            Command::ProvisionModel { name } => worker.provision_model(name).await,
             Command::Approve { block_id } => worker.approve(block_id, false).await,
             Command::Overwrite { block_id } => worker.approve(block_id, true).await,
             Command::Shutdown => {
@@ -253,6 +288,8 @@ impl Worker {
                     root: ws.root,
                     name: ws.name,
                 });
+                // Fetch the workspace corpus scope/status on adoption (E2c).
+                self.refresh_corpus().await;
             }
             Err(err) => self.error(format!("open workspace failed: {err}")),
         }
@@ -457,6 +494,146 @@ impl Worker {
         }
     }
 
+    /// Read the workspace corpus state (ADR-0049 §4). `GET /corpus` is also the
+    /// pinned job-progress poll (Phase C); the overlay drives it while a job runs.
+    async fn refresh_corpus(&self) {
+        let (Some(client), Some(workspace_id)) = (self.client.clone(), self.workspace_id.clone())
+        else {
+            return;
+        };
+        match client.get_corpus(&workspace_id).await {
+            Ok(state) => self.emit(UiEvent::Corpus(state)),
+            Err(err) => self.error(format!("load corpus failed: {err}")),
+        }
+    }
+
+    /// Set the corpus scope (idempotent, index-only; ADR-0049 §3/§4). A root
+    /// outside ALLOWED_ROOTS is the typed `path-outside-allowed-roots` refusal.
+    async fn put_corpus(&self, roots: Vec<String>, include: Vec<String>, exclude: Vec<String>) {
+        let (Some(client), Some(workspace_id)) = (self.client.clone(), self.workspace_id.clone())
+        else {
+            self.error("no workspace; corpus scope not saved");
+            return;
+        };
+        let request = PutCorpusRequest {
+            workspace_id,
+            roots: Some(roots),
+            include: Some(include),
+            exclude: Some(exclude),
+        };
+        match client.put_corpus(request).await {
+            Ok(state) => self.emit(UiEvent::Corpus(state)),
+            Err(err) => {
+                if let Some(api) = err.api() {
+                    if let Some(PutCorpusApiError::Status403(refusal)) = &api.typed {
+                        self.emit(UiEvent::CorpusRefused {
+                            path: refusal.path.clone(),
+                            allowed_roots: refusal.allowed_roots.clone(),
+                        });
+                        return;
+                    }
+                }
+                self.error(format!("save corpus scope failed: {err}"));
+            }
+        }
+    }
+
+    /// Bulk (re)index the current scope; emit the accepted job, then refresh.
+    async fn index_corpus(&self) {
+        let (Some(client), Some(workspace_id)) = (self.client.clone(), self.workspace_id.clone())
+        else {
+            self.error("no workspace; cannot index corpus");
+            return;
+        };
+        match client
+            .index_corpus(CorpusIndexRequest { workspace_id })
+            .await
+        {
+            Ok(job) => {
+                self.emit(UiEvent::CorpusJob(job));
+                self.refresh_corpus().await;
+            }
+            Err(err) => self.error(format!("index corpus failed: {err}")),
+        }
+    }
+
+    /// Evict one corpus document (idempotent); then refresh.
+    async fn evict_corpus_document(&self, id: String) {
+        let (Some(client), Some(workspace_id)) = (self.client.clone(), self.workspace_id.clone())
+        else {
+            self.error("no workspace; cannot evict");
+            return;
+        };
+        match client.evict_corpus_document(&id, &workspace_id).await {
+            Ok(()) => self.refresh_corpus().await,
+            Err(err) => {
+                if let Some(api) = err.api() {
+                    if let Some(EvictCorpusDocumentApiError::Status403(refusal)) = &api.typed {
+                        self.emit(UiEvent::CorpusRefused {
+                            path: refusal.path.clone(),
+                            allowed_roots: refusal.allowed_roots.clone(),
+                        });
+                        return;
+                    }
+                }
+                self.error(format!("evict corpus document failed: {err}"));
+            }
+        }
+    }
+
+    /// Read the fleet observability state (`GET /fleet`) (E3). There is no
+    /// client-side poll loop: the engine owns orchestration (ADR-0040 recorded
+    /// note) and the UI refetches on open and after each raw lifecycle verb.
+    async fn refresh_fleet(&self) {
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        match client.get_fleet().await {
+            Ok(state) => self.emit(UiEvent::Fleet(state)),
+            Err(err) => self.emit(UiEvent::FleetError(FleetErrorInfo {
+                message: format!("load fleet failed: {err}"),
+                provision_hint: false,
+            })),
+        }
+    }
+
+    /// Raw lifecycle verb: start a model, then refetch the fleet.
+    async fn start_model(&self, name: String) {
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        match client.start_model(&name).await {
+            Ok(_) => self.refresh_fleet().await,
+            Err(err) => self.emit(UiEvent::FleetError(fleet_action_error("start", &name, err))),
+        }
+    }
+
+    /// Raw lifecycle verb: stop a model, then refetch the fleet.
+    async fn stop_model(&self, name: String) {
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        match client.stop_model(&name).await {
+            Ok(_) => self.refresh_fleet().await,
+            Err(err) => self.emit(UiEvent::FleetError(fleet_action_error("stop", &name, err))),
+        }
+    }
+
+    /// Raw lifecycle verb: provision a model, then refetch the fleet.
+    async fn provision_model(&self, name: String) {
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        match client.provision_model(&name).await {
+            Ok(_) => self.refresh_fleet().await,
+            Err(err) => self.emit(UiEvent::FleetError(fleet_action_error(
+                "provision",
+                &name,
+                err,
+            ))),
+        }
+    }
+
     /// Build the turn Task from the worker's engine facts.
     fn build_turn_task(
         &self,
@@ -575,6 +752,20 @@ impl Worker {
     }
 }
 
+/// Build a labeled fleet lifecycle-verb error; `provision_hint` is set when the
+/// failure implies the model is not provisioned (ADR-0040 §5).
+fn fleet_action_error(action: &str, name: &str, err: impl std::fmt::Display) -> FleetErrorInfo {
+    let rendered = err.to_string();
+    let lower = rendered.to_lowercase();
+    let provision_hint = lower.contains("model-not-found")
+        || lower.contains("not found")
+        || lower.contains("provision");
+    FleetErrorInfo {
+        message: format!("fleet {action} {name}: {rendered}"),
+        provision_hint,
+    }
+}
+
 /// Drive one turn's SSE stream to completion, forwarding typed events to the UI.
 /// Runs in its own task so the worker command loop can service Cancel.
 async fn pump_turn(client: HttpClient, task: Task, event_tx: Sender<UiEvent>) {
@@ -634,5 +825,24 @@ fn emit_decoded(event_tx: &Sender<UiEvent>, decoded: Decoded) -> bool {
             )));
             false
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fleet_action_error;
+
+    #[test]
+    fn fleet_action_error_flags_the_provision_hint() {
+        let hint = fleet_action_error(
+            "start",
+            "phi-4",
+            "500 model-not-found: name not in the fleet",
+        );
+        assert!(hint.provision_hint);
+        assert!(hint.message.contains("start phi-4"));
+
+        let other = fleet_action_error("stop", "phi-4", "500 daemon-unreachable");
+        assert!(!other.provision_hint);
     }
 }

@@ -20,9 +20,9 @@ Serving is reached only through the control daemon in the sibling
 
 ## Use the TUI
 
-> The TUI is being replaced by a standalone Ratatui (Rust) client (ADR-0046).
-> This OpenTUI client is frozen and stays usable until the new one reaches
-> parity.
+The active client is the standalone Ratatui (Rust) TUI in `client/tui-rs`
+(ADR-0046). The OpenTUI client in `client/tui/` is frozen in-tree and is no
+longer the active client.
 
 ```sh
 # 1. control daemon (sibling repo)
@@ -31,26 +31,31 @@ cd ../macos-dev-config && go run ./cmd/fleetdaemon
 # 2. engine (pinned port for a stable URL)
 cd ../texteditor/server && go run ./cmd/texteditor --port 9100
 
-# 3. TUI — first time only
-cd ../texteditor/client/tui && bun install && bun run gen
+# 3. TUI — Rust lives on the external SSD here; export it first, then build
+export RUSTUP_HOME=/Volumes/Ex-SSD/caches/rust CARGO_HOME=/Volumes/Ex-SSD/caches/cargo
+export PATH="$CARGO_HOME/bin:$PATH"
+cd ../texteditor && ./tools/build-tui-rs.sh
 
-# 4. open a document and start editing
-bun run src/index.tsx /path/to/note.md
+# 4. open a document (or a directory) and start editing
+./client/tui-rs/target/debug/texteditor-tui-rs /path/to/note.md
 ```
 
 **What you can do:**
 
-- Chat with your document in any mode — `editor`, `proofreader`, `grammar`,
+- Chat with your document in any preset — `editor`, `proofreader`, `grammar`,
   `drafter` — type in the chat input and press `enter`.
-- Review the AI's edit in the diff preview, press `a` to accept (commits through
-  the engine), or keep typing to discard.
-- Watch the **live token meter** — every prompt/response cost, per component.
-- Switch model/mode from the panels; the engine starts the chosen model via the
-  daemon automatically.
-- Ask it to retrieve from your notes (`retrieve`/`read_note` tools) — results
-  show in the RAG panel with provenance.
+- Review the AI's edit in the diff preview and approve it (the engine commits
+  and writes through); the reader pane shows the open document, read-only.
+- Watch the **live token meter** and the context inspector (RAG provenance,
+  drops, thinking/budget labels).
+- Manage the retrievable corpus (Ctrl+K), curate a turn's context in the tray
+  (Ctrl+T), attach files with `@`, and locate a pasted chunk with `/locate`.
+- Switch or lifecycle models from the fleet view (Ctrl+F) — the engine starts
+  the chosen model via the daemon automatically.
 
-**Keys:** `enter` send · `a` accept candidate · `esc` quit.
+**Keys:** `enter` send · `Ctrl+X` cancel · `Ctrl+A` accept candidate · `Ctrl+W`
+files · `Ctrl+S` sessions · `Ctrl+K` corpus · `Ctrl+T` tray · `Ctrl+R` reader ·
+`Ctrl+I` inspector · `Ctrl+F` fleet · `esc` quit.
 
 ## Use the Tauri editor (frozen, ADR-0044)
 
