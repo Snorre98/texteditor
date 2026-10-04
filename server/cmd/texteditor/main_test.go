@@ -146,7 +146,7 @@ func TestEditMarkdownHandlerPassesBaseHashGuardAndMode(t *testing.T) {
 	}}
 	h := editMarkdownHandler(doc, textformatter.New())
 
-	out, err := h(json.RawMessage(`{"blockId":"b1","text":"new text","baseHash":"abcd1234","documentId":"d1","modeName":"proofreader"}`))
+	out, err := h(context.Background(), json.RawMessage(`{"blockId":"b1","text":"new text","baseHash":"abcd1234","documentId":"d1","modeName":"proofreader"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -171,7 +171,7 @@ func TestEditMarkdownHandlerReportsGuardFailed(t *testing.T) {
 	}
 	h := editMarkdownHandler(doc, textformatter.New())
 
-	out, err := h(json.RawMessage(`{"blockId":"b1","text":"stale text","baseHash":"then","documentId":"d1"}`))
+	out, err := h(context.Background(), json.RawMessage(`{"blockId":"b1","text":"stale text","baseHash":"then","documentId":"d1"}`))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -11,13 +11,17 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"path/filepath"
 
+	"texteditor/internal/corpus"
 	"texteditor/internal/document"
+	"texteditor/internal/filesystem"
 	"texteditor/internal/fleet"
 	"texteditor/internal/genapi"
 	"texteditor/internal/loop"
 	"texteditor/internal/mode"
-	"texteditor/internal/session"
+	"texteditor/internal/pathutil"
+	"texteditor/internal/shard"
 	"texteditor/internal/tool"
 	"texteditor/internal/workspace"
 	"texteditor/shared/dto"
@@ -32,9 +36,11 @@ type Deps struct {
 	Modes       mode.Interface
 	Tools       tool.Registry
 	Doc         document.Interface
-	Sessions    session.Interface
 	Loop        loop.Interface
-	Workspace   workspace.Interface
+	Filesystem  filesystem.Interface
+	Workspaces  workspace.Interface // registry: workspace + session routing
+	Shards      shard.Resolver      // workspace-scoped sessions/meter/index
+	Corpus      corpus.Interface    // corpus scope/status/index/evict (ADR-0049 §4)
 	BaseURL     string
 	CORSOrigins []string
 }
@@ -216,11 +222,15 @@ func (h *handler) ListTools(ctx context.Context) ([]genapi.ToolDef, error) {
 }
 
 // ListDirectory backs GET /directories (ADR-0035 §2): a shallow, engine-served
-// directory listing through the Workspace leaf. List failures project as
-// not-found / not-a-directory (interface.md §9b).
-func (h *handler) ListDirectory(ctx context.Context, p genapi.ListDirectoryParams) (*genapi.DirectoryListing, error) {
-	entries, err := h.d.Workspace.List(ctx, p.Path)
+// directory listing through the Filesystem leaf, bounded by ALLOWED_ROOTS
+// (ADR-0049 §6). List failures project as not-found / not-a-directory /
+// path-outside-allowed-roots (interface.md §9b).
+func (h *handler) ListDirectory(ctx context.Context, p genapi.ListDirectoryParams) (genapi.ListDirectoryRes, error) {
+	entries, err := h.d.Filesystem.List(ctx, p.Path)
 	if err != nil {
+		if errors.Is(err, filesystem.ErrPathOutsideAllowedRoots) {
+			return h.outsideRoots(p.Path), nil
+		}
 		return nil, err
 	}
 	out := make([]genapi.Entry, 0, len(entries))
@@ -228,6 +238,151 @@ func (h *handler) ListDirectory(ctx context.Context, p genapi.ListDirectoryParam
 		out = append(out, genapi.Entry{Name: e.Name, Path: e.Path, IsDir: e.IsDir})
 	}
 	return &genapi.DirectoryListing{Path: p.Path, Entries: out}, nil
+}
+
+// outsideRoots renders the typed ALLOWED_ROOTS refusal (ADR-0049 §6): never
+// silent, always carrying the allowlist so a client can explain the boundary.
+func (h *handler) outsideRoots(path string) *genapi.PathOutsideAllowedRoots {
+	return &genapi.PathOutsideAllowedRoots{
+		Error:        genapi.PathOutsideAllowedRootsErrorPathOutsideAllowedRoots,
+		Path:         path,
+		AllowedRoots: h.d.Filesystem.AllowedRoots(),
+	}
+}
+
+// ------------------------- workspaces + corpus (ADR-0049) -------------------------
+
+func (h *handler) ListWorkspaces(ctx context.Context) ([]genapi.Workspace, error) {
+	ws, err := h.d.Workspaces.List()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]genapi.Workspace, 0, len(ws))
+	for _, w := range ws {
+		out = append(out, workspaceToGen(w))
+	}
+	return out, nil
+}
+
+func (h *handler) CreateWorkspace(ctx context.Context, req *genapi.CreateWorkspaceRequest) (*genapi.Workspace, error) {
+	ws, err := h.d.Workspaces.ResolveOrCreate(req.Root)
+	if err != nil {
+		return nil, err
+	}
+	o := workspaceToGen(ws)
+	return &o, nil
+}
+
+func (h *handler) GetWorkspace(ctx context.Context, p genapi.GetWorkspaceParams) (*genapi.Workspace, error) {
+	ws, err := h.d.Workspaces.Get(p.ID)
+	if err != nil {
+		return nil, err
+	}
+	o := workspaceToGen(ws)
+	return &o, nil
+}
+
+func (h *handler) GetCorpus(ctx context.Context, p genapi.GetCorpusParams) (*genapi.CorpusState, error) {
+	state, err := h.d.Corpus.Get(ctx, p.WorkspaceId)
+	if err != nil {
+		return nil, err
+	}
+	o := corpusStateToGen(state)
+	return &o, nil
+}
+
+func (h *handler) PutCorpus(ctx context.Context, req *genapi.PutCorpusRequest) (genapi.PutCorpusRes, error) {
+	scope := dto.CorpusScope{Roots: req.Roots, Include: req.Include, Exclude: req.Exclude}
+	state, err := h.d.Corpus.SetScope(ctx, req.WorkspaceId, scope)
+	if err != nil {
+		if errors.Is(err, filesystem.ErrPathOutsideAllowedRoots) {
+			return h.outsideRoots(req.WorkspaceId), nil
+		}
+		return nil, err
+	}
+	o := corpusStateToGen(state)
+	return &o, nil
+}
+
+func (h *handler) IndexCorpus(ctx context.Context, req *genapi.CorpusIndexRequest) (*genapi.CorpusJob, error) {
+	job, err := h.d.Corpus.Index(ctx, req.WorkspaceId)
+	if err != nil {
+		return nil, err
+	}
+	o := corpusJobToGen(job)
+	return &o, nil
+}
+
+func (h *handler) EvictCorpusDocument(ctx context.Context, p genapi.EvictCorpusDocumentParams) (genapi.EvictCorpusDocumentRes, error) {
+	if err := h.d.Corpus.Evict(ctx, p.WorkspaceId, p.ID); err != nil {
+		if errors.Is(err, filesystem.ErrPathOutsideAllowedRoots) {
+			return h.outsideRoots(p.ID), nil
+		}
+		return nil, err
+	}
+	return &genapi.EvictCorpusDocumentNoContent{}, nil
+}
+
+func workspaceToGen(w dto.Workspace) genapi.Workspace {
+	return genapi.Workspace{
+		ID:        w.ID,
+		Root:      w.Root,
+		Name:      w.Name,
+		CreatedAt: w.CreatedAt,
+		UpdatedAt: w.UpdatedAt,
+	}
+}
+
+func corpusStateToGen(state dto.CorpusState) genapi.CorpusState {
+	out := genapi.CorpusState{
+		WorkspaceId: state.WorkspaceID,
+		Roots:       state.Roots,
+		Include:     state.Include,
+		Exclude:     state.Exclude,
+		Documents:   make([]genapi.CorpusDocument, 0, len(state.Documents)),
+	}
+	for _, d := range state.Documents {
+		doc := genapi.CorpusDocument{
+			ID:     d.ID,
+			Path:   d.Path,
+			Status: genapi.CorpusDocumentStatus(d.Status),
+		}
+		if d.ChunkCount != 0 {
+			doc.ChunkCount = genapi.NewOptInt(d.ChunkCount)
+		}
+		if d.IndexedAt != 0 {
+			doc.IndexedAt = genapi.NewOptInt64(d.IndexedAt)
+		}
+		if d.Error != "" {
+			doc.Error = genapi.NewOptString(d.Error)
+		}
+		out.Documents = append(out.Documents, doc)
+	}
+	if state.Job != nil {
+		out.Job = genapi.NewOptCorpusJob(corpusJobToGen(*state.Job))
+	}
+	return out
+}
+
+func corpusJobToGen(j dto.CorpusJob) genapi.CorpusJob {
+	out := genapi.CorpusJob{
+		ID:          j.ID,
+		WorkspaceId: j.WorkspaceID,
+		Kind:        genapi.CorpusJobKind(j.Kind),
+		State:       genapi.CorpusJobState(j.State),
+		Total:       j.Total,
+		Completed:   j.Completed,
+	}
+	if j.Error != "" {
+		out.Error = genapi.NewOptString(j.Error)
+	}
+	if j.StartedAt != 0 {
+		out.StartedAt = genapi.NewOptInt64(j.StartedAt)
+	}
+	if j.FinishedAt != 0 {
+		out.FinishedAt = genapi.NewOptInt64(j.FinishedAt)
+	}
+	return out
 }
 
 func (h *handler) OpenDocument(ctx context.Context, req *genapi.OpenDocumentRequest) (*genapi.Document, error) {
@@ -393,34 +548,116 @@ func (h *handler) GetCandidates(ctx context.Context, p genapi.GetCandidatesParam
 	return out, nil
 }
 
+// resolveWorkspaceFor resolves the workspace shard for a session operation
+// (ADR-0049 §5): an explicit workspaceId wins; otherwise the document's
+// canonical path resolves to its containing workspace, or (create=true)
+// resolve-or-creates one rooted at the document's parent directory — the
+// fallback that keeps pre-workspace clients working.
+func (h *handler) resolveWorkspaceFor(workspaceID, documentID string, create bool) (string, error) {
+	if workspaceID != "" {
+		if _, err := h.d.Workspaces.Get(workspaceID); err != nil {
+			return "", err
+		}
+		return workspaceID, nil
+	}
+	if documentID == "" {
+		return "", errors.New("workspace-or-document-required")
+	}
+	path, err := h.d.Doc.Path(documentID)
+	if err != nil {
+		return "", err
+	}
+	canonical, _ := pathutil.Canonical(path)
+	if !create {
+		if ws, ok, err := h.d.Workspaces.FindContaining(canonical); err != nil {
+			return "", err
+		} else if ok {
+			return ws.ID, nil
+		}
+		return "", nil
+	}
+	ws, err := h.d.Workspaces.ResolveOrCreate(filepath.Dir(canonical))
+	if err != nil {
+		return "", err
+	}
+	return ws.ID, nil
+}
+
+// ListSessions backs GET /sessions: workspace-scoped, optionally filtered by
+// document (ADR-0049 §5/§16).
 func (h *handler) ListSessions(ctx context.Context, p genapi.ListSessionsParams) ([]genapi.Session, error) {
-	sess, err := h.d.Sessions.ListByDocument(p.DocumentId)
+	workspaceID, err := h.resolveWorkspaceFor(p.WorkspaceId.Or(""), p.DocumentId.Or(""), false)
+	if err != nil {
+		return nil, err
+	}
+	if workspaceID == "" {
+		return []genapi.Session{}, nil
+	}
+	lease, err := h.d.Shards.Services(ctx, workspaceID)
+	if err != nil {
+		return nil, err
+	}
+	defer lease.Release()
+
+	var sess []dto.Session
+	if docID := p.DocumentId.Or(""); docID != "" {
+		sess, err = lease.Sessions.ListByDocument(docID)
+	} else {
+		sess, err = lease.Sessions.ListByWorkspace()
+	}
 	if err != nil {
 		return nil, err
 	}
 	out := make([]genapi.Session, 0, len(sess))
 	for _, s := range sess {
-		out = append(out, sessionToGen(s))
+		out = append(out, sessionToGen(s, workspaceID))
 	}
 	return out, nil
 }
 
 func (h *handler) CreateSession(ctx context.Context, req *genapi.CreateSessionRequest) (*genapi.Session, error) {
+	workspaceID, err := h.resolveWorkspaceFor(req.WorkspaceId.Or(""), req.DocumentId, true)
+	if err != nil {
+		return nil, err
+	}
+	lease, err := h.d.Shards.Services(ctx, workspaceID)
+	if err != nil {
+		return nil, err
+	}
+	defer lease.Release()
+
 	var anchor *string
 	if v, ok := req.AnchorBlockId.Get(); ok {
 		anchor = &v
 	}
 	modeType := req.ModeType.Or("")
-	s, err := h.d.Sessions.Create(req.DocumentId, anchor, modeType)
+	s, err := lease.Sessions.Create(req.DocumentId, anchor, modeType)
 	if err != nil {
 		return nil, err
 	}
-	o := sessionToGen(s)
+	// Route the session id to its shard so message/meter reads resolve later.
+	if err := h.d.Workspaces.RouteSession(s.ID, workspaceID); err != nil {
+		return nil, err
+	}
+	o := sessionToGen(s, workspaceID)
 	return &o, nil
 }
 
 func (h *handler) GetSessionMessages(ctx context.Context, p genapi.GetSessionMessagesParams) ([]genapi.Message, error) {
-	msgs, err := h.d.Sessions.History(p.ID)
+	workspaceID, ok, err := h.d.Workspaces.SessionWorkspace(p.ID)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, fmt.Errorf("session not found: %s", p.ID)
+	}
+	lease, err := h.d.Shards.Services(ctx, workspaceID)
+	if err != nil {
+		return nil, err
+	}
+	defer lease.Release()
+
+	msgs, err := lease.Sessions.History(p.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -445,10 +682,11 @@ func (h *handler) StartTurn(ctx context.Context, req *genapi.Task, w http.Respon
 	}
 
 	task := dto.Task{
-		SessionID:  req.SessionId,
-		ModeName:   req.ModeName,
-		DocumentID: req.DocumentId,
-		UserInput:  req.UserInput,
+		SessionID:   req.SessionId,
+		ModeName:    req.ModeName,
+		DocumentID:  req.DocumentId,
+		WorkspaceID: req.WorkspaceId.Or(""),
+		UserInput:   req.UserInput,
 	}
 	for _, m := range req.Mentions {
 		task.Mentions = append(task.Mentions, dto.Mention{Path: m.Path})
@@ -605,10 +843,13 @@ func writeResultToGen(res dto.WriteResult) *genapi.Revision {
 	return revisionToGen(rev)
 }
 
-func sessionToGen(s dto.Session) genapi.Session {
+func sessionToGen(s dto.Session, workspaceID string) genapi.Session {
 	o := genapi.Session{
 		ID:         s.ID,
 		DocumentId: s.DocumentID,
+	}
+	if workspaceID != "" {
+		o.WorkspaceId = genapi.NewOptString(workspaceID)
 	}
 	if s.AnchorBlockID != nil {
 		o.AnchorBlockId = genapi.NewOptString(*s.AnchorBlockID)

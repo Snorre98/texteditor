@@ -396,9 +396,434 @@ func (s *CommitRequest) SetOverwrite(val OptBool) {
 	s.Overwrite = val
 }
 
+// One corpus file's index status. Corpus files are never documents rows and never versioned (ADR-0049
+// §4); `id` is the stable path-derived identity (sha256 prefix of the canonical path).
+// Ref: #/components/schemas/CorpusDocument
+type CorpusDocument struct {
+	ID         string               `json:"id"`
+	Path       string               `json:"path"`
+	Status     CorpusDocumentStatus `json:"status"`
+	ChunkCount OptInt               `json:"chunkCount"`
+	IndexedAt  OptInt64             `json:"indexedAt"`
+	Error      OptString            `json:"error"`
+}
+
+// GetID returns the value of ID.
+func (s *CorpusDocument) GetID() string {
+	return s.ID
+}
+
+// GetPath returns the value of Path.
+func (s *CorpusDocument) GetPath() string {
+	return s.Path
+}
+
+// GetStatus returns the value of Status.
+func (s *CorpusDocument) GetStatus() CorpusDocumentStatus {
+	return s.Status
+}
+
+// GetChunkCount returns the value of ChunkCount.
+func (s *CorpusDocument) GetChunkCount() OptInt {
+	return s.ChunkCount
+}
+
+// GetIndexedAt returns the value of IndexedAt.
+func (s *CorpusDocument) GetIndexedAt() OptInt64 {
+	return s.IndexedAt
+}
+
+// GetError returns the value of Error.
+func (s *CorpusDocument) GetError() OptString {
+	return s.Error
+}
+
+// SetID sets the value of ID.
+func (s *CorpusDocument) SetID(val string) {
+	s.ID = val
+}
+
+// SetPath sets the value of Path.
+func (s *CorpusDocument) SetPath(val string) {
+	s.Path = val
+}
+
+// SetStatus sets the value of Status.
+func (s *CorpusDocument) SetStatus(val CorpusDocumentStatus) {
+	s.Status = val
+}
+
+// SetChunkCount sets the value of ChunkCount.
+func (s *CorpusDocument) SetChunkCount(val OptInt) {
+	s.ChunkCount = val
+}
+
+// SetIndexedAt sets the value of IndexedAt.
+func (s *CorpusDocument) SetIndexedAt(val OptInt64) {
+	s.IndexedAt = val
+}
+
+// SetError sets the value of Error.
+func (s *CorpusDocument) SetError(val OptString) {
+	s.Error = val
+}
+
+type CorpusDocumentStatus string
+
+const (
+	CorpusDocumentStatusIndexed CorpusDocumentStatus = "indexed"
+	CorpusDocumentStatusStale   CorpusDocumentStatus = "stale"
+	CorpusDocumentStatusPending CorpusDocumentStatus = "pending"
+	CorpusDocumentStatusEvicted CorpusDocumentStatus = "evicted"
+	CorpusDocumentStatusError   CorpusDocumentStatus = "error"
+)
+
+// AllValues returns all CorpusDocumentStatus values.
+func (CorpusDocumentStatus) AllValues() []CorpusDocumentStatus {
+	return []CorpusDocumentStatus{
+		CorpusDocumentStatusIndexed,
+		CorpusDocumentStatusStale,
+		CorpusDocumentStatusPending,
+		CorpusDocumentStatusEvicted,
+		CorpusDocumentStatusError,
+	}
+}
+
+// MarshalText implements encoding.TextMarshaler.
+func (s CorpusDocumentStatus) MarshalText() ([]byte, error) {
+	switch s {
+	case CorpusDocumentStatusIndexed:
+		return []byte(s), nil
+	case CorpusDocumentStatusStale:
+		return []byte(s), nil
+	case CorpusDocumentStatusPending:
+		return []byte(s), nil
+	case CorpusDocumentStatusEvicted:
+		return []byte(s), nil
+	case CorpusDocumentStatusError:
+		return []byte(s), nil
+	default:
+		return nil, errors.Errorf("invalid value: %q", s)
+	}
+}
+
+// UnmarshalText implements encoding.TextUnmarshaler.
+func (s *CorpusDocumentStatus) UnmarshalText(data []byte) error {
+	switch CorpusDocumentStatus(data) {
+	case CorpusDocumentStatusIndexed:
+		*s = CorpusDocumentStatusIndexed
+		return nil
+	case CorpusDocumentStatusStale:
+		*s = CorpusDocumentStatusStale
+		return nil
+	case CorpusDocumentStatusPending:
+		*s = CorpusDocumentStatusPending
+		return nil
+	case CorpusDocumentStatusEvicted:
+		*s = CorpusDocumentStatusEvicted
+		return nil
+	case CorpusDocumentStatusError:
+		*s = CorpusDocumentStatusError
+		return nil
+	default:
+		return errors.Errorf("invalid value: %q", data)
+	}
+}
+
+// Ref: #/components/schemas/CorpusIndexRequest
+type CorpusIndexRequest struct {
+	WorkspaceId string `json:"workspaceId"`
+}
+
+// GetWorkspaceId returns the value of WorkspaceId.
+func (s *CorpusIndexRequest) GetWorkspaceId() string {
+	return s.WorkspaceId
+}
+
+// SetWorkspaceId sets the value of WorkspaceId.
+func (s *CorpusIndexRequest) SetWorkspaceId(val string) {
+	s.WorkspaceId = val
+}
+
+// One observable corpus indexing job; progress is polled via GET /corpus (Phase C pin).
+// Ref: #/components/schemas/CorpusJob
+type CorpusJob struct {
+	ID          string         `json:"id"`
+	WorkspaceId string         `json:"workspaceId"`
+	Kind        CorpusJobKind  `json:"kind"`
+	State       CorpusJobState `json:"state"`
+	Total       int            `json:"total"`
+	Completed   int            `json:"completed"`
+	Error       OptString      `json:"error"`
+	StartedAt   OptInt64       `json:"startedAt"`
+	FinishedAt  OptInt64       `json:"finishedAt"`
+}
+
+// GetID returns the value of ID.
+func (s *CorpusJob) GetID() string {
+	return s.ID
+}
+
+// GetWorkspaceId returns the value of WorkspaceId.
+func (s *CorpusJob) GetWorkspaceId() string {
+	return s.WorkspaceId
+}
+
+// GetKind returns the value of Kind.
+func (s *CorpusJob) GetKind() CorpusJobKind {
+	return s.Kind
+}
+
+// GetState returns the value of State.
+func (s *CorpusJob) GetState() CorpusJobState {
+	return s.State
+}
+
+// GetTotal returns the value of Total.
+func (s *CorpusJob) GetTotal() int {
+	return s.Total
+}
+
+// GetCompleted returns the value of Completed.
+func (s *CorpusJob) GetCompleted() int {
+	return s.Completed
+}
+
+// GetError returns the value of Error.
+func (s *CorpusJob) GetError() OptString {
+	return s.Error
+}
+
+// GetStartedAt returns the value of StartedAt.
+func (s *CorpusJob) GetStartedAt() OptInt64 {
+	return s.StartedAt
+}
+
+// GetFinishedAt returns the value of FinishedAt.
+func (s *CorpusJob) GetFinishedAt() OptInt64 {
+	return s.FinishedAt
+}
+
+// SetID sets the value of ID.
+func (s *CorpusJob) SetID(val string) {
+	s.ID = val
+}
+
+// SetWorkspaceId sets the value of WorkspaceId.
+func (s *CorpusJob) SetWorkspaceId(val string) {
+	s.WorkspaceId = val
+}
+
+// SetKind sets the value of Kind.
+func (s *CorpusJob) SetKind(val CorpusJobKind) {
+	s.Kind = val
+}
+
+// SetState sets the value of State.
+func (s *CorpusJob) SetState(val CorpusJobState) {
+	s.State = val
+}
+
+// SetTotal sets the value of Total.
+func (s *CorpusJob) SetTotal(val int) {
+	s.Total = val
+}
+
+// SetCompleted sets the value of Completed.
+func (s *CorpusJob) SetCompleted(val int) {
+	s.Completed = val
+}
+
+// SetError sets the value of Error.
+func (s *CorpusJob) SetError(val OptString) {
+	s.Error = val
+}
+
+// SetStartedAt sets the value of StartedAt.
+func (s *CorpusJob) SetStartedAt(val OptInt64) {
+	s.StartedAt = val
+}
+
+// SetFinishedAt sets the value of FinishedAt.
+func (s *CorpusJob) SetFinishedAt(val OptInt64) {
+	s.FinishedAt = val
+}
+
+type CorpusJobKind string
+
+const (
+	CorpusJobKindReconcile CorpusJobKind = "reconcile"
+	CorpusJobKindIndex     CorpusJobKind = "index"
+	CorpusJobKindPath      CorpusJobKind = "path"
+)
+
+// AllValues returns all CorpusJobKind values.
+func (CorpusJobKind) AllValues() []CorpusJobKind {
+	return []CorpusJobKind{
+		CorpusJobKindReconcile,
+		CorpusJobKindIndex,
+		CorpusJobKindPath,
+	}
+}
+
+// MarshalText implements encoding.TextMarshaler.
+func (s CorpusJobKind) MarshalText() ([]byte, error) {
+	switch s {
+	case CorpusJobKindReconcile:
+		return []byte(s), nil
+	case CorpusJobKindIndex:
+		return []byte(s), nil
+	case CorpusJobKindPath:
+		return []byte(s), nil
+	default:
+		return nil, errors.Errorf("invalid value: %q", s)
+	}
+}
+
+// UnmarshalText implements encoding.TextUnmarshaler.
+func (s *CorpusJobKind) UnmarshalText(data []byte) error {
+	switch CorpusJobKind(data) {
+	case CorpusJobKindReconcile:
+		*s = CorpusJobKindReconcile
+		return nil
+	case CorpusJobKindIndex:
+		*s = CorpusJobKindIndex
+		return nil
+	case CorpusJobKindPath:
+		*s = CorpusJobKindPath
+		return nil
+	default:
+		return errors.Errorf("invalid value: %q", data)
+	}
+}
+
+type CorpusJobState string
+
+const (
+	CorpusJobStateRunning CorpusJobState = "running"
+	CorpusJobStateDone    CorpusJobState = "done"
+	CorpusJobStateError   CorpusJobState = "error"
+)
+
+// AllValues returns all CorpusJobState values.
+func (CorpusJobState) AllValues() []CorpusJobState {
+	return []CorpusJobState{
+		CorpusJobStateRunning,
+		CorpusJobStateDone,
+		CorpusJobStateError,
+	}
+}
+
+// MarshalText implements encoding.TextMarshaler.
+func (s CorpusJobState) MarshalText() ([]byte, error) {
+	switch s {
+	case CorpusJobStateRunning:
+		return []byte(s), nil
+	case CorpusJobStateDone:
+		return []byte(s), nil
+	case CorpusJobStateError:
+		return []byte(s), nil
+	default:
+		return nil, errors.Errorf("invalid value: %q", s)
+	}
+}
+
+// UnmarshalText implements encoding.TextUnmarshaler.
+func (s *CorpusJobState) UnmarshalText(data []byte) error {
+	switch CorpusJobState(data) {
+	case CorpusJobStateRunning:
+		*s = CorpusJobStateRunning
+		return nil
+	case CorpusJobStateDone:
+		*s = CorpusJobStateDone
+		return nil
+	case CorpusJobStateError:
+		*s = CorpusJobStateError
+		return nil
+	default:
+		return errors.Errorf("invalid value: %q", data)
+	}
+}
+
+// A workspace's corpus scope, per-document status, and job progress (ADR-0049 §4/§16).
+// Ref: #/components/schemas/CorpusState
+type CorpusState struct {
+	WorkspaceId string           `json:"workspaceId"`
+	Roots       []string         `json:"roots"`
+	Include     []string         `json:"include"`
+	Exclude     []string         `json:"exclude"`
+	Documents   []CorpusDocument `json:"documents"`
+	Job         OptCorpusJob     `json:"job"`
+}
+
+// GetWorkspaceId returns the value of WorkspaceId.
+func (s *CorpusState) GetWorkspaceId() string {
+	return s.WorkspaceId
+}
+
+// GetRoots returns the value of Roots.
+func (s *CorpusState) GetRoots() []string {
+	return s.Roots
+}
+
+// GetInclude returns the value of Include.
+func (s *CorpusState) GetInclude() []string {
+	return s.Include
+}
+
+// GetExclude returns the value of Exclude.
+func (s *CorpusState) GetExclude() []string {
+	return s.Exclude
+}
+
+// GetDocuments returns the value of Documents.
+func (s *CorpusState) GetDocuments() []CorpusDocument {
+	return s.Documents
+}
+
+// GetJob returns the value of Job.
+func (s *CorpusState) GetJob() OptCorpusJob {
+	return s.Job
+}
+
+// SetWorkspaceId sets the value of WorkspaceId.
+func (s *CorpusState) SetWorkspaceId(val string) {
+	s.WorkspaceId = val
+}
+
+// SetRoots sets the value of Roots.
+func (s *CorpusState) SetRoots(val []string) {
+	s.Roots = val
+}
+
+// SetInclude sets the value of Include.
+func (s *CorpusState) SetInclude(val []string) {
+	s.Include = val
+}
+
+// SetExclude sets the value of Exclude.
+func (s *CorpusState) SetExclude(val []string) {
+	s.Exclude = val
+}
+
+// SetDocuments sets the value of Documents.
+func (s *CorpusState) SetDocuments(val []CorpusDocument) {
+	s.Documents = val
+}
+
+// SetJob sets the value of Job.
+func (s *CorpusState) SetJob(val OptCorpusJob) {
+	s.Job = val
+}
+
+func (*CorpusState) putCorpusRes() {}
+
 // Ref: #/components/schemas/CreateSessionRequest
 type CreateSessionRequest struct {
-	DocumentId    string    `json:"documentId"`
+	DocumentId string `json:"documentId"`
+	// The workspace shard that owns the new session (ADR-0049 §5). Optional: when absent the engine
+	// resolves-or-creates a workspace rooted at the canonical parent directory of the document.
+	WorkspaceId   OptString `json:"workspaceId"`
 	AnchorBlockId OptString `json:"anchorBlockId"`
 	ModeType      OptString `json:"modeType"`
 }
@@ -406,6 +831,11 @@ type CreateSessionRequest struct {
 // GetDocumentId returns the value of DocumentId.
 func (s *CreateSessionRequest) GetDocumentId() string {
 	return s.DocumentId
+}
+
+// GetWorkspaceId returns the value of WorkspaceId.
+func (s *CreateSessionRequest) GetWorkspaceId() OptString {
+	return s.WorkspaceId
 }
 
 // GetAnchorBlockId returns the value of AnchorBlockId.
@@ -423,6 +853,11 @@ func (s *CreateSessionRequest) SetDocumentId(val string) {
 	s.DocumentId = val
 }
 
+// SetWorkspaceId sets the value of WorkspaceId.
+func (s *CreateSessionRequest) SetWorkspaceId(val OptString) {
+	s.WorkspaceId = val
+}
+
 // SetAnchorBlockId sets the value of AnchorBlockId.
 func (s *CreateSessionRequest) SetAnchorBlockId(val OptString) {
 	s.AnchorBlockId = val
@@ -431,6 +866,34 @@ func (s *CreateSessionRequest) SetAnchorBlockId(val OptString) {
 // SetModeType sets the value of ModeType.
 func (s *CreateSessionRequest) SetModeType(val OptString) {
 	s.ModeType = val
+}
+
+// Ref: #/components/schemas/CreateWorkspaceRequest
+type CreateWorkspaceRequest struct {
+	// Absolute directory to open (canonicalized).
+	Root string `json:"root"`
+	// Optional display label (default basename of root).
+	Name OptString `json:"name"`
+}
+
+// GetRoot returns the value of Root.
+func (s *CreateWorkspaceRequest) GetRoot() string {
+	return s.Root
+}
+
+// GetName returns the value of Name.
+func (s *CreateWorkspaceRequest) GetName() OptString {
+	return s.Name
+}
+
+// SetRoot sets the value of Root.
+func (s *CreateWorkspaceRequest) SetRoot(val string) {
+	s.Root = val
+}
+
+// SetName sets the value of Name.
+func (s *CreateWorkspaceRequest) SetName(val OptString) {
+	s.Name = val
 }
 
 // A shallow, non-recursive directory listing (ADR-0035 §2).
@@ -459,6 +922,8 @@ func (s *DirectoryListing) SetPath(val string) {
 func (s *DirectoryListing) SetEntries(val []Entry) {
 	s.Entries = val
 }
+
+func (*DirectoryListing) listDirectoryRes() {}
 
 // Ref: #/components/schemas/Document
 type Document struct {
@@ -659,6 +1124,11 @@ func (s *EventType) UnmarshalText(data []byte) error {
 		return errors.Errorf("invalid value: %q", data)
 	}
 }
+
+// EvictCorpusDocumentNoContent is response for EvictCorpusDocument operation.
+type EvictCorpusDocumentNoContent struct{}
+
+func (*EvictCorpusDocumentNoContent) evictCorpusDocumentRes() {}
 
 // The file at `documents.path` changed externally since the engine last read it; the write-through was
 // refused and no bytes were written (ADR-0047 §3). `currentHash` is the current on-disk content hash
@@ -1535,6 +2005,52 @@ func (o OptCommitRequest) Or(d CommitRequest) CommitRequest {
 	return d
 }
 
+// NewOptCorpusJob returns new OptCorpusJob with value set to v.
+func NewOptCorpusJob(v CorpusJob) OptCorpusJob {
+	return OptCorpusJob{
+		Value: v,
+		Set:   true,
+	}
+}
+
+// OptCorpusJob is optional CorpusJob.
+type OptCorpusJob struct {
+	Value CorpusJob
+	Set   bool
+}
+
+// IsSet returns true if OptCorpusJob was set.
+func (o OptCorpusJob) IsSet() bool { return o.Set }
+
+// Reset unsets value.
+func (o *OptCorpusJob) Reset() {
+	var v CorpusJob
+	o.Value = v
+	o.Set = false
+}
+
+// SetTo sets value to v.
+func (o *OptCorpusJob) SetTo(v CorpusJob) {
+	o.Set = true
+	o.Value = v
+}
+
+// Get returns value and boolean that denotes whether value was set.
+func (o OptCorpusJob) Get() (v CorpusJob, ok bool) {
+	if !o.Set {
+		return v, false
+	}
+	return o.Value, true
+}
+
+// Or returns value if set, or given parameter if does not.
+func (o OptCorpusJob) Or(d CorpusJob) CorpusJob {
+	if v, ok := o.Get(); ok {
+		return v
+	}
+	return d
+}
+
 // NewOptFloat64 returns new OptFloat64 with value set to v.
 func NewOptFloat64(v float64) OptFloat64 {
 	return OptFloat64{
@@ -1857,6 +2373,83 @@ func (o OptTurnOptions) Or(d TurnOptions) TurnOptions {
 	return d
 }
 
+// A path outside the ALLOWED_ROOTS allowlist was refused (ADR-0049 §6). Never silent; the refusal
+// holds even at ENGINE_BIND=0.0.0.0.
+// Ref: #/components/schemas/PathOutsideAllowedRoots
+type PathOutsideAllowedRoots struct {
+	Error        PathOutsideAllowedRootsError `json:"error"`
+	Path         string                       `json:"path"`
+	AllowedRoots []string                     `json:"allowedRoots"`
+}
+
+// GetError returns the value of Error.
+func (s *PathOutsideAllowedRoots) GetError() PathOutsideAllowedRootsError {
+	return s.Error
+}
+
+// GetPath returns the value of Path.
+func (s *PathOutsideAllowedRoots) GetPath() string {
+	return s.Path
+}
+
+// GetAllowedRoots returns the value of AllowedRoots.
+func (s *PathOutsideAllowedRoots) GetAllowedRoots() []string {
+	return s.AllowedRoots
+}
+
+// SetError sets the value of Error.
+func (s *PathOutsideAllowedRoots) SetError(val PathOutsideAllowedRootsError) {
+	s.Error = val
+}
+
+// SetPath sets the value of Path.
+func (s *PathOutsideAllowedRoots) SetPath(val string) {
+	s.Path = val
+}
+
+// SetAllowedRoots sets the value of AllowedRoots.
+func (s *PathOutsideAllowedRoots) SetAllowedRoots(val []string) {
+	s.AllowedRoots = val
+}
+
+func (*PathOutsideAllowedRoots) evictCorpusDocumentRes() {}
+func (*PathOutsideAllowedRoots) listDirectoryRes()       {}
+func (*PathOutsideAllowedRoots) putCorpusRes()           {}
+
+type PathOutsideAllowedRootsError string
+
+const (
+	PathOutsideAllowedRootsErrorPathOutsideAllowedRoots PathOutsideAllowedRootsError = "path-outside-allowed-roots"
+)
+
+// AllValues returns all PathOutsideAllowedRootsError values.
+func (PathOutsideAllowedRootsError) AllValues() []PathOutsideAllowedRootsError {
+	return []PathOutsideAllowedRootsError{
+		PathOutsideAllowedRootsErrorPathOutsideAllowedRoots,
+	}
+}
+
+// MarshalText implements encoding.TextMarshaler.
+func (s PathOutsideAllowedRootsError) MarshalText() ([]byte, error) {
+	switch s {
+	case PathOutsideAllowedRootsErrorPathOutsideAllowedRoots:
+		return []byte(s), nil
+	default:
+		return nil, errors.Errorf("invalid value: %q", s)
+	}
+}
+
+// UnmarshalText implements encoding.TextUnmarshaler.
+func (s *PathOutsideAllowedRootsError) UnmarshalText(data []byte) error {
+	switch PathOutsideAllowedRootsError(data) {
+	case PathOutsideAllowedRootsErrorPathOutsideAllowedRoots:
+		*s = PathOutsideAllowedRootsErrorPathOutsideAllowedRoots
+		return nil
+	default:
+		return errors.Errorf("invalid value: %q", data)
+	}
+}
+
 // Ref: #/components/schemas/ProvisionResponse
 type ProvisionResponse struct {
 	ProvisionID string `json:"provisionID"`
@@ -1870,6 +2463,57 @@ func (s *ProvisionResponse) GetProvisionID() string {
 // SetProvisionID sets the value of ProvisionID.
 func (s *ProvisionResponse) SetProvisionID(val string) {
 	s.ProvisionID = val
+}
+
+// Set a workspace's corpus scope (idempotent; reconciles the index).
+// Ref: #/components/schemas/PutCorpusRequest
+type PutCorpusRequest struct {
+	WorkspaceId string `json:"workspaceId"`
+	// Canonicalized and deduped; empty = the workspace root.
+	Roots []string `json:"roots"`
+	// Include globs; empty = **/*.md.
+	Include []string `json:"include"`
+	Exclude []string `json:"exclude"`
+}
+
+// GetWorkspaceId returns the value of WorkspaceId.
+func (s *PutCorpusRequest) GetWorkspaceId() string {
+	return s.WorkspaceId
+}
+
+// GetRoots returns the value of Roots.
+func (s *PutCorpusRequest) GetRoots() []string {
+	return s.Roots
+}
+
+// GetInclude returns the value of Include.
+func (s *PutCorpusRequest) GetInclude() []string {
+	return s.Include
+}
+
+// GetExclude returns the value of Exclude.
+func (s *PutCorpusRequest) GetExclude() []string {
+	return s.Exclude
+}
+
+// SetWorkspaceId sets the value of WorkspaceId.
+func (s *PutCorpusRequest) SetWorkspaceId(val string) {
+	s.WorkspaceId = val
+}
+
+// SetRoots sets the value of Roots.
+func (s *PutCorpusRequest) SetRoots(val []string) {
+	s.Roots = val
+}
+
+// SetInclude sets the value of Include.
+func (s *PutCorpusRequest) SetInclude(val []string) {
+	s.Include = val
+}
+
+// SetExclude sets the value of Exclude.
+func (s *PutCorpusRequest) SetExclude(val []string) {
+	s.Exclude = val
 }
 
 // Ref: #/components/schemas/Revision
@@ -1997,8 +2641,11 @@ func (s *Selection) SetBlockId(val OptString) {
 
 // Ref: #/components/schemas/Session
 type Session struct {
-	ID            string    `json:"id"`
-	DocumentId    string    `json:"documentId"`
+	ID         string `json:"id"`
+	DocumentId string `json:"documentId"`
+	// The workspace whose shard owns this session (ADR-0049 §5). Optional on the wire for backward
+	// compatibility; always populated by the engine on responses.
+	WorkspaceId   OptString `json:"workspaceId"`
 	AnchorBlockId OptString `json:"anchorBlockId"`
 	ModeType      OptString `json:"modeType"`
 	Title         OptString `json:"title"`
@@ -2015,6 +2662,11 @@ func (s *Session) GetID() string {
 // GetDocumentId returns the value of DocumentId.
 func (s *Session) GetDocumentId() string {
 	return s.DocumentId
+}
+
+// GetWorkspaceId returns the value of WorkspaceId.
+func (s *Session) GetWorkspaceId() OptString {
+	return s.WorkspaceId
 }
 
 // GetAnchorBlockId returns the value of AnchorBlockId.
@@ -2055,6 +2707,11 @@ func (s *Session) SetID(val string) {
 // SetDocumentId sets the value of DocumentId.
 func (s *Session) SetDocumentId(val string) {
 	s.DocumentId = val
+}
+
+// SetWorkspaceId sets the value of WorkspaceId.
+func (s *Session) SetWorkspaceId(val OptString) {
+	s.WorkspaceId = val
 }
 
 // SetAnchorBlockId sets the value of AnchorBlockId.
@@ -2106,13 +2763,17 @@ func (*StartTurnOKRawTextEventStream) startTurnRes() {}
 
 // Ref: #/components/schemas/Task
 type Task struct {
-	SessionId  string         `json:"sessionId"`
-	ModeName   string         `json:"modeName"`
-	DocumentId string         `json:"documentId"`
-	UserInput  string         `json:"userInput"`
-	Selection  OptSelection   `json:"selection"`
-	Mentions   []Mention      `json:"mentions"`
-	Options    OptTurnOptions `json:"options"`
+	SessionId  string `json:"sessionId"`
+	ModeName   string `json:"modeName"`
+	DocumentId string `json:"documentId"`
+	// The workspace whose shard owns this turn's sessions/meter/index (ADR-0049 §5). Optional: when
+	// absent the engine resolves-or-creates a workspace rooted at the canonical parent directory of the
+	// turn's document (keeps pre-workspace clients working).
+	WorkspaceId OptString      `json:"workspaceId"`
+	UserInput   string         `json:"userInput"`
+	Selection   OptSelection   `json:"selection"`
+	Mentions    []Mention      `json:"mentions"`
+	Options     OptTurnOptions `json:"options"`
 }
 
 // GetSessionId returns the value of SessionId.
@@ -2128,6 +2789,11 @@ func (s *Task) GetModeName() string {
 // GetDocumentId returns the value of DocumentId.
 func (s *Task) GetDocumentId() string {
 	return s.DocumentId
+}
+
+// GetWorkspaceId returns the value of WorkspaceId.
+func (s *Task) GetWorkspaceId() OptString {
+	return s.WorkspaceId
 }
 
 // GetUserInput returns the value of UserInput.
@@ -2163,6 +2829,11 @@ func (s *Task) SetModeName(val string) {
 // SetDocumentId sets the value of DocumentId.
 func (s *Task) SetDocumentId(val string) {
 	s.DocumentId = val
+}
+
+// SetWorkspaceId sets the value of WorkspaceId.
+func (s *Task) SetWorkspaceId(val OptString) {
+	s.WorkspaceId = val
 }
 
 // SetUserInput sets the value of UserInput.
@@ -2285,4 +2956,67 @@ func (s *WordEdit) SetInsertions(val []string) {
 // SetDeletions sets the value of Deletions.
 func (s *WordEdit) SetDeletions(val []string) {
 	s.Deletions = val
+}
+
+// A persistent engine entity: a root directory plus its subdirectories, governing browsing and editing
+// only (ADR-0049 §1/§2). Workspace ≠ Corpus: the corpus is a separate, multi-root retrievability
+// scope.
+// Ref: #/components/schemas/Workspace
+type Workspace struct {
+	ID string `json:"id"`
+	// Canonical absolute directory (EvalSymlinks + case-fold).
+	Root      string `json:"root"`
+	Name      string `json:"name"`
+	CreatedAt int64  `json:"createdAt"`
+	UpdatedAt int64  `json:"updatedAt"`
+}
+
+// GetID returns the value of ID.
+func (s *Workspace) GetID() string {
+	return s.ID
+}
+
+// GetRoot returns the value of Root.
+func (s *Workspace) GetRoot() string {
+	return s.Root
+}
+
+// GetName returns the value of Name.
+func (s *Workspace) GetName() string {
+	return s.Name
+}
+
+// GetCreatedAt returns the value of CreatedAt.
+func (s *Workspace) GetCreatedAt() int64 {
+	return s.CreatedAt
+}
+
+// GetUpdatedAt returns the value of UpdatedAt.
+func (s *Workspace) GetUpdatedAt() int64 {
+	return s.UpdatedAt
+}
+
+// SetID sets the value of ID.
+func (s *Workspace) SetID(val string) {
+	s.ID = val
+}
+
+// SetRoot sets the value of Root.
+func (s *Workspace) SetRoot(val string) {
+	s.Root = val
+}
+
+// SetName sets the value of Name.
+func (s *Workspace) SetName(val string) {
+	s.Name = val
+}
+
+// SetCreatedAt sets the value of CreatedAt.
+func (s *Workspace) SetCreatedAt(val int64) {
+	s.CreatedAt = val
+}
+
+// SetUpdatedAt sets the value of UpdatedAt.
+func (s *Workspace) SetUpdatedAt(val int64) {
+	s.UpdatedAt = val
 }

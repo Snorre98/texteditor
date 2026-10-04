@@ -58,8 +58,50 @@ func encodeCreateSessionRequest(
 	return nil
 }
 
+func encodeCreateWorkspaceRequest(
+	req *CreateWorkspaceRequest,
+	r *http.Request,
+) error {
+	const contentType = "application/json"
+	e := new(jx.Encoder)
+	{
+		req.Encode(e)
+	}
+	encoded := e.Bytes()
+	ht.SetBody(r, bytes.NewReader(encoded), contentType)
+	return nil
+}
+
+func encodeIndexCorpusRequest(
+	req *CorpusIndexRequest,
+	r *http.Request,
+) error {
+	const contentType = "application/json"
+	e := new(jx.Encoder)
+	{
+		req.Encode(e)
+	}
+	encoded := e.Bytes()
+	ht.SetBody(r, bytes.NewReader(encoded), contentType)
+	return nil
+}
+
 func encodeOpenDocumentRequest(
 	req *OpenDocumentRequest,
+	r *http.Request,
+) error {
+	const contentType = "application/json"
+	e := new(jx.Encoder)
+	{
+		req.Encode(e)
+	}
+	encoded := e.Bytes()
+	ht.SetBody(r, bytes.NewReader(encoded), contentType)
+	return nil
+}
+
+func encodePutCorpusRequest(
+	req *PutCorpusRequest,
 	r *http.Request,
 ) error {
 	const contentType = "application/json"

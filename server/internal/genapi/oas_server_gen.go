@@ -28,6 +28,21 @@ type Handler interface {
 	//
 	// POST /sessions
 	CreateSession(ctx context.Context, req *CreateSessionRequest) (*Session, error)
+	// CreateWorkspace implements createWorkspace operation.
+	//
+	// Canonicalizes the root (EvalSymlinks + case-fold): an alias or an already-open nested directory
+	// resumes the most specific existing workspace; otherwise a workspace is created and seeded with the
+	// root as its first corpus root and `**/*.md` as the default include.
+	//
+	// POST /workspaces
+	CreateWorkspace(ctx context.Context, req *CreateWorkspaceRequest) (*Workspace, error)
+	// EvictCorpusDocument implements evictCorpusDocument operation.
+	//
+	// Removes the file's chunks from both the vector and full-text indexes and records an eviction
+	// tombstone (status `evicted` until re-indexed). No file on disk is touched. Deleting twice succeeds.
+	//
+	// DELETE /corpus/documents/{id}
+	EvictCorpusDocument(ctx context.Context, params EvictCorpusDocumentParams) (EvictCorpusDocumentRes, error)
 	// GetBlocks implements getBlocks operation.
 	//
 	// GET /documents/{id}/blocks
@@ -36,6 +51,12 @@ type Handler interface {
 	//
 	// GET /documents/{id}/blocks/{bid}/candidates
 	GetCandidates(ctx context.Context, params GetCandidatesParams) ([]Candidate, error)
+	// GetCorpus implements getCorpus operation.
+	//
+	// Read a workspace's corpus scope, per-document status, and job progress (ADR-0049 §4).
+	//
+	// GET /corpus
+	GetCorpus(ctx context.Context, params GetCorpusParams) (*CorpusState, error)
 	// GetDiff implements getDiff operation.
 	//
 	// GET /documents/{id}/diff
@@ -66,12 +87,25 @@ type Handler interface {
 	//
 	// GET /sessions/{id}/messages
 	GetSessionMessages(ctx context.Context, params GetSessionMessagesParams) ([]Message, error)
+	// GetWorkspace implements getWorkspace operation.
+	//
+	// Read one workspace record.
+	//
+	// GET /workspaces/{id}
+	GetWorkspace(ctx context.Context, params GetWorkspaceParams) (*Workspace, error)
+	// IndexCorpus implements indexCorpus operation.
+	//
+	// Bulk (re)index the current scope; async, idempotent per unchanged content (ADR-0049 §4).
+	//
+	// POST /corpus/index
+	IndexCorpus(ctx context.Context, req *CorpusIndexRequest) (*CorpusJob, error)
 	// ListDirectory implements listDirectory operation.
 	//
-	// List one directory's direct, non-recursive entries (ADR-0035).
+	// Bounded by ALLOWED_ROOTS (ADR-0049 §6): a path outside the allowlist is refused with the typed
+	// `path-outside-allowed-roots` error, never silently.
 	//
 	// GET /directories
-	ListDirectory(ctx context.Context, params ListDirectoryParams) (*DirectoryListing, error)
+	ListDirectory(ctx context.Context, params ListDirectoryParams) (ListDirectoryRes, error)
 	// ListModels implements listModels operation.
 	//
 	// Deprecated for clients — use /fleet (ADR-0040). Retained for compatibility.
@@ -84,12 +118,22 @@ type Handler interface {
 	ListModes(ctx context.Context) ([]Mode, error)
 	// ListSessions implements listSessions operation.
 	//
+	// Lists sessions newest-first. At least one of `workspaceId` or `documentId` is required:
+	// `workspaceId` selects the workspace shard directly; `documentId` resolves the workspace that
+	// contains the document (fallback). Both filters may be combined.
+	//
 	// GET /sessions
 	ListSessions(ctx context.Context, params ListSessionsParams) ([]Session, error)
 	// ListTools implements listTools operation.
 	//
 	// GET /tools
 	ListTools(ctx context.Context) ([]ToolDef, error)
+	// ListWorkspaces implements listWorkspaces operation.
+	//
+	// List the workspace registry (ADR-0049 §2).
+	//
+	// GET /workspaces
+	ListWorkspaces(ctx context.Context) ([]Workspace, error)
 	// OpenDocument implements openDocument operation.
 	//
 	// Open/create a document by path; returns its surrogate id.
@@ -100,6 +144,15 @@ type Handler interface {
 	//
 	// POST /models/{name}/provision
 	ProvisionModel(ctx context.Context, params ProvisionModelParams) (*ProvisionResponse, error)
+	// PutCorpus implements putCorpus operation.
+	//
+	// Roots are canonicalized and deduped; include/exclude globs decide retrievability (default `**/*.md`,
+	// hidden directories excluded). The scope change reconciles the index asynchronously; no document file
+	// is ever created, modified, or deleted. A root outside ALLOWED_ROOTS is refused with the typed
+	// `path-outside-allowed-roots`.
+	//
+	// PUT /corpus
+	PutCorpus(ctx context.Context, req *PutCorpusRequest) (PutCorpusRes, error)
 	// SaveDocument implements saveDocument operation.
 	//
 	// The manual-edit wire path (ADR-0038): the client's whole block-tree snapshot. Array order =

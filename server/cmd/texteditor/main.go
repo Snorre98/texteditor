@@ -26,16 +26,17 @@ import (
 	"texteditor/internal/apiserver"
 	"texteditor/internal/assembler"
 	"texteditor/internal/chunker"
+	"texteditor/internal/corpus"
 	"texteditor/internal/document"
 	"texteditor/internal/eventbus"
+	"texteditor/internal/filesystem"
 	"texteditor/internal/fleet"
 	"texteditor/internal/loop"
-	"texteditor/internal/meter"
 	"texteditor/internal/mode"
 	"texteditor/internal/pipeline"
 	"texteditor/internal/provider"
 	"texteditor/internal/retriever"
-	"texteditor/internal/session"
+	"texteditor/internal/shard"
 	"texteditor/internal/textformatter"
 	"texteditor/internal/tool"
 	"texteditor/internal/workspace"
@@ -55,6 +56,7 @@ func run() error {
 		port      = flag.Int("port", envInt("ENGINE_PORT", 0), "port to bind (0 = dynamic free port; ENGINE_PORT fixes it, ADR-0021 §1)")
 		daemonURL = flag.String("daemon", envOr("DAEMON_URL", "http://127.0.0.1:9300"), "control daemon base URL (ADR-0025)")
 		cors      = flag.String("cors-origins", envOr("ENGINE_CORS_ORIGINS", ""), "comma-separated CORS origin allowlist (empty = CORS disabled, ADR-0037)")
+		allowed   = flag.String("allowed-roots", envOr("ALLOWED_ROOTS", ""), "comma-separated allowlist bounding directory browsing and corpus indexing (default $HOME, ADR-0049 §6)")
 	)
 	flag.Parse()
 
@@ -86,28 +88,25 @@ func run() error {
 		return fmt.Errorf("document store: %w", err)
 	}
 
-	// --- sessions.db (Session store) ---
-	sessDB, err := open("sessions.db")
+	// --- workspaces.db (global Workspace registry; ADR-0049 §5) ---
+	wsDB, err := open("workspaces.db")
 	if err != nil {
 		return err
 	}
-	if err := session.Migrate(ctx, sessDB); err != nil {
-		return fmt.Errorf("sessions.db: %w", err)
+	if err := workspace.Migrate(ctx, wsDB); err != nil {
+		return fmt.Errorf("workspaces.db: %w", err)
 	}
-	sessStore := session.New(sessDB)
+	wsStore := workspace.New(wsDB)
 
-	// --- meter.db (Token metering) ---
-	meterDB, err := open("meter.db")
+	// --- Filesystem (read-only reach bounded by ALLOWED_ROOTS, ADR-0049 §6) ---
+	fsGW, err := filesystem.New(splitList(*allowed))
 	if err != nil {
-		return err
+		return fmt.Errorf("allowed-roots: %w", err)
 	}
-	if err := meter.Migrate(ctx, meterDB); err != nil {
-		return fmt.Errorf("meter.db: %w", err)
-	}
+	log.Printf("allowed roots: %v", fsGW.AllowedRoots())
 
-	// --- bus (SSE fan-out; wired before meter/loop so events flow) ---
+	// --- bus (SSE fan-out; wired before the shard manager so meter events flow) ---
 	bus := eventbus.New()
-	meterStore := meter.New(meterDB, bus)
 
 	// --- Fleet (daemon HTTP client) ---
 	fleetGW := fleet.NewDaemon(*daemonURL)
@@ -122,12 +121,16 @@ func run() error {
 	// stateless transport, safe to share) ---
 	providerGW := provider.New()
 
-	// --- Retriever (index.db; block source = Document store) ---
-	indexDB, err := open("index.db")
-	if err != nil {
-		return err
-	}
-	retrieverGW := retriever.New(indexDB, fleetGW, providerGW, docStore, chunker.New(), 512)
+	// --- Shard manager (per-workspace context state; ADR-0049 §5) ---
+	// Each workspace shard owns index.db/sessions.db/meter.db, opened lazily
+	// and closed LRU. Document identity and git stay global (app.db/worktree).
+	shards := shard.New(shard.Options{
+		DataDir: *dataDir,
+		Bus:     bus,
+		NewRetriever: func(db *sql.DB) retriever.Interface {
+			return retriever.New(db, fleetGW, providerGW, docStore, fsGW, chunker.New(), 512)
+		},
+	})
 
 	// --- Tool registry + executor (ADR-0019; VerifyHandlers cross-check) ---
 	registry, toolNames, err := tool.Load()
@@ -135,7 +138,7 @@ func run() error {
 		return fmt.Errorf("tools: %w", err)
 	}
 	executor := tool.NewExecutor()
-	handlers := makeToolHandlers(docStore, retrieverGW, textformatter.New())
+	handlers := makeToolHandlers(docStore, textformatter.New())
 	for _, name := range toolNames {
 		if h, ok := handlers[name]; ok {
 			executor.Bind(name, h)
@@ -169,23 +172,32 @@ func run() error {
 		return err
 	}
 
+	// --- Corpus service (multi-root scope, index-only; ADR-0049 §3/§4) ---
+	corpusSvc := corpus.New(corpus.Options{
+		Workspaces: wsStore,
+		Filesystem: fsGW,
+		Shards:     shards,
+	})
+	// The API's document store is decorated so a successful Open/Commit/
+	// write-through SaveTree enqueues a corpus re-index when the path is in a
+	// workspace's corpus; the write itself is never blocked.
+	docAPI := &corpus.DocHook{Interface: docStore, Corpus: corpusSvc}
+
 	// --- Assembler + loop ---
 	assemblerGW := assembler.New()
-	ws := workspace.New()
 	loopGW := loop.New(loop.Deps{
-		Modes:     modeReg,
-		Tools:     registry,
-		Executor:  executor,
-		Assembler: assemblerGW,
-		Provider:  providerGW,
-		Fleet:     fleetGW,
-		Doc:       docStore,
-		Retriever: retrieverGW,
-		Sessions:  sessStore,
-		Meter:     meterStore,
-		Bus:       bus,
-		Pipeline:  pipelineGW,
-		Workspace: ws,
+		Modes:      modeReg,
+		Tools:      registry,
+		Executor:   executor,
+		Assembler:  assemblerGW,
+		Provider:   providerGW,
+		Fleet:      fleetGW,
+		Doc:        docStore,
+		Shards:     shards,
+		Workspaces: wsStore,
+		Bus:        bus,
+		Pipeline:   pipelineGW,
+		Filesystem: fsGW,
 	})
 
 	// --- Bind: dynamic port by default (ADR-0021 §1); ENGINE_BIND=0.0.0.0 opts
@@ -204,10 +216,12 @@ func run() error {
 		Fleet:       fleetGW,
 		Modes:       modeReg,
 		Tools:       registry,
-		Doc:         docStore,
-		Sessions:    sessStore,
+		Doc:         docAPI,
 		Loop:        loopGW,
-		Workspace:   ws,
+		Filesystem:  fsGW,
+		Workspaces:  wsStore,
+		Shards:      shards,
+		Corpus:      corpusSvc,
 		BaseURL:     baseURL,
 		CORSOrigins: splitList(*cors),
 	}, bus)
@@ -232,26 +246,40 @@ func run() error {
 
 	select {
 	case err := <-errc:
+		_ = shards.Close()
 		return err
 	case <-ctx.Done():
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		return httpSrv.Shutdown(shutdownCtx)
+		err := httpSrv.Shutdown(shutdownCtx)
+		_ = shards.Close()
+		return err
 	}
 }
 
 // makeToolHandlers returns the real tool handlers bound at the composition root,
-// wiring the Document store, Retriever, and TextFormatter into the engine's four
-// tools (edit_markdown, retrieve, diff, read_note). The name is the whole seam
+// wiring the Document store and TextFormatter into the engine's four tools
+// (edit_markdown, retrieve, diff, read_note). The name is the whole seam
 // (ADR-0019 §3). Handlers return the structured result shapes the loop observes
-// (ADR-0029 §5); the document-scoped tools read a loop-injected `documentId`.
-func makeToolHandlers(doc document.Interface, rec retriever.Interface, tf textformatter.Interface) map[string]tool.Handler {
+// (ADR-0029 §5); document-scoped tools read a loop-injected `documentId`, and
+// retrieval tools resolve the turn's workspace-scoped Retriever from the
+// context the loop enriches with the shard lease (ADR-0049 §5).
+func makeToolHandlers(doc document.Interface, tf textformatter.Interface) map[string]tool.Handler {
 	return map[string]tool.Handler{
 		"edit_markdown": editMarkdownHandler(doc, tf),
-		"retrieve":      retrieveHandler(rec),
+		"retrieve":      retrieveHandler(),
 		"diff":          diffHandler(doc),
-		"read_note":     readNoteHandler(rec),
+		"read_note":     readNoteHandler(),
 	}
+}
+
+// retrieverFromContext resolves the turn's workspace-scoped Retriever.
+func retrieverFromContext(ctx context.Context) (retriever.Interface, error) {
+	svc, ok := shard.ServicesFromContext(ctx)
+	if !ok || svc.Retriever == nil {
+		return nil, errors.New("retriever-unavailable: no workspace shard in this turn's context")
+	}
+	return svc.Retriever, nil
 }
 
 // editMarkdownHandler applies a whole-block replacement (ADR-0029 §1): pre-flight
@@ -259,7 +287,7 @@ func makeToolHandlers(doc document.Interface, rec retriever.Interface, tf textfo
 // structured {ok, blockId, revision, diff, normalized} or
 // {ok:false, error:guard-failed|invalid-structure, …} shape.
 func editMarkdownHandler(doc document.Interface, tf textformatter.Interface) tool.Handler {
-	return func(args json.RawMessage) (json.RawMessage, error) {
+	return func(ctx context.Context, args json.RawMessage) (json.RawMessage, error) {
 		var in struct {
 			BlockID    string `json:"blockId"`
 			Text       string `json:"text"`
@@ -273,8 +301,6 @@ func editMarkdownHandler(doc document.Interface, tf textformatter.Interface) too
 		if in.DocumentID == "" || in.BlockID == "" {
 			return structuredEdit(false, "invalid-args", nil), nil
 		}
-
-		ctx := context.Background()
 
 		// Find the block's kind for pre-flight validation.
 		var kind dto.BlockKind
@@ -322,16 +348,21 @@ func editMarkdownHandler(doc document.Interface, tf textformatter.Interface) too
 	}
 }
 
-// retrieveHandler returns the top retrieval chunks for a query.
-func retrieveHandler(rec retriever.Interface) tool.Handler {
-	return func(args json.RawMessage) (json.RawMessage, error) {
+// retrieveHandler returns the top retrieval chunks for a query, using the
+// turn's workspace-scoped Retriever (hybrid FTS5 + vec0 with provenance).
+func retrieveHandler() tool.Handler {
+	return func(ctx context.Context, args json.RawMessage) (json.RawMessage, error) {
 		var in struct {
 			Query string `json:"query"`
 		}
 		if err := json.Unmarshal(args, &in); err != nil {
 			return nil, err
 		}
-		chunks, err := rec.Query(context.Background(), in.Query, 3)
+		rec, err := retrieverFromContext(ctx)
+		if err != nil {
+			return nil, err
+		}
+		chunks, err := rec.Query(ctx, in.Query, 3)
 		if err != nil {
 			return nil, err
 		}
@@ -342,7 +373,7 @@ func retrieveHandler(rec retriever.Interface) tool.Handler {
 
 // diffHandler returns the word-level diff between two revisions.
 func diffHandler(doc document.Interface) tool.Handler {
-	return func(args json.RawMessage) (json.RawMessage, error) {
+	return func(ctx context.Context, args json.RawMessage) (json.RawMessage, error) {
 		var in struct {
 			DocumentID string `json:"documentId"`
 			BaseRev    string `json:"baseRev"`
@@ -361,18 +392,22 @@ func diffHandler(doc document.Interface) tool.Handler {
 }
 
 // readNoteHandler reads a note from the vault by path/title. The engine has no
-// dedicated vault module; the note index lives in the Retriever's index.db, so a
-// title/path query is served by full-text search (a POC-path judgment call,
-// documented in the report).
-func readNoteHandler(rec retriever.Interface) tool.Handler {
-	return func(args json.RawMessage) (json.RawMessage, error) {
+// dedicated vault module; the note index lives in the workspace shard's
+// index.db, so a title/path query is served by retrieval (a POC-path judgment
+// call, documented in the report).
+func readNoteHandler() tool.Handler {
+	return func(ctx context.Context, args json.RawMessage) (json.RawMessage, error) {
 		var in struct {
 			Query string `json:"query"`
 		}
 		if err := json.Unmarshal(args, &in); err != nil {
 			return nil, err
 		}
-		chunks, err := rec.Query(context.Background(), in.Query, 1)
+		rec, err := retrieverFromContext(ctx)
+		if err != nil {
+			return nil, err
+		}
+		chunks, err := rec.Query(ctx, in.Query, 1)
 		if err != nil {
 			return nil, err
 		}
@@ -397,7 +432,7 @@ func structuredEdit(ok bool, errCode string, extra map[string]interface{}) json.
 // makeHandler returns a minimal placeholder handler for any tool without a real
 // binding (never occurs for the shipped four; satisfies the cross-check).
 func makeHandler(name string) tool.Handler {
-	return func(args json.RawMessage) (json.RawMessage, error) {
+	return func(ctx context.Context, args json.RawMessage) (json.RawMessage, error) {
 		return nil, fmt.Errorf("tool %s: handler not yet implemented", name)
 	}
 }

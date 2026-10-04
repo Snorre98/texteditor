@@ -92,6 +92,10 @@ Retries are **bounded (≤3)**; every failure is recorded in `meter_events`/logs
 | mention path missing / not a regular file | `error` SSE event, code `mention-not-found`, before any streaming (ADR-0036) |
 | mention read over the byte cap | `error` SSE event, code `mention-too-large`, before any streaming (ADR-0036) |
 | mention read I/O failure | `error` SSE event, code `mention-unreadable`, before any streaming (ADR-0036) |
+| path outside `ALLOWED_ROOTS` | typed `path-outside-allowed-roots` — 403 on `/directories` and corpus mutations, SSE code on mentions; never silent (ADR-0049 §6) |
+| corpus root missing / not a file-or-directory | typed `corpus-root-invalid`, no scope persisted |
+| per-file corpus index failure | per-document status `error` with the message; the job continues and never silently drops (ADR-0049 §4) |
+| workspace unresolvable at turn start | `error` SSE event, code `workspace-unresolved`, before any model call (ADR-0049 §2) |
 | mentions over the count cap | `error` SSE event, code `too-many-mentions`, before any streaming (ADR-0036) |
 | mention content over the token budget | labeled overflow line in the breakdown; the turn proceeds without the truncated tail (ADR-0036) |
 | daemon unreachable on the observability read | `GET /fleet` answers **200** with `control: "unreachable"` and the last-known projection, every `liveState` forced to `unknown` (ADR-0040 §3) — a labeled stale read, never a 500 and never mistaken for `provider-unreachable` |

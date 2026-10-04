@@ -158,7 +158,10 @@ flowchart TB
         TextFormatter[TextFormatter]
         Sess[Session store]
         Doc[Document store]
-        WS[Workspace]
+        FS[Filesystem]
+        WStore[Workspace store]
+        Shards[Shard manager]
+        Corpus[Corpus service]
         Bus[SSE event bus]
     end
     Daemon[Control daemon]
@@ -169,7 +172,13 @@ flowchart TB
     API --> Doc
     API --> Mode
     API --> Fleet
-    API --> Sess
+    API --> FS
+    API --> WStore
+    API --> Shards
+    API --> Corpus
+    Corpus --> WStore
+    Corpus --> FS
+    Corpus --> Shards
     Loop --> Mode
     Loop --> ToolReg
     Loop --> ToolExec
@@ -177,8 +186,9 @@ flowchart TB
     Loop --> Prov
     Loop --> Fleet
     Loop --> Doc
-    Loop --> Ret
-    Loop --> Sess
+    Loop --> WStore
+    Loop --> Shards
+    Loop --> FS
     Loop --> Decider
     Decider --> Fleet
     Decider --> Prov
@@ -187,9 +197,11 @@ flowchart TB
     Ret --> Fleet
     Ret --> Prov
     Ret --> Chunker
+    Ret --> FS
     Doc --> TextFormatter
-    API --> WS
-    Loop --> WS
+    Shards --> Ret
+    Shards --> Sess
+    Shards --> Meter
     Fleet --> Daemon
     Daemon --> Manifest
     Daemon --> Exec
@@ -206,16 +218,19 @@ flowchart TB
 | Mode registry | prompt presets as data (name + system prompt + default model) | `List`, `Get` | validation, file loading |
 | Pipeline policy | one global turn policy: step cap, context budgets, auto-RAG top-k (ADR-0045) | `Policy` | schema validation, `config/pipeline.json` |
 | Tool registry | tool definitions + schemas (all tools global) | `Register`, `List` | schema validation |
-| Tool executor | tool execution | `Invoke(name, args)` | name-keyed handler map |
+| Tool executor | tool execution (ctx carries the turn's shard services) | `Invoke(ctx, name, args)` | name-keyed handler map |
 | Tool decider (optional) | tool-intent resolution ("which tool, what args") from a writer's `request_tool` intent — **parked/unwired** (ADR-0045) | `SignalTool`, `Decide(ctx, intent, c)` | prompt layout, Provider.Chat, τ threshold, `.cact` fingerprint |
 | Context assembler | payload + attribution (pure) | `Assemble(ctx, in) → (Payload, Breakdown)` | layout, truncation, accounting |
-| Token metering | counts + attribution + persistence | `Attribute(ctx, turnID, breakdown, counts)` | scale-to-total, `meter.db` |
-| Retriever | retrieval | `Query(ctx, text, topK)`, `Index(ctx, docID)` | embedding, sqlite-vec KNN, FTS5 |
+| Token metering | counts + attribution + persistence | `Attribute(ctx, turnID, breakdown, counts)` | scale-to-total, shard `meter.db` |
+| Retriever | hybrid retrieval + provenance + eviction + status, per workspace shard | `Query`, `Index`, `IndexPath`, `Evict`, `Status`, `Get` | embedding, vec0 KNN + FTS5 bm25 fused with RRF, shard `index.db` |
 | Chunker | chunking (pure) | `Chunk(tree []Block, maxTokens int)` | splitting algorithm |
 | TextFormatter | formatting (pure) | `Normalize(kind, text)`, `Validate(kind, text)`, `Format(kind, text)` | hardcoded opinionated style |
 | Document store | document + versions | `Open`, `Save`, `Blocks`, `ApplyEdit`, `Commit`, `Diff`, `History`, `Candidates` | git, block UUIDs, candidate side-table |
-| Workspace (leaf) | read-only filesystem reach: directory listing + bounded raw reads | `List(ctx, dir) → []Entry`, `Read(ctx, path, maxBytes)` | `os.ReadDir`/`os.ReadFile`, path validation, byte caps |
-| Session store | sessions + their messages (one per selection/doc) | `ListByDocument`, `Create`, `Resume`, `Append`, `History` | `sessions.db` |
+| Filesystem (leaf) | read-only filesystem reach: directory listing + bounded raw reads, bounded by `ALLOWED_ROOTS` | `List(ctx, dir) → []Entry`, `Read(ctx, path, maxBytes)`, `AllowedRoots()` | `os.ReadDir`/`os.ReadFile`, canonicalization, typed allowlist refusal, byte caps |
+| Workspace store (leaf) | global workspace registry + corpus scope + jobs + routing | `ResolveOrCreate`, `Get`, `List`, `FindContaining`, `Scope`, `SetScope`, job/tombstone/routing methods | `workspaces.db` |
+| Shard manager | per-workspace context-state lifecycle (lazy open, migrate, LRU close, leases) | `Services(ctx, workspaceID) → *Lease` | `workspaces/<id>/{index,sessions,meter}.db`, LRU cap, refcounts |
+| Corpus service | index-only multi-root corpus: scope, reconcile, status, async jobs, lifecycle hook | `Get`, `SetScope`, `Index`, `Evict`, `NotifyChanged` | glob walk via Filesystem, single-flight jobs, tombstones/errors |
+| Session store | sessions + their messages (one per selection/doc), workspace-scoped by shard | `ListByDocument`, `ListByWorkspace`, `Create`, `Resume`, `Append`, `History` | shard `sessions.db` |
 | API server | REST/SSE surface (codegen'd) | routes per OpenAPI spec | framing, turnID↔session↔client correlation |
 | SSE event bus | typed event fan-out | `Emit`, `Subscribe` | connection registry, backpressure |
 
@@ -230,8 +245,8 @@ process boundaries.
 Deferred — generated from source as it lands. Pre-defined seams/interfaces:
 `FleetGateway`, `ProviderGateway`, `Retriever`, `ContextAssembler`,
 `Chunker`, `TokenMeter`, `DocumentStore`, `SessionStore`, `EventBus`,
-`ToolDecider` (optional, ADR-0028), `TextFormatter` (ADR-0029)
-(see `contracts/interface.md`).
+`Filesystem`, `WorkspaceStore`, `ShardManager`, `Corpus`, `ToolDecider` (optional,
+ADR-0028), `TextFormatter` (ADR-0029) (see `contracts/interface.md`).
 
 ## 6. Runtime View
 
@@ -340,7 +355,7 @@ flowchart TB
 | Workspace-scoped storage | global `app.db` + git/worktree for document identity, `workspaces.db` for the registry; per-workspace context-state shards (`index.db`/`sessions.db`/`meter.db`) opened lazily — one file per service *instance*, not per service — ADR-0049 (amends ADR-0016) |
 | Filesystem boundary | `ALLOWED_ROOTS` bounds `GET /directories` browsing and corpus indexing; outside paths are typed refusals, even at `ENGINE_BIND=0.0.0.0` — ADR-0049, ADR-0021 |
 | Edit formatting | the engine owns the bytes: whole-block edits, `TextFormatter` normalize/validate/format, block-level guard, structured edit result — ADR-0029 |
-| Workspace navigation | engine-served shallow directory listing (Workspace leaf) + turn-scoped, metered `@`-mentions that are read-only context, never versioned documents — ADR-0035, ADR-0036 |
+| Workspace navigation | engine-served shallow directory listing (Filesystem leaf, renamed by ADR-0049 §5) + turn-scoped, metered `@`-mentions that are read-only context, never versioned documents — ADR-0035, ADR-0036 |
 | Document reader | read-only rendered markdown over the engine block tree (`GET /documents/{id}/blocks`, joined fragments, `tui-markdown`); a toggleable pane shaped over a `Block[]` view-model to extend into an editor, with the `SaveTree` write path left unwired; approve stays the only write boundary — ADR-0050 |
 | Inference control surface | a future `InferenceControl` interface *behind* the Provider seam (a sibling of `ProviderGateway`, not a change to it); the "knobs" (logprobs, grammar, KV, speculative decoding) are decoupled from the OpenAI-compatible contract for the MVP — `research/vision-native-local-llm-text-editing.md` |
 | Deployment/security | sidecar spawn dynamic-port-default; localhost bind; Tailscale deny-by-default — ADR-0021 |
@@ -491,6 +506,8 @@ The documentation set is complete when:
 | Provision | fetch model weights via the HF API (async, observable) |
 | Vault | the author's markdown corpus (thesis chapters + notes) that is indexed and retrieved over |
 | Workspace | persistent engine entity: a root directory plus its subdirectories; governs browsing/editing only — Workspace ≠ Corpus (ADR-0049) |
+| Workspace store | the sealed `workspaces.db` owner: workspace records, corpus roots/scope, index jobs, eviction tombstones, turn/session routing (ADR-0049 §5) |
+| Filesystem | the stateless read-only filesystem leaf (formerly the Workspace leaf), canonicalizing and bounded by `ALLOWED_ROOTS` (ADR-0035, ADR-0049 §5/§6) |
 | Workspace shard | per-workspace SQLite context state (`index.db`/`sessions.db`/`meter.db`) under `<data>/workspaces/<id>/`; document identity and git stay global (ADR-0049) |
 | Corpus root | an absolute file or directory in a workspace's multi-root corpus; roots may lie outside the workspace root (ADR-0049) |
 | Corpus scope | a corpus's roots plus include/exclude globs; engine-owned and index-only — never writes document files (ADR-0049) |

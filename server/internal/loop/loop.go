@@ -15,19 +15,21 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"path/filepath"
 	"time"
 
 	"github.com/google/uuid"
 
 	"texteditor/internal/assembler"
 	"texteditor/internal/document"
+	"texteditor/internal/filesystem"
 	"texteditor/internal/fleet"
 	"texteditor/internal/meter"
 	"texteditor/internal/mode"
+	"texteditor/internal/pathutil"
 	"texteditor/internal/pipeline"
 	"texteditor/internal/provider"
-	"texteditor/internal/retriever"
-	"texteditor/internal/session"
+	"texteditor/internal/shard"
 	"texteditor/internal/tool"
 	"texteditor/internal/workspace"
 	"texteditor/shared/dto"
@@ -48,20 +50,21 @@ type Emitter interface {
 }
 
 // Deps holds the loop's injected dependencies (the composition root wires these).
+// Retriever/Sessions/Meter are workspace-scoped: the loop resolves the turn's
+// workspace and acquires its shard lease at turn start (ADR-0049 §5).
 type Deps struct {
-	Modes     mode.Interface
-	Tools     tool.Registry
-	Executor  tool.Executor
-	Assembler assembler.Interface
-	Provider  provider.Interface
-	Fleet     fleet.Interface
-	Doc       document.Interface
-	Retriever retriever.Interface
-	Sessions  session.Interface
-	Meter     meter.Interface
-	Bus       Emitter
-	Pipeline  pipeline.Interface // the one global turn policy (ADR-0045 §3)
-	Workspace workspace.Interface
+	Modes      mode.Interface
+	Tools      tool.Registry
+	Executor   tool.Executor
+	Assembler  assembler.Interface
+	Provider   provider.Interface
+	Fleet      fleet.Interface
+	Doc        document.Interface
+	Shards     shard.Resolver
+	Workspaces workspace.Interface // registry + fallback resolve-or-create
+	Bus        Emitter
+	Pipeline   pipeline.Interface   // the one global turn policy (ADR-0045 §3)
+	Filesystem filesystem.Interface // mentions read (ADR-0036, ADR-0049 §6)
 }
 
 // Mention caps (ADR-0036 §2) — constants in the loop package, not mode data.
@@ -74,6 +77,9 @@ const (
 // codeFor. too-many-mentions is synthesized when the count cap is exceeded.
 var (
 	errTooManyMentions = errors.New("too-many-mentions: more than the per-turn mention cap")
+	// errWorkspaceUnresolved is the typed turn-start failure when neither
+	// Task.workspaceId nor a document path yields a workspace (ADR-0049 §2/§5).
+	errWorkspaceUnresolved = errors.New("workspace-unresolved: could not resolve the turn's workspace")
 )
 
 // loop is the concrete Agent loop.
@@ -107,7 +113,33 @@ func (l *loop) validate(task dto.Task) (mode.Mode, dto.Resolution, error) {
 	return m, res, nil
 }
 
-// resolveMentions reads every mentioned file through Workspace.Read before the
+// resolveWorkspaceID resolves the turn's workspace (ADR-0049 §2/§5): an
+// explicit Task.workspaceId wins; otherwise the engine resolves-or-creates a
+// workspace rooted at the canonical parent directory of the turn's document,
+// which keeps pre-workspace clients (the frozen OpenTUI TUI) working.
+func (l *loop) resolveWorkspaceID(task dto.Task) (string, error) {
+	if task.WorkspaceID != "" {
+		if _, err := l.d.Workspaces.Get(task.WorkspaceID); err != nil {
+			return "", errWorkspaceUnresolved
+		}
+		return task.WorkspaceID, nil
+	}
+	if task.DocumentID == "" {
+		return "", errWorkspaceUnresolved
+	}
+	path, err := l.d.Doc.Path(task.DocumentID)
+	if err != nil {
+		return "", errWorkspaceUnresolved
+	}
+	canonical, _ := pathutil.Canonical(path)
+	ws, err := l.d.Workspaces.ResolveOrCreate(filepath.Dir(canonical))
+	if err != nil {
+		return "", errWorkspaceUnresolved
+	}
+	return ws.ID, nil
+}
+
+// resolveMentions reads every mentioned file through Filesystem.Read before the
 // turn state machine starts (ADR-0036 §2). Failures are fail-fast and typed:
 //   - > maxMentions mentions        → too-many-mentions
 //   - not-found / not-regular       → mention-not-found
@@ -125,13 +157,15 @@ func (l *loop) resolveMentions(ctx context.Context, mentions []dto.Mention) ([]d
 	}
 	out := make([]dto.MentionContent, 0, len(mentions))
 	for _, m := range mentions {
-		data, err := l.d.Workspace.Read(ctx, m.Path, mentionReadCap)
+		data, err := l.d.Filesystem.Read(ctx, m.Path, mentionReadCap)
 		if err != nil {
 			switch {
-			case errors.Is(err, workspace.ErrNotFound), errors.Is(err, workspace.ErrNotRegular):
+			case errors.Is(err, filesystem.ErrNotFound), errors.Is(err, filesystem.ErrNotRegular):
 				return nil, errMentionNotFound(m.Path)
-			case errors.Is(err, workspace.ErrTooLarge):
+			case errors.Is(err, filesystem.ErrTooLarge):
 				return nil, errMentionTooLarge(m.Path)
+			case errors.Is(err, filesystem.ErrPathOutsideAllowedRoots):
+				return nil, errPathOutsideAllowedRoots(m.Path)
 			default:
 				return nil, errMentionUnreadable(m.Path)
 			}
@@ -161,6 +195,9 @@ func errMentionTooLarge(path string) error {
 func errMentionUnreadable(path string) error {
 	return &mentionError{code: "mention-unreadable", path: path}
 }
+func errPathOutsideAllowedRoots(path string) error {
+	return &mentionError{code: "path-outside-allowed-roots", path: path}
+}
 
 func (l *loop) runTurn(ctx context.Context, turnID string, task dto.Task) {
 	m, res, err := l.validate(task)
@@ -170,29 +207,48 @@ func (l *loop) runTurn(ctx context.Context, turnID string, task dto.Task) {
 	}
 
 	// Resolve mentions first, fail-fast (ADR-0036 §2): read every mentioned file
-	// through Workspace.Read before the turn state machine starts. A missing /
-	// oversized / unreadable mention (or over the count cap) is a typed,
-	// pre-streaming error — never silently dropped.
+	// through Filesystem.Read before the turn state machine starts. A missing /
+	// oversized / unreadable mention (or over the count cap, or one outside
+	// ALLOWED_ROOTS) is a typed, pre-streaming error — never silently dropped.
 	mentions, err := l.resolveMentions(ctx, task.Mentions)
 	if err != nil {
 		l.emit(turnID, dto.Event{Type: "error", Data: errorData(err)})
 		return
 	}
 
+	// Resolve the turn's workspace and acquire its shard lease (ADR-0049 §5):
+	// sessions, meter, and the index are workspace-scoped. The lease keeps the
+	// shard open for the whole turn and is released on return.
+	wsID, err := l.resolveWorkspaceID(task)
+	if err != nil {
+		l.emit(turnID, dto.Event{Type: "error", Data: errorData(err)})
+		return
+	}
+	lease, err := l.d.Shards.Services(ctx, wsID)
+	if err != nil {
+		l.emit(turnID, dto.Event{Type: "error", Data: errorData(err)})
+		return
+	}
+	defer lease.Release()
+	svc := &lease.Services
+	// Tool handlers (retrieve/read_note) reach this turn's workspace index
+	// through the context (ADR-0049 §5).
+	ctx = shard.WithServices(ctx, svc)
+
 	// planning: read session history + retrieved chunks.
-	history, _ := l.d.Sessions.History(task.SessionID)
+	history, _ := svc.Sessions.History(task.SessionID)
 
 	// Append the user's turn input to the session so the conversation is durable
 	// (ADR-0026 §3). The assistant's completions are appended after they land.
-	if err := l.d.Sessions.Append(task.SessionID, dto.Message{Role: "user", Content: task.UserInput}); err != nil {
+	if err := svc.Sessions.Append(task.SessionID, dto.Message{Role: "user", Content: task.UserInput}); err != nil {
 		l.emit(turnID, dto.Event{Type: "error", Data: errorData(err)})
 		return
 	}
 
 	// Per-session budget gate (ADR-0026 §5) — checked before any model call.
-	sess, _ := l.d.Sessions.Resume(task.SessionID)
+	sess, _ := svc.Sessions.Resume(task.SessionID)
 	if sess.TokenBudget != nil {
-		used, err := l.d.Meter.SessionUsage(ctx, task.SessionID)
+		used, err := svc.Meter.SessionUsage(ctx, task.SessionID)
 		if err == nil && meter.SessionExceeded(used, sess.TokenBudget, 1) {
 			l.emit(turnID, dto.Event{Type: "error", Data: errorData(meter.ErrSessionBudgetExceeded)})
 			return
@@ -202,7 +258,7 @@ func (l *loop) runTurn(ctx context.Context, turnID string, task dto.Task) {
 	// One fixed pipeline (ADR-0045 §2): auto-RAG always runs, with the policy's
 	// top-k; all registered tools are advertised.
 	policy := l.d.Pipeline.Policy()
-	chunks, _ := l.d.Retriever.Query(ctx, task.UserInput, policy.AutoRagTopK)
+	chunks, _ := svc.Retriever.Query(ctx, task.UserInput, policy.AutoRagTopK)
 
 	tools := toolsFor(l.d.Tools)
 
@@ -234,14 +290,14 @@ func (l *loop) runTurn(ctx context.Context, turnID string, task dto.Task) {
 
 	// answering: the final stream already forwarded tokens; now meter + persist.
 	if result.counts.InputTokens+result.counts.OutputTokens > 0 {
-		if _, err := l.d.Meter.Attribute(ctx, turnID, task.SessionID, res.UsedName, breakdown, result.counts); err != nil {
+		if _, err := svc.Meter.Attribute(ctx, turnID, task.SessionID, res.UsedName, breakdown, result.counts); err != nil {
 			l.emit(turnID, dto.Event{Type: "error", Data: errorData(err)})
 		}
 	}
 
 	// Persist the assistant's final answer (ADR-0026 §3).
 	if result.text != "" {
-		_ = l.d.Sessions.Append(task.SessionID, dto.Message{Role: "assistant", Content: result.text})
+		_ = svc.Sessions.Append(task.SessionID, dto.Message{Role: "assistant", Content: result.text})
 	}
 
 	l.emitFinal(turnID, res, result)
@@ -320,7 +376,7 @@ func (l *loop) runSteps(ctx context.Context, turnID string, task dto.Task, targe
 			// the tool schema (config/tools/*.json expose only the model's fields).
 			rawArgs = injectDocumentID(tc.Name, task, rawArgs)
 
-			out, toolErr := l.d.Executor.Invoke(tc.Name, rawArgs)
+			out, toolErr := l.d.Executor.Invoke(ctx, tc.Name, rawArgs)
 
 			// Observe structured edit results for events + retry signals.
 			handled := l.observeTool(turnID, task, tc, out, toolErr)
@@ -511,6 +567,10 @@ func codeFor(err error) string {
 		return me.code
 	case errors.Is(err, errTooManyMentions):
 		return "too-many-mentions"
+	case errors.Is(err, errWorkspaceUnresolved):
+		return "workspace-unresolved"
+	case errors.Is(err, filesystem.ErrPathOutsideAllowedRoots):
+		return "path-outside-allowed-roots"
 	case errors.Is(err, fleet.ErrModelNotFound):
 		return "model-not-found"
 	case errors.Is(err, fleet.ErrNoModelAvailable):

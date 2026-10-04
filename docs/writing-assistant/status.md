@@ -18,7 +18,7 @@ Last verified: 2026-10-04.
 | Router seam (D2–D5) + enablement seam (D1 minus the ML job) | ✅ committed (`504cd16`); **parked** (ADR-0045) — packages in-tree, unwired |
 | Track 2 — Deployment (E) · Tauri editor (F) | ✅ landed — **frozen** (ADR-0044) |
 | Fleet observability surface (ADR-0040 — `/fleet`, batch status, selectors) | ✅ |
-| Context-engine refocus (write-through safety, presets, RAG wiring, context inspector, `/locate`, context management — workspaces, multi-root corpus, tray — Ratatui TUI + reader pane) | 🚧 active roadmap — Phase B landed; C–F remain — [`plans/implementation-sequence-context-engine.md`](plans/implementation-sequence-context-engine.md) |
+| Context-engine refocus (write-through safety, presets, RAG wiring, context inspector, `/locate`, context management — workspaces, multi-root corpus, tray — Ratatui TUI + reader pane) | 🚧 active roadmap — Phases A, B, C1 and C2 landed; C3–F remain — [`plans/implementation-sequence-context-engine.md`](plans/implementation-sequence-context-engine.md) |
 | D1 ML fine-tune (Needle 2 `.cact` + flip a mode to `router`) | 🚧 deferred by trigger |
 | CI automation | 🚧 none |
 | `InferenceControl` surface (risk #9) | 🚧 deferred |
@@ -32,7 +32,7 @@ Last verified: 2026-10-04.
 | OpenTUI TUI (TS/Solid) | ⏸ frozen | `client/tui/` — replaced by the Ratatui TUI v2 (ADR-0046); retired on parity |
 | Tauri 2 + Vue 3 + CodeMirror 6 editor | ⏸ frozen | `client/tauri/` (landed in Track 2; frozen by ADR-0044 — no new work); Tailwind v4 + shadcn-vue (ADR-0042) power the floating chat window |
 | Model serving — external, over REST | ✅ | reached via the `macos-dev-config` control daemon; runners `llama.cpp \| mlx-lm \| mlx-vlm \| delegate` (ADR-0030 — **no Ollama/LM Studio**) |
-| SQLite via `modernc.org/sqlite` | ✅ | four per-service files: `app.db`, `index.db`, `meter.db`, `sessions.db`; Phase C adds `workspaces.db` + per-workspace context-state shards (ADR-0049) |
+| SQLite via `modernc.org/sqlite` | ✅ | global `app.db` + `workspaces.db` (+ git/worktree); per-workspace context-state shards `workspaces/<id>/{index.db,sessions.db,meter.db}` with lazy open + LRU close (ADR-0049 §5, C1) |
 | Single OpenAPI/JSON Schema contract | ✅ | `api/openapi.yaml`; codegen → ogen (Go) + Hey API (TS) + `openapi-to-rust` (Rust) |
 
 ## Layers
@@ -40,7 +40,7 @@ Last verified: 2026-10-04.
 | Layer | Status | Notes |
 |---|---|---|
 | Layer 3 — Clients (dumb, swappable) | ✅ | TUI v2 (Ratatui, ADR-0046) in progress, incl. a read-only reader pane (ADR-0050); OpenTUI + Tauri editor + web frozen; one contract (ADR-0014) |
-| API contract | ✅ | 20 routes incl. Track-1.5 + ADR-0038/0040 amendments; the deferred `/sessions/{id}/meter` is intentionally absent |
+| API contract | ✅ | Track-1.5 + ADR-0038/0040 amendments; C1 added `/sessions` `workspaceId` + rag provenance; C2 added `/workspaces`, `/corpus`, `/corpus/index`, `/corpus/documents/{id}` and the typed ALLOWED_ROOTS 403; C3 adds `/turns/{id}/context` + `/sessions/{id}/meter` |
 | Layer 2 — Engine | ✅ | all modules below |
 | Layer 0 — Model serving | ✅ | via control daemon (ADR-0025/0027/0033), not a raw Ollama port |
 
@@ -63,11 +63,15 @@ Last verified: 2026-10-04.
 | Pipeline policy | `internal/pipeline` | ✅ one global turn policy, validated at startup (ADR-0045) |
 | Tool registry | `internal/tool` | ✅ all tools global (ADR-0045) |
 | Context assembler | `internal/assembler` | ✅ |
-| Retriever | `internal/retriever` | ✅ (sqlite-vec `vec0` + FTS5 hybrid) |
-| Token metering | `internal/meter` | ✅ |
-| Document store + versioning | `internal/document` | ✅ (git coarse + block candidates) |
+| Retriever | `internal/retriever` | ✅ C1: per-workspace shard, heading-aware chunks with provenance, real FTS5 bm25 + vec0 KNN fused with RRF, idempotent eviction, `IndexPath`, `Status` |
+| Token metering | `internal/meter` | ✅ per-workspace shard (ADR-0049 §5) |
+| Document store + versioning | `internal/document` | ✅ (git coarse + block candidates); global `app.db`; `Path(documentID)` provenance seam |
 | `ToolDecider` (optional router) | `internal/tooldecider` | ✅ seam, **parked/unwired** (ADR-0045); enablement 🚧 |
 | Fleet gateway — observability | `internal/fleet` | ✅ `ListStatus` over daemon `status/all` + last-good cache (ADR-0040); daemon-side verb in macos-dev-config (ADR-0007) |
+| Filesystem (renamed from Workspace) | `internal/filesystem` | ✅ C1: shallow listing + bounded reads, canonicalized, bounded by `ALLOWED_ROOTS` with typed `path-outside-allowed-roots` (ADR-0049 §6) |
+| Workspace store | `internal/workspace` | ✅ C1: global `workspaces.db` (registry, corpus roots/scope, jobs, tombstones, routing); create-or-resume by canonical root; most-specific nested resolution |
+| Shard manager | `internal/shard` | ✅ C1: lazy open + per-shard migrate + LRU close (cap 4) + reference-counted leases; yields `{Retriever, Sessions, Meter}` |
+| Corpus service | `internal/corpus` | ✅ C2: multi-root glob walk (hidden excluded), path-keyed index-only reconcile, per-document status (indexed/stale/pending/evicted/error), async single-flight jobs, idempotent eviction, `DocHook` lifecycle; `internal/glob` matcher |
 
 Shipped **presets** (4): `drafter`, `editor`, `proofreader`, `grammar` — each
 exactly `name` + `systemPrompt` + `defaultModel` (ADR-0045 collapse landed;
@@ -86,12 +90,12 @@ from architecture.md §65 are future tools — not shipped; the reserved
 | Item | Status |
 |---|---|
 | Document metadata + stable block IDs | ✅ |
-| Embeddings (`sqlite-vec` `vec0`, KNN) | ✅ |
-| FTS5 full-text index | ✅ |
+| Embeddings (`sqlite-vec` `vec0`, KNN) | ✅ C1: per-workspace shard, `chunk_key`-keyed (no id collision), RRF-fused with FTS5 |
+| FTS5 full-text index | ✅ C1: bm25-queried and fused; re-index deletes stale rows first |
 | Token-metering events + conversation history | ✅ |
 | git as the versioning engine | ✅ |
-| Workspace registry + corpus scope (`workspaces.db`) | 🚧 planned — ADR-0049 (Phase C) |
-| Per-workspace context-state shards (`index.db`/`sessions.db`/`meter.db`) | 🚧 planned — ADR-0049 (Phase C) |
+| Workspace registry + corpus scope (`workspaces.db`) | ✅ C1 (registry + scope persistence); ✅ C2 (routes, status, jobs, tombstones, routing) |
+| Per-workspace context-state shards (`index.db`/`sessions.db`/`meter.db`) | ✅ C1 (lazy open + LRU + leases); ✅ C2 (corpus indexing/status/eviction); snapshots 🚧 C3–C4 |
 
 ## Layer 3 — Clients
 
@@ -130,10 +134,10 @@ what was dropped; the context inspector (ADR-0044, Phase 2) closes that.
 
 | Stage | Status |
 |---|---|
-| Chunk → embed (`nomic-embed` via Fleet) → `vec0` | 🚧 implemented but **no production caller** — `Retriever.Index` is exercised by tests only; a fresh `index.db` is empty |
-| FTS5 full-text index | 🚧 written but never queried — `Query` is vec0-KNN-only; no hybrid fusion, dedupe, or rerank |
-| Auto-RAG provenance visible to clients | 🚧 auto-retrieved chunks emit no `rag` event; only tool-invoked retrieval does |
-| Literature **bulk ingest** / citation tool | 🚧 thin — per-document `Index` only; no bulk-ingest or `cite`/`search_vault` tool shipped |
+| Chunk → embed (`nomic-embed` via Fleet) → `vec0` | ✅ C1: heading-aware chunks (versioned + `ChunkMarkdown` for corpus), per-workspace shard, idempotent per unchanged content; corpus bulk ingest/status 🚧 C2 |
+| FTS5 full-text index | ✅ C1: `Query` runs FTS5 bm25 + vec0 KNN fused with RRF (k=60) + dedupe, with path/heading provenance |
+| Auto-RAG provenance visible to clients | 🚧 auto-retrieved chunks still emit no `rag` event (C3); chunks already carry provenance |
+| Literature **bulk ingest** / citation tool | ✅ C2: multi-root corpus scope + `POST /corpus/index` async bulk ingest + per-document status + idempotent eviction; `cite`/`search_vault` tools remain future (ADR-0045) |
 
 ## Modularity principles
 
@@ -150,7 +154,7 @@ The phases (A–F) are detailed in
 
 1. **Phase A — trustworthy write-through (ADR-0047)** — open revalidation + path canonicalization; pre-write conflict check (`file-changed-externally`); no-op re-sync; newest-first, base-validated candidates; guards live on the model path; symlink-safe writes; HTTP-level E2E tests.
 2. ✅ **Phase B — prompt presets + one pipeline (ADR-0045)** — landed: modes are `name`/`systemPrompt`/`defaultModel`; `config/pipeline.json` is the one validated policy (maxSteps + budgets + autoRagTopK); one agentic loop, all tools global, auto-RAG always; router parked/unwired.
-3. **Phase C — real RAG + context management + context inspector (ADR-0044, ADR-0049)** — production indexing + vault bulk ingest; workspace registry (`workspaces.db`) + per-workspace context-state shards; multi-root corpus scope (default `**/*.md`, hidden dirs excluded) with canonicalized dedupe; `ALLOWED_ROOTS` boundary on browsing + indexing; idempotent eviction (vec0 + FTS) and per-document status (`/corpus`); hybrid FTS5 + vec0 fusion; auto-RAG `rag` events; labeled truncation; assembler v2 + persisted snapshots + `context` route + `GET /sessions/{id}/meter`.
+3. **Phase C — real RAG + context management + context inspector (ADR-0044, ADR-0049)** — ✅ **C1 landed** (retriever correctness + storage foundation). ✅ **C2 landed** (corpus management surface: `/workspaces`, `/corpus` scope/status/jobs, `POST /corpus/index`, idempotent `DELETE /corpus/documents/{id}`, multi-root glob walk, ALLOWED_ROOTS typed 403, `DocHook` lifecycle). Remaining: **C3** assembler v2 + snapshots + `context`/`rag` events + `/turns/{id}/context` + `/sessions/{id}/meter`; **C4** session context policy + tray overrides.
 4. **Phase D — `/locate` (ADR-0048)** — engine-side command parse; normalized exact-then-fuzzy resolver over the open document then the vault; `locate` event + snapshot record; ambiguity picker; anchored guarded edit.
 5. **Phase E — Ratatui TUI v2 (ADR-0046)** — `client/tui-rs/`; regenerated Rust client + Rust SSE decoder; preset tabs, read-only reader pane (ADR-0050 — rendered markdown over the block tree, `tui-markdown`, write path unwired), meter, context panel, diff/approve, write-through status, bracketed paste, mentions/sessions/cancel; workspace open/resume, corpus tree (multi-root scope, status, index/evict/rebuild, allowed-roots UX), context tray (pin/remove, retrieval query, auto-RAG, pin-for-session); fleet orchestration engine-side + daemon reliability fixes; retire OpenTUI on parity.
 6. **Phase F — decision layer (Laya) + thesis validation** — `laya-decider` runner; one global retrieval-gating policy; second meter row; golden-query metrics; model evaluation; budget defaults recorded.
@@ -163,7 +167,7 @@ The phases (A–F) are detailed in
 13. **Tauri unfreeze** — requires an explicit decision against ADR-0044 plus Rust codegen regeneration against the then-current OpenAPI spec; deferred chat affordances ("Stop generating", session titles) move with it.
 
 Deferred endpoint note: the bare `/files` read (ADR-0035) still lands only when a
-client needs it; `GET /sessions/{id}/meter` is now Phase 2.
+client needs it; `GET /sessions/{id}/meter` is Phase C3.
 
 ## Verification status
 
@@ -174,3 +178,5 @@ client needs it; `GET /sessions/{id}/meter` is now Phase 2.
 - D1 seam committed in `504cd16` — the earlier "uncommitted" note was stale.
 - Phase B gates (ADR-0045): `CGO_ENABLED=0 go test -count=1 ./...`, `go vet ./...`, and `gofmt -l server/` all clean; `client/tui` `bun test` (34 pass) + `bun run typecheck` green; the TUI generated client was regenerated against the reduced `/modes` schema.
 - Client suites: `client/tui` re-run for Phase B (above); `client/tauri` + `src-tauri` suites remain frozen with the client (ADR-0044) and were not re-run.
+- Phase C1 gates: `CGO_ENABLED=0 go test -count=1 ./...`, `go vet ./...`, `gofmt -l server/` clean; `client/tui` `bun test` + `bun run typecheck` green after the additive contract regen. New tests: retriever (stale-FTS, vec-id collision, idempotent eviction, RRF, `IndexPath` idempotency, temp-vault two-root E2E), markdown chunker, Filesystem allowlist/symlink escape, WorkspaceStore (alias/nested/scope), shard manager (lazy migrate/LRU/leases), loop fallback workspace resolution.
+- Phase C2 gates: same Go/vet/gofmt gates plus the HTTP E2E `TestCorpusHTTPE2E` (real `workspaces.db` + shard manager + retriever + corpus service over temp vaults: scope set, async index, per-document status incl. stale, idempotent eviction, rebuild, typed ALLOWED_ROOTS refusal on `/corpus` and `/directories`); corpus service tests (default scope/hidden exclusion, reconcile-evict, union-of-roots dedupe, `NotifyChanged`, `DocHook` write boundaries); `internal/glob` matcher tests. TUI regenerated against the additive contract and green.

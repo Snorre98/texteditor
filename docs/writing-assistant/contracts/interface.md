@@ -2,7 +2,10 @@
 
 The seams between modules. Source ADRs: ADR-0016 (module inventory),
 ADR-0018 (fleet manifest), ADR-0020 (storage), ADR-0024 (thinking attribution),
-ADR-0025 (control daemon), ADR-0026 (sessions), ADR-0027 (shared-DTO ownership).
+ADR-0025 (control daemon), ADR-0026 (sessions), ADR-0027 (shared-DTO ownership),
+ADR-0035 (filesystem reach; leaf renamed Filesystem by ADR-0049 §5), ADR-0036
+(mentions), ADR-0044 (context engine), ADR-0047 (canonical paths), ADR-0049
+(workspaces, corpus, sharded context storage).
 
 All boundary types are **pure DTOs** — plain data, no behavior, no pointers into
 another module's state, no embedded foreign types beyond other pure DTOs
@@ -27,6 +30,8 @@ embeds a sibling module's package type.
 | `Target` | Provider | 2 |
 | `Resolution`, `LiveState` | Fleet | 1 |
 | `Chunk` | Retriever, Chunker, Assembler | 3, 4, 5 |
+| `ChunkRef` | Retriever (`Get`), context tray / `Task` | 3, 7 |
+| `IndexedDocument` | Retriever (`Status`), corpus status | 3 |
 | `Message` | Session store, Assembler, `Payload` | 0b |
 | `Request` | Assembler (`Payload`), Provider | 5, 2 |
 | `JSONSchema` | `ToolDef` | 0b |
@@ -41,6 +46,8 @@ embeds a sibling module's package type.
 | `Payload`, `Breakdown` | Context assembler | 5 |
 | `MentionContent`, `Mention` | Context assembler / Agent loop | 5, 7 |
 | `ProviderCounts`, `AttributedBreakdown` | Token metering | 6 |
+| `Entry` | Filesystem | 9b |
+| `Workspace`, `CorpusScope`, `CorpusDocumentStatus`, `CorpusJob` | Workspace store, corpus surface | 9c |
 
 ## 0b. Shared DTO definitions — the unpinned catalog types
 
@@ -238,15 +245,36 @@ ignore it.)
 
 ```go
 type Chunk struct {
-    BlockID string  `json:"blockId"`
-    Text    string  `json:"text"`
-    Score   float32 `json:"score"`
-    Source  string  `json:"source"` // citation/provenance marker
+    BlockID  string  `json:"blockId"`
+    ChunkKey string  `json:"chunkKey,omitempty"` // path#index (corpus) | documentID#index (versioned)
+    Text     string  `json:"text"`
+    Score    float32 `json:"score"`
+    Source   string  `json:"source"` // citation/provenance marker
+    Path     string  `json:"path,omitempty"`    // canonical absolute file path
+    Heading  string  `json:"heading,omitempty"` // heading stack / nearest heading
+}
+
+type IndexedDocument struct { // Retriever.Status
+    Path        string
+    DocumentID  string // empty for path-keyed corpus files
+    ContentHash string
+    ChunkCount  int
+    IndexedAt   int64
+}
+
+type ChunkRef struct { // tray pin/exclude reference (ADR-0049 §8)
+    Path     string
+    ChunkKey string
+    Hash     string // optional content hash
 }
 
 type Retriever interface {
     Query(ctx context.Context, text string, topK int) ([]Chunk, error)
     Index(ctx context.Context, documentID string) error
+    IndexPath(ctx context.Context, path, contentHash string) error
+    Evict(ctx context.Context, chunkKeyOrPath string) error
+    Status() ([]IndexedDocument, error)
+    Get(ctx context.Context, refs []ChunkRef) ([]Chunk, error)
 }
 ```
 
@@ -254,20 +282,35 @@ type Retriever interface {
 crosses the API wire via the `rag` SSE event, which must stay camelCase like
 every other wire shape (recorded alongside the ADR-0017 §6 amendment).
 
-
-`Query` takes raw text; the Retriever owns embedding (resolves `nomic-embed` via
-Fleet, calls `Provider.Embed`), hybrid search, and rerank. `Index` is the write
-side: it calls the Chunker then writes `index.db` (vec + FTS).
+*Amendment (Phase C, ADR-0044 §3 / ADR-0049 §4/§5):* the Retriever is
+**workspace-scoped** — one instance per workspace shard (`index.db` lives under
+`<data>/workspaces/<id>/`). `Chunk` gains provenance (`ChunkKey`, `Path`,
+`Heading`). `Index` keeps the versioned-document path (chunkKey
+`documentID#index`); `IndexPath` indexes a corpus file path-keyed (chunkKey
+`path#index`) and is idempotent per unchanged content; `Evict` removes both the
+vec0 and FTS rows for a chunk/path/document and is idempotent; `Status` returns
+per-file hash/chunk-count rows for the corpus status surface; `Get` resolves
+stable `ChunkRef`s (tray pins, including after resume). `Query` is genuinely
+hybrid: FTS5 `bm25` + vec0 KNN fused with reciprocal rank fusion (k=60) plus
+dedupe. Index reads corpus files through the Filesystem leaf, so `ALLOWED_ROOTS`
+bounds indexing (ADR-0049 §6).
 
 ## 4. Chunker (Go, pure leaf)
 
 ```go
 type Chunker interface {
-    Chunk(tree []Block, maxTokens int) ([]Chunk, error) // tree = the document block tree (ADR-0020 §5); paragraph-aligned, size-bounded
+    Chunk(tree []Block, maxTokens int) ([]Chunk, error) // tree = the document block tree (ADR-0020 §5); heading-aware, paragraph-aligned, size-bounded
 }
+
+// ChunkMarkdown splits raw markdown into heading-aware chunks (ADR-0044 §3,
+// ADR-0049 §4): corpus files are indexed path-keyed with no documents row, so
+// the Retriever reads the file and calls this directly. Pure.
+func ChunkMarkdown(raw string, maxTokens int) ([]Chunk, error)
 ```
 
 Pure/deterministic; chunk size is a data tunable (the RAG token lever, ADR-0020).
+Chunks carry `Heading` (the markdown heading stack for `ChunkMarkdown`, the
+nearest preceding heading for `Chunk`).
 
 ## 4b. TextFormatter (Go, pure leaf)
 
@@ -404,13 +447,14 @@ type Mention struct { // ADR-0036
     Path string // absolute path; client resolves workspace-relative → absolute
 }
 type Task struct {
-    SessionID  string      // the owning session (ADR-0026)
-    ModeName   string
-    DocumentID string
-    UserInput  string
-    Selection  *Selection
-    Mentions   []Mention   // turn-scoped context attachments (ADR-0036)
-    Options    *TurnOptions
+    SessionID   string      // the owning session (ADR-0026)
+    ModeName    string
+    DocumentID  string
+    WorkspaceID string      // workspace shard owning this turn (ADR-0049 §5); optional
+    UserInput   string
+    Selection   *Selection
+    Mentions    []Mention   // turn-scoped context attachments (ADR-0036)
+    Options     *TurnOptions
 }
 
 type AgentLoop interface {
@@ -425,10 +469,17 @@ orchestrator owning only the turn state machine (bounded by the global
 session (ADR-0026).
 
 (Amended by ADR-0036: `Task` gains `Mentions []Mention`. `Run` resolves every
-mention through `Workspace.Read` **before** the turn state machine starts;
+mention through `Filesystem.Read` **before** the turn state machine starts;
 failures are fail-fast, pre-streaming, typed SSE errors: `mention-not-found`,
-`mention-too-large`, `mention-unreadable`, `too-many-mentions`. Mentions are
-turn-scoped — they are not persisted into session history.)
+`mention-too-large`, `mention-unreadable`, `too-many-mentions`, and
+`path-outside-allowed-roots`. Mentions are turn-scoped — they are not persisted
+into session history.)
+
+(Amended by ADR-0049 §5: `Task` gains optional `WorkspaceID`. At turn start the
+loop resolves the workspace — explicit id, else resolve-or-create rooted at the
+canonical parent directory of the turn's document (`workspace-unresolved` on
+failure) — acquires that shard's lease, and runs the turn against its
+Retriever/Session/Meter. The lease is released when the turn ends.)
 
 (Amended by ADR-0045: one fixed pipeline for every preset — all registered tools
 advertised, auto-RAG always runs (`PipelinePolicy.AutoRagTopK`), one agentic loop
@@ -461,12 +512,17 @@ type ToolRegistry interface { // ADR-0045: tools are global; no per-mode allowli
 }
 
 type ToolExecutor interface {
-    Invoke(name string, args json.RawMessage) (json.RawMessage, error)
+    Invoke(ctx context.Context, name string, args json.RawMessage) (json.RawMessage, error)
 }
 ```
 
 The tool def↔handler bind is the **`name`** (executor owns the private handler map;
 startup cross-check fails with `tool-has-no-handler`).
+
+(Amended by ADR-0049 §5: `Invoke` takes a `context.Context`. The loop enriches it
+with the turn's shard lease, so `retrieve`/`read_note` reach the correct
+workspace index; a handler invoked without shard services fails with
+`retriever-unavailable`.)
 
 ## 8b. Tool decider (Go, optional — parked)
 
@@ -630,35 +686,140 @@ When `writeThrough` is true (explicit Save / Cmd+S, not the periodic autosave),
 the canonical markdown is also mirrored back to the opened file path (ADR-0039);
 `Commit` always mirrors when a candidate was applied.
 
-## 9b. Workspace (Go, leaf)
+## 9b. Filesystem (Go, leaf)
 
-Read-only filesystem reach (ADR-0035). Source ADR-0035.
+Read-only filesystem reach bounded by `ALLOWED_ROOTS` (ADR-0035; renamed from
+Workspace by ADR-0049 §5; boundary ADR-0049 §6). Source ADR-0035, ADR-0049.
 
 ```go
 type Entry struct {
     Name  string // bare file/dir name
-    Path  string // absolute path
+    Path  string // canonical absolute path
     IsDir bool
 }
 
-type Workspace interface {
+type Filesystem interface {
     List(ctx context.Context, dir string) ([]Entry, error)
     Read(ctx context.Context, path string, maxBytes int) ([]byte, error)
+    AllowedRoots() []string // canonical allowlist (typed refusal payload)
 }
+
+func New(allowedRoots []string) (Filesystem, error) // fail-fast; empty = $HOME
 ```
 
 - `List` is shallow, non-recursive, sorted by name (case-insensitive). Hidden
   entries are returned; filtering for display is client-side presentation.
 - `Read` is bounded by `maxBytes` and returns raw bytes only — it never
   registers, versions, or indexes anything. Mentioned-file context (ADR-0036)
-  reads through here, so a mention is provably side-effect-free.
+  and corpus indexing read through here, so both are provably side-effect-free
+  and bounded.
+- Every path is canonicalized (`EvalSymlinks` + case-fold, ADR-0047 §2) and must
+  lie inside an allowed root; a path outside — including a symlink that resolves
+  outside — is refused with the typed `path-outside-allowed-roots`, never
+  silently. This holds even with `ENGINE_BIND=0.0.0.0` (ADR-0021, ADR-0049 §6).
 - Typed errors: `not-found`, `not-a-directory`, `not-regular`, `too-large`,
-  `read-failed`. The loop maps them to the mention SSE codes (ADR-0036 §2);
-  the API server maps `List` failures to `not-found` / `not-a-directory`.
+  `read-failed`, `path-outside-allowed-roots`. The loop maps them to the mention
+  SSE codes (ADR-0036 §2); the API server maps `List` failures to the matching
+  typed refusals.
+
+## 9c. Workspace store (Go, leaf)
+
+Owns the global `workspaces.db` registry (ADR-0049 §2/§3/§5): workspace records,
+corpus roots/scope, index-job progress, eviction tombstones, and the
+turn/session routing index. Source ADR-0049.
+
+```go
+type Workspace struct {
+    ID        string // UUID, client-facing identity
+    Root      string // canonical absolute directory (EvalSymlinks + case-fold)
+    Name      string // display label (default: basename of Root)
+    CreatedAt int64
+    UpdatedAt int64
+}
+
+type CorpusScope struct {
+    Roots   []string // canonical absolute paths
+    Include []string // globs; default **/*.md
+    Exclude []string // globs
+}
+
+type WorkspaceStore interface {
+    ResolveOrCreate(root string) (Workspace, error) // most-specific containing root, else create
+    Get(id string) (Workspace, error)
+    List() ([]Workspace, error)
+    FindContaining(path string) (Workspace, bool, error)
+    Scope(workspaceID string) (CorpusScope, error)
+    SetScope(workspaceID string, scope CorpusScope) (CorpusScope, error) // idempotent
+    // corpus jobs, eviction tombstones, per-path errors, turn/session routing
+    // (interface.md §9c; see the Go interface for the full method set)
+}
+```
+
+- **Workspace ≠ Corpus** (ADR-0049 §1): the root bounds browsing/editing only;
+  the corpus is an independent multi-root set that may reach outside it.
+- Create-or-resume by canonical root: aliases and symlinks resolve to one
+  workspace; opening a nested directory resolves to the most specific existing
+  containing workspace (explicit nested creation is deferred).
+- A new workspace is seeded with its root as the first corpus root and
+  `**/*.md` as the default include (hidden directories are excluded by the
+  walker).
+- `workspaces.db` is the only global index; per-workspace context state lives in
+  the shard (`<data>/workspaces/<id>/{index.db,sessions.db,meter.db}`), opened
+  lazily and closed LRU by the composition root's shard Manager.
+
+## 9d. Corpus service (Go)
+
+The engine-owned, index-only retrieval scope over a workspace's multi-root
+corpus (ADR-0049 §3/§4). It owns no database: it resolves scope through the
+Workspace store, walks it through the Filesystem leaf, indexes through the
+shard's Retriever, and surfaces per-document status + job progress. Corpus files
+are never documents rows and never versioned — no open, no version, no write.
+
+```go
+type CorpusState struct {
+    WorkspaceID string
+    Roots       []string
+    Include     []string
+    Exclude     []string
+    Documents   []CorpusDocumentStatus // indexed | stale | pending | evicted | error
+    Job         *CorpusJob             // latest job (polled via GET /corpus)
+}
+
+type Corpus interface {
+    Get(ctx context.Context, workspaceID string) (CorpusState, error)
+    SetScope(ctx context.Context, workspaceID string, scope CorpusScope) (CorpusState, error) // idempotent; async reconcile
+    Index(ctx context.Context, workspaceID string) (CorpusJob, error)                          // async; idempotent per unchanged content
+    Evict(ctx context.Context, workspaceID, documentID string) error                           // idempotent
+    NotifyChanged(path string) // non-blocking lifecycle hook (Open/Commit/write-through save)
+}
+```
+
+- **Scope** = roots + include/exclude globs; defaults: the workspace root as the
+  first root, `**/*.md`, hidden directories/files excluded. Roots may lie outside
+  the workspace root (Workspace ≠ Corpus) but must lie inside `ALLOWED_ROOTS`;
+  an outside root is refused with `path-outside-allowed-roots` before anything is
+  persisted.
+- **Indexing is path-keyed and index-only**: `IndexPath` per file; unchanged
+  content is a no-op. A successful index clears the file's eviction tombstone
+  and error record. Per-path failures are recorded (`error` status), never
+  silent; a job whose every file failed ends `error`.
+- **Reconcile** (scope change) indexes the new scope and evicts corpus rows that
+  fell out of it; no document file is created, modified, or deleted.
+- **Eviction** (`DELETE /corpus/documents/{id}`) records a tombstone and removes
+  the file's chunks; the path-derived id is `sha256(canonical path)` prefix
+  (interface §3 `ChunkRef`/pathutil.DocID).
+- **Jobs** are single-flight per workspace and coalesce while running; progress
+  is polled through `GET /corpus` (Phase C pin; no SSE event).
+- **Lifecycle**: `DocHook` decorates the Document store so a successful
+  Open/Commit/write-through SaveTree enqueues a re-index when the canonical path
+  is in any workspace's corpus; the write is never blocked.
+- Typed errors: `path-outside-allowed-roots` (403 at the API), workspace
+  `not-found`, and per-path index errors surfaced as status.
 
 ## 10. Session store (Go, leaf)
 
-Owns a dedicated `sessions.db` (ADR-0026). Source ADR-0026.
+Owns a dedicated `sessions.db` — per workspace shard since ADR-0049 §5
+(`<data>/workspaces/<id>/sessions.db`). Source ADR-0026, amended by ADR-0049.
 
 ```go
 type Session struct {
@@ -674,6 +835,7 @@ type Session struct {
 
 type SessionStore interface {
     ListByDocument(documentID string) ([]Session, error)
+    ListByWorkspace() ([]Session, error) // workspace-scoped by shard
     Create(documentID string, anchorBlockID *string, modeType string) (Session, error)
     Resume(id string) (Session, error)          // find-or-open an anchored session
     Append(sessionID string, msg Message) error
@@ -683,6 +845,8 @@ type SessionStore interface {
 
 `Resume(id)` (or `Create` on an existing `(document_id, anchor_block_id)` pair)
 is create-or-resume: re-anchoring to the same block reopens the same session.
+The API server routes a session id to its workspace shard through the
+`workspaces.db` routing index; `Session.workspaceId` is populated on responses.
 
 ## 11. SSE event bus (Go)
 
@@ -737,6 +901,10 @@ pinned in `contracts/daemon-http.md` (REST projection of the table below).
 ## 13. Invariants
 
 - All boundary types are pure DTOs; no module embeds another module's types (ADR-0016).
+- One SQLite file per service *instance* (ADR-0016 as amended by ADR-0049 §5):
+  `app.db`/`workspaces.db`/git/worktree are global; Retriever, Session store, and
+  Token meter each own a per-workspace shard file. No SQLite file is shared
+  across modules, and document identity/git never shard.
 - The Fleet gateway is the *only* engine module that may talk to serving — and only
   via the daemon's HTTP contract (ADR-0025).
 - The Provider never loads weights, shells out, or resolves names — it only speaks

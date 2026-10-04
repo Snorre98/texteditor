@@ -3,6 +3,7 @@
 package tool
 
 import (
+	"context"
 	"encoding/json"
 
 	"texteditor/shared/dto"
@@ -16,7 +17,10 @@ type Registry interface {
 	List() []dto.ToolDef
 }
 
-// Executor is the Tool executor public API (interface.md §8).
+// Executor is the Tool executor public API (interface.md §8). The context
+// carries the turn's workspace-scoped services (the loop injects the shard
+// lease) so document-scoped tools like retrieve/read_note reach the right
+// workspace index (ADR-0049 §5).
 type Executor interface {
-	Invoke(name string, args json.RawMessage) (json.RawMessage, error)
+	Invoke(ctx context.Context, name string, args json.RawMessage) (json.RawMessage, error)
 }

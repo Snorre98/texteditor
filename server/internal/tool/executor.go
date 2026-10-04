@@ -1,13 +1,15 @@
 package tool
 
 import (
+	"context"
 	"encoding/json"
 )
 
 // Handler is a tool's Go implementation: name-keyed into the executor's private
 // map (ADR-0019 §3). The name is the whole seam; no reflection, no data naming a
-// Go symbol.
-type Handler func(args json.RawMessage) (json.RawMessage, error)
+// Go symbol. The context carries the turn's workspace-scoped services
+// (ADR-0049 §5).
+type Handler func(ctx context.Context, args json.RawMessage) (json.RawMessage, error)
 
 // ExecutorImpl is the concrete Tool executor. It satisfies the Executor
 // interface; Bind is only reachable at the composition root (startup), where
@@ -28,12 +30,12 @@ func (e *ExecutorImpl) Bind(name string, h Handler) {
 }
 
 // Invoke dispatches name to its bound handler (interface.md §8).
-func (e *ExecutorImpl) Invoke(name string, args json.RawMessage) (json.RawMessage, error) {
+func (e *ExecutorImpl) Invoke(ctx context.Context, name string, args json.RawMessage) (json.RawMessage, error) {
 	h, ok := e.handlers[name]
 	if !ok {
 		return nil, ErrToolNoHandler
 	}
-	return h(args)
+	return h(ctx, args)
 }
 
 // HandlerNames returns the set of bound handler names (the startup cross-check:

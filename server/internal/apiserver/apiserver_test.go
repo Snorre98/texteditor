@@ -19,7 +19,9 @@ import (
 	_ "modernc.org/sqlite"
 
 	"texteditor/internal/document"
+	"texteditor/internal/filesystem"
 	"texteditor/internal/fleet"
+	"texteditor/internal/shard"
 	"texteditor/internal/textformatter"
 	"texteditor/internal/workspace"
 	"texteditor/shared/dto"
@@ -122,11 +124,15 @@ func (stubDoc) Diff(string, string, string) ([]dto.WordEdit, error) {
 func (stubDoc) History(string) ([]dto.Revision, error) {
 	return []dto.Revision{{ID: "r1", Message: "m", Timestamp: 1}}, nil
 }
+func (stubDoc) Path(string) (string, error)                        { return "/tmp/x.md", nil }
 func (stubDoc) Candidates(string, string) ([]dto.Candidate, error) { return nil, nil }
 
 type stubSessions struct{}
 
 func (stubSessions) ListByDocument(string) ([]dto.Session, error) {
+	return []dto.Session{{ID: "s1", DocumentID: "d1", ModeType: "proofreader"}}, nil
+}
+func (stubSessions) ListByWorkspace() ([]dto.Session, error) {
 	return []dto.Session{{ID: "s1", DocumentID: "d1", ModeType: "proofreader"}}, nil
 }
 func (stubSessions) Create(string, *string, string) (dto.Session, error) {
@@ -138,19 +144,74 @@ func (stubSessions) History(string) ([]dto.Message, error) {
 	return []dto.Message{{Role: "user", Content: "hi"}}, nil
 }
 
-// stubWorkspace implements the apiserver's workspace.Interface.
-type stubWorkspace struct {
-	entries []workspace.Entry
+// stubFilesystem implements the apiserver's filesystem.Interface.
+type stubFilesystem struct {
+	entries []filesystem.Entry
 	err     error
 }
 
-func (s *stubWorkspace) List(context.Context, string) ([]workspace.Entry, error) {
+func (s *stubFilesystem) List(context.Context, string) ([]filesystem.Entry, error) {
 	if s.err != nil {
 		return nil, s.err
 	}
 	return s.entries, nil
 }
-func (s *stubWorkspace) Read(context.Context, string, int) ([]byte, error) { return nil, nil }
+func (s *stubFilesystem) Read(context.Context, string, int) ([]byte, error) { return nil, nil }
+func (s *stubFilesystem) AllowedRoots() []string                            { return []string{"/"} }
+func (s *stubFilesystem) Check(string) error                                { return s.err }
+
+// stubWorkspaces implements workspace.Interface with permissive defaults.
+type stubWorkspaces struct{}
+
+func (stubWorkspaces) ResolveOrCreate(root string) (dto.Workspace, error) {
+	return dto.Workspace{ID: "ws1", Root: root}, nil
+}
+func (stubWorkspaces) Get(id string) (dto.Workspace, error) {
+	return dto.Workspace{ID: id, Root: "/vault"}, nil
+}
+func (stubWorkspaces) List() ([]dto.Workspace, error) { return nil, nil }
+func (stubWorkspaces) FindContaining(string) (dto.Workspace, bool, error) {
+	return dto.Workspace{ID: "ws1", Root: "/vault"}, true, nil
+}
+func (stubWorkspaces) Scope(string) (dto.CorpusScope, error) { return dto.CorpusScope{}, nil }
+func (stubWorkspaces) SetScope(string, dto.CorpusScope) (dto.CorpusScope, error) {
+	return dto.CorpusScope{}, nil
+}
+func (stubWorkspaces) StartJob(string, string, int) (dto.CorpusJob, error) {
+	return dto.CorpusJob{}, nil
+}
+func (stubWorkspaces) UpdateJob(string, int, string, string) error { return nil }
+func (stubWorkspaces) LatestJob(string) (dto.CorpusJob, bool, error) {
+	return dto.CorpusJob{}, false, nil
+}
+func (stubWorkspaces) MarkEvicted(string, string) error         { return nil }
+func (stubWorkspaces) ClearEvicted(string, string) error        { return nil }
+func (stubWorkspaces) EvictedPaths(string) ([]string, error)    { return nil, nil }
+func (stubWorkspaces) MarkError(string, string, string) error   { return nil }
+func (stubWorkspaces) ClearError(string, string) error          { return nil }
+func (stubWorkspaces) Errors(string) (map[string]string, error) { return nil, nil }
+func (stubWorkspaces) RouteSession(string, string) error        { return nil }
+func (stubWorkspaces) SessionWorkspace(string) (string, bool, error) {
+	return "ws1", true, nil
+}
+func (stubWorkspaces) RouteTurn(string, string, string) error { return nil }
+func (stubWorkspaces) TurnRoute(string) (string, string, bool, error) {
+	return "ws1", "s1", true, nil
+}
+
+var _ workspace.Interface = stubWorkspaces{}
+
+// stubShards returns one fixed shard lease carrying the stub session store.
+type stubShards struct{ svc *shard.Services }
+
+func (s stubShards) Services(context.Context, string) (*shard.Lease, error) {
+	return shard.NewLease(*s.svc), nil
+}
+
+// shardDeps builds the shard/registry deps every test server needs.
+func shardDeps() (workspace.Interface, shard.Resolver) {
+	return stubWorkspaces{}, stubShards{svc: &shard.Services{Sessions: stubSessions{}}}
+}
 
 // stubLoop is superseded by stubLoopEmitter; kept removed below.
 
@@ -184,12 +245,14 @@ func newTestServer(t *testing.T) (*Server, *fakeBus) {
 	// A loop that emits into the bus after Run, carrying the real turnID.
 	loop := &stubLoopEmitter{bus: bus}
 	srv, err := New(Deps{
-		Fleet:    stubFleet{models: []dto.Model{{Name: "gemma4-12b", BaseURL: "http://x/v1", Capabilities: dto.Capabilities{ContextLength: 131072}}}},
-		Modes:    stubModes{},
-		Tools:    stubTools{},
-		Doc:      stubDoc{},
-		Sessions: stubSessions{},
-		Loop:     loop,
+		Fleet:      stubFleet{models: []dto.Model{{Name: "gemma4-12b", BaseURL: "http://x/v1", Capabilities: dto.Capabilities{ContextLength: 131072}}}},
+		Modes:      stubModes{},
+		Tools:      stubTools{},
+		Doc:        stubDoc{},
+		Filesystem: &stubFilesystem{},
+		Workspaces: stubWorkspaces{},
+		Shards:     stubShards{svc: &shard.Services{Sessions: stubSessions{}}},
+		Loop:       loop,
 	}, bus)
 	if err != nil {
 		t.Fatal(err)
@@ -232,13 +295,15 @@ func TestHealthAdvertisesBaseURL(t *testing.T) {
 	// (ADR-0021 §1); when unset it is omitted (fixed/legacy mode).
 	bus := &fakeBus{}
 	srv, err := New(Deps{
-		Fleet:    stubFleet{models: []dto.Model{{Name: "gemma4-12b", BaseURL: "http://x/v1", Capabilities: dto.Capabilities{ContextLength: 131072}}}},
-		Modes:    stubModes{},
-		Tools:    stubTools{},
-		Doc:      stubDoc{},
-		Sessions: stubSessions{},
-		Loop:     &stubLoopEmitter{bus: bus},
-		BaseURL:  "http://127.0.0.1:41234",
+		Fleet:      stubFleet{models: []dto.Model{{Name: "gemma4-12b", BaseURL: "http://x/v1", Capabilities: dto.Capabilities{ContextLength: 131072}}}},
+		Modes:      stubModes{},
+		Tools:      stubTools{},
+		Doc:        stubDoc{},
+		Filesystem: &stubFilesystem{},
+		Workspaces: stubWorkspaces{},
+		Shards:     stubShards{svc: &shard.Services{Sessions: stubSessions{}}},
+		Loop:       &stubLoopEmitter{bus: bus},
+		BaseURL:    "http://127.0.0.1:41234",
 	}, bus)
 	if err != nil {
 		t.Fatal(err)
@@ -277,11 +342,13 @@ func TestGetFleet(t *testing.T) {
 			},
 			states: map[string]dto.LiveState{"gemma4-12b": dto.LiveUp, "gemma4-26b": dto.LiveDown},
 		},
-		Modes:    stubModes{},
-		Tools:    stubTools{},
-		Doc:      stubDoc{},
-		Sessions: stubSessions{},
-		Loop:     &stubLoopEmitter{bus: bus},
+		Modes:      stubModes{},
+		Tools:      stubTools{},
+		Doc:        stubDoc{},
+		Filesystem: &stubFilesystem{},
+		Workspaces: stubWorkspaces{},
+		Shards:     stubShards{svc: &shard.Services{Sessions: stubSessions{}}},
+		Loop:       &stubLoopEmitter{bus: bus},
 	}, bus)
 	if err != nil {
 		t.Fatal(err)
@@ -326,11 +393,13 @@ func TestGetFleetDaemonUnreachable(t *testing.T) {
 			models:      []dto.Model{{Name: "gemma4-12b", BaseURL: "http://x/v1"}},
 			unreachable: true,
 		},
-		Modes:    stubModes{},
-		Tools:    stubTools{},
-		Doc:      stubDoc{},
-		Sessions: stubSessions{},
-		Loop:     &stubLoopEmitter{bus: bus},
+		Modes:      stubModes{},
+		Tools:      stubTools{},
+		Doc:        stubDoc{},
+		Filesystem: &stubFilesystem{},
+		Workspaces: stubWorkspaces{},
+		Shards:     stubShards{svc: &shard.Services{Sessions: stubSessions{}}},
+		Loop:       &stubLoopEmitter{bus: bus},
 	}, bus)
 	if err != nil {
 		t.Fatal(err)
@@ -425,18 +494,19 @@ func TestSessions(t *testing.T) {
 
 func TestListDirectory(t *testing.T) {
 	bus := &fakeBus{}
-	ws := &stubWorkspace{entries: []workspace.Entry{
+	ws := &stubFilesystem{entries: []filesystem.Entry{
 		{Name: "a.md", Path: "/vault/a.md", IsDir: false},
 		{Name: "notes", Path: "/vault/notes", IsDir: true},
 	}}
 	srv, err := New(Deps{
-		Fleet:     stubFleet{},
-		Modes:     stubModes{},
-		Tools:     stubTools{},
-		Doc:       stubDoc{},
-		Sessions:  stubSessions{},
-		Loop:      &stubLoopEmitter{bus: bus},
-		Workspace: ws,
+		Fleet:      stubFleet{},
+		Modes:      stubModes{},
+		Tools:      stubTools{},
+		Doc:        stubDoc{},
+		Filesystem: ws,
+		Workspaces: stubWorkspaces{},
+		Shards:     stubShards{svc: &shard.Services{Sessions: stubSessions{}}},
+		Loop:       &stubLoopEmitter{bus: bus},
 	}, bus)
 	if err != nil {
 		t.Fatal(err)
@@ -455,13 +525,14 @@ func TestListDirectory(t *testing.T) {
 func TestListDirectoryNotFound(t *testing.T) {
 	bus := &fakeBus{}
 	srv, err := New(Deps{
-		Fleet:     stubFleet{},
-		Modes:     stubModes{},
-		Tools:     stubTools{},
-		Doc:       stubDoc{},
-		Sessions:  stubSessions{},
-		Loop:      &stubLoopEmitter{bus: bus},
-		Workspace: &stubWorkspace{err: workspace.ErrNotFound},
+		Fleet:      stubFleet{},
+		Modes:      stubModes{},
+		Tools:      stubTools{},
+		Doc:        stubDoc{},
+		Filesystem: &stubFilesystem{err: filesystem.ErrNotFound},
+		Workspaces: stubWorkspaces{},
+		Shards:     stubShards{svc: &shard.Services{Sessions: stubSessions{}}},
+		Loop:       &stubLoopEmitter{bus: bus},
 	}, bus)
 	if err != nil {
 		t.Fatal(err)
@@ -528,12 +599,14 @@ func TestStartTurnDecodesMentions(t *testing.T) {
 	bus := &fakeBus{}
 	loop := &captureLoop{bus: bus}
 	srv, err := New(Deps{
-		Fleet:    stubFleet{},
-		Modes:    stubModes{},
-		Tools:    stubTools{},
-		Doc:      stubDoc{},
-		Sessions: stubSessions{},
-		Loop:     loop,
+		Fleet:      stubFleet{},
+		Modes:      stubModes{},
+		Tools:      stubTools{},
+		Doc:        stubDoc{},
+		Filesystem: &stubFilesystem{},
+		Workspaces: stubWorkspaces{},
+		Shards:     stubShards{svc: &shard.Services{Sessions: stubSessions{}}},
+		Loop:       loop,
 	}, bus)
 	if err != nil {
 		t.Fatal(err)
@@ -563,7 +636,9 @@ func newCORSServer(t *testing.T, origins []string) *Server {
 		Modes:       stubModes{},
 		Tools:       stubTools{},
 		Doc:         stubDoc{},
-		Sessions:    stubSessions{},
+		Filesystem:  &stubFilesystem{},
+		Workspaces:  stubWorkspaces{},
+		Shards:      stubShards{svc: &shard.Services{Sessions: stubSessions{}}},
 		Loop:        &stubLoopEmitter{bus: bus},
 		CORSOrigins: origins,
 	}, bus)
@@ -716,12 +791,14 @@ func newRealDocServer(t *testing.T, notePath string, loop *stagingLoop) (*Server
 	bus := &fakeBus{}
 	loop.bus = bus
 	srv, err := New(Deps{
-		Fleet:    stubFleet{},
-		Modes:    stubModes{},
-		Tools:    stubTools{},
-		Doc:      ds,
-		Sessions: stubSessions{},
-		Loop:     loop,
+		Fleet:      stubFleet{},
+		Modes:      stubModes{},
+		Tools:      stubTools{},
+		Doc:        ds,
+		Filesystem: &stubFilesystem{},
+		Workspaces: stubWorkspaces{},
+		Shards:     stubShards{svc: &shard.Services{Sessions: stubSessions{}}},
+		Loop:       loop,
 	}, bus)
 	if err != nil {
 		t.Fatal(err)

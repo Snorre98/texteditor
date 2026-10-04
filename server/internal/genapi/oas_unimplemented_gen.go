@@ -43,6 +43,27 @@ func (UnimplementedHandler) CreateSession(ctx context.Context, req *CreateSessio
 	return r, ht.ErrNotImplemented
 }
 
+// CreateWorkspace implements createWorkspace operation.
+//
+// Canonicalizes the root (EvalSymlinks + case-fold): an alias or an already-open nested directory
+// resumes the most specific existing workspace; otherwise a workspace is created and seeded with the
+// root as its first corpus root and `**/*.md` as the default include.
+//
+// POST /workspaces
+func (UnimplementedHandler) CreateWorkspace(ctx context.Context, req *CreateWorkspaceRequest) (r *Workspace, _ error) {
+	return r, ht.ErrNotImplemented
+}
+
+// EvictCorpusDocument implements evictCorpusDocument operation.
+//
+// Removes the file's chunks from both the vector and full-text indexes and records an eviction
+// tombstone (status `evicted` until re-indexed). No file on disk is touched. Deleting twice succeeds.
+//
+// DELETE /corpus/documents/{id}
+func (UnimplementedHandler) EvictCorpusDocument(ctx context.Context, params EvictCorpusDocumentParams) (r EvictCorpusDocumentRes, _ error) {
+	return r, ht.ErrNotImplemented
+}
+
 // GetBlocks implements getBlocks operation.
 //
 // GET /documents/{id}/blocks
@@ -54,6 +75,15 @@ func (UnimplementedHandler) GetBlocks(ctx context.Context, params GetBlocksParam
 //
 // GET /documents/{id}/blocks/{bid}/candidates
 func (UnimplementedHandler) GetCandidates(ctx context.Context, params GetCandidatesParams) (r []Candidate, _ error) {
+	return r, ht.ErrNotImplemented
+}
+
+// GetCorpus implements getCorpus operation.
+//
+// Read a workspace's corpus scope, per-document status, and job progress (ADR-0049 §4).
+//
+// GET /corpus
+func (UnimplementedHandler) GetCorpus(ctx context.Context, params GetCorpusParams) (r *CorpusState, _ error) {
 	return r, ht.ErrNotImplemented
 }
 
@@ -105,12 +135,31 @@ func (UnimplementedHandler) GetSessionMessages(ctx context.Context, params GetSe
 	return r, ht.ErrNotImplemented
 }
 
+// GetWorkspace implements getWorkspace operation.
+//
+// Read one workspace record.
+//
+// GET /workspaces/{id}
+func (UnimplementedHandler) GetWorkspace(ctx context.Context, params GetWorkspaceParams) (r *Workspace, _ error) {
+	return r, ht.ErrNotImplemented
+}
+
+// IndexCorpus implements indexCorpus operation.
+//
+// Bulk (re)index the current scope; async, idempotent per unchanged content (ADR-0049 §4).
+//
+// POST /corpus/index
+func (UnimplementedHandler) IndexCorpus(ctx context.Context, req *CorpusIndexRequest) (r *CorpusJob, _ error) {
+	return r, ht.ErrNotImplemented
+}
+
 // ListDirectory implements listDirectory operation.
 //
-// List one directory's direct, non-recursive entries (ADR-0035).
+// Bounded by ALLOWED_ROOTS (ADR-0049 §6): a path outside the allowlist is refused with the typed
+// `path-outside-allowed-roots` error, never silently.
 //
 // GET /directories
-func (UnimplementedHandler) ListDirectory(ctx context.Context, params ListDirectoryParams) (r *DirectoryListing, _ error) {
+func (UnimplementedHandler) ListDirectory(ctx context.Context, params ListDirectoryParams) (r ListDirectoryRes, _ error) {
 	return r, ht.ErrNotImplemented
 }
 
@@ -132,6 +181,10 @@ func (UnimplementedHandler) ListModes(ctx context.Context) (r []Mode, _ error) {
 
 // ListSessions implements listSessions operation.
 //
+// Lists sessions newest-first. At least one of `workspaceId` or `documentId` is required:
+// `workspaceId` selects the workspace shard directly; `documentId` resolves the workspace that
+// contains the document (fallback). Both filters may be combined.
+//
 // GET /sessions
 func (UnimplementedHandler) ListSessions(ctx context.Context, params ListSessionsParams) (r []Session, _ error) {
 	return r, ht.ErrNotImplemented
@@ -141,6 +194,15 @@ func (UnimplementedHandler) ListSessions(ctx context.Context, params ListSession
 //
 // GET /tools
 func (UnimplementedHandler) ListTools(ctx context.Context) (r []ToolDef, _ error) {
+	return r, ht.ErrNotImplemented
+}
+
+// ListWorkspaces implements listWorkspaces operation.
+//
+// List the workspace registry (ADR-0049 §2).
+//
+// GET /workspaces
+func (UnimplementedHandler) ListWorkspaces(ctx context.Context) (r []Workspace, _ error) {
 	return r, ht.ErrNotImplemented
 }
 
@@ -157,6 +219,18 @@ func (UnimplementedHandler) OpenDocument(ctx context.Context, req *OpenDocumentR
 //
 // POST /models/{name}/provision
 func (UnimplementedHandler) ProvisionModel(ctx context.Context, params ProvisionModelParams) (r *ProvisionResponse, _ error) {
+	return r, ht.ErrNotImplemented
+}
+
+// PutCorpus implements putCorpus operation.
+//
+// Roots are canonicalized and deduped; include/exclude globs decide retrievability (default `**/*.md`,
+// hidden directories excluded). The scope change reconciles the index asynchronously; no document file
+// is ever created, modified, or deleted. A root outside ALLOWED_ROOTS is refused with the typed
+// `path-outside-allowed-roots`.
+//
+// PUT /corpus
+func (UnimplementedHandler) PutCorpus(ctx context.Context, req *PutCorpusRequest) (r PutCorpusRes, _ error) {
 	return r, ht.ErrNotImplemented
 }
 

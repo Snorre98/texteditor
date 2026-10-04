@@ -47,6 +47,21 @@ type Invoker interface {
 	//
 	// POST /sessions
 	CreateSession(ctx context.Context, request *CreateSessionRequest) (*Session, error)
+	// CreateWorkspace invokes createWorkspace operation.
+	//
+	// Canonicalizes the root (EvalSymlinks + case-fold): an alias or an already-open nested directory
+	// resumes the most specific existing workspace; otherwise a workspace is created and seeded with the
+	// root as its first corpus root and `**/*.md` as the default include.
+	//
+	// POST /workspaces
+	CreateWorkspace(ctx context.Context, request *CreateWorkspaceRequest) (*Workspace, error)
+	// EvictCorpusDocument invokes evictCorpusDocument operation.
+	//
+	// Removes the file's chunks from both the vector and full-text indexes and records an eviction
+	// tombstone (status `evicted` until re-indexed). No file on disk is touched. Deleting twice succeeds.
+	//
+	// DELETE /corpus/documents/{id}
+	EvictCorpusDocument(ctx context.Context, params EvictCorpusDocumentParams) (EvictCorpusDocumentRes, error)
 	// GetBlocks invokes getBlocks operation.
 	//
 	// GET /documents/{id}/blocks
@@ -55,6 +70,12 @@ type Invoker interface {
 	//
 	// GET /documents/{id}/blocks/{bid}/candidates
 	GetCandidates(ctx context.Context, params GetCandidatesParams) ([]Candidate, error)
+	// GetCorpus invokes getCorpus operation.
+	//
+	// Read a workspace's corpus scope, per-document status, and job progress (ADR-0049 §4).
+	//
+	// GET /corpus
+	GetCorpus(ctx context.Context, params GetCorpusParams) (*CorpusState, error)
 	// GetDiff invokes getDiff operation.
 	//
 	// GET /documents/{id}/diff
@@ -85,12 +106,25 @@ type Invoker interface {
 	//
 	// GET /sessions/{id}/messages
 	GetSessionMessages(ctx context.Context, params GetSessionMessagesParams) ([]Message, error)
+	// GetWorkspace invokes getWorkspace operation.
+	//
+	// Read one workspace record.
+	//
+	// GET /workspaces/{id}
+	GetWorkspace(ctx context.Context, params GetWorkspaceParams) (*Workspace, error)
+	// IndexCorpus invokes indexCorpus operation.
+	//
+	// Bulk (re)index the current scope; async, idempotent per unchanged content (ADR-0049 §4).
+	//
+	// POST /corpus/index
+	IndexCorpus(ctx context.Context, request *CorpusIndexRequest) (*CorpusJob, error)
 	// ListDirectory invokes listDirectory operation.
 	//
-	// List one directory's direct, non-recursive entries (ADR-0035).
+	// Bounded by ALLOWED_ROOTS (ADR-0049 §6): a path outside the allowlist is refused with the typed
+	// `path-outside-allowed-roots` error, never silently.
 	//
 	// GET /directories
-	ListDirectory(ctx context.Context, params ListDirectoryParams) (*DirectoryListing, error)
+	ListDirectory(ctx context.Context, params ListDirectoryParams) (ListDirectoryRes, error)
 	// ListModels invokes listModels operation.
 	//
 	// Deprecated for clients — use /fleet (ADR-0040). Retained for compatibility.
@@ -103,12 +137,22 @@ type Invoker interface {
 	ListModes(ctx context.Context) ([]Mode, error)
 	// ListSessions invokes listSessions operation.
 	//
+	// Lists sessions newest-first. At least one of `workspaceId` or `documentId` is required:
+	// `workspaceId` selects the workspace shard directly; `documentId` resolves the workspace that
+	// contains the document (fallback). Both filters may be combined.
+	//
 	// GET /sessions
 	ListSessions(ctx context.Context, params ListSessionsParams) ([]Session, error)
 	// ListTools invokes listTools operation.
 	//
 	// GET /tools
 	ListTools(ctx context.Context) ([]ToolDef, error)
+	// ListWorkspaces invokes listWorkspaces operation.
+	//
+	// List the workspace registry (ADR-0049 §2).
+	//
+	// GET /workspaces
+	ListWorkspaces(ctx context.Context) ([]Workspace, error)
 	// OpenDocument invokes openDocument operation.
 	//
 	// Open/create a document by path; returns its surrogate id.
@@ -119,6 +163,15 @@ type Invoker interface {
 	//
 	// POST /models/{name}/provision
 	ProvisionModel(ctx context.Context, params ProvisionModelParams) (*ProvisionResponse, error)
+	// PutCorpus invokes putCorpus operation.
+	//
+	// Roots are canonicalized and deduped; include/exclude globs decide retrievability (default `**/*.md`,
+	// hidden directories excluded). The scope change reconciles the index asynchronously; no document file
+	// is ever created, modified, or deleted. A root outside ALLOWED_ROOTS is refused with the typed
+	// `path-outside-allowed-roots`.
+	//
+	// PUT /corpus
+	PutCorpus(ctx context.Context, request *PutCorpusRequest) (PutCorpusRes, error)
 	// SaveDocument invokes saveDocument operation.
 	//
 	// The manual-edit wire path (ADR-0038): the client's whole block-tree snapshot. Array order =
@@ -476,6 +529,208 @@ func (c *Client) sendCreateSession(ctx context.Context, request *CreateSessionRe
 	return result, nil
 }
 
+// CreateWorkspace invokes createWorkspace operation.
+//
+// Canonicalizes the root (EvalSymlinks + case-fold): an alias or an already-open nested directory
+// resumes the most specific existing workspace; otherwise a workspace is created and seeded with the
+// root as its first corpus root and `**/*.md` as the default include.
+//
+// POST /workspaces
+func (c *Client) CreateWorkspace(ctx context.Context, request *CreateWorkspaceRequest) (*Workspace, error) {
+	res, err := c.sendCreateWorkspace(ctx, request)
+	return res, err
+}
+
+func (c *Client) sendCreateWorkspace(ctx context.Context, request *CreateWorkspaceRequest) (res *Workspace, err error) {
+	otelAttrs := []attribute.KeyValue{
+		otelogen.OperationID("createWorkspace"),
+		semconv.HTTPRequestMethodKey.String("POST"),
+		semconv.URLTemplateKey.String("/workspaces"),
+	}
+	otelAttrs = append(otelAttrs, c.cfg.Attributes...)
+
+	// Run stopwatch.
+	startTime := time.Now()
+	defer func() {
+		// Use floating point division here for higher precision (instead of Millisecond method).
+		elapsedDuration := time.Since(startTime)
+		c.duration.Record(ctx, float64(elapsedDuration)/float64(time.Millisecond), metric.WithAttributes(otelAttrs...))
+	}()
+
+	// Increment request counter.
+	c.requests.Add(ctx, 1, metric.WithAttributes(otelAttrs...))
+
+	// Start a span for this request.
+	ctx, span := c.cfg.Tracer.Start(ctx, CreateWorkspaceOperation,
+		trace.WithAttributes(otelAttrs...),
+		clientSpanKind,
+	)
+	// Track stage for error reporting.
+	var stage string
+	defer func() {
+		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, stage)
+			c.errors.Add(ctx, 1, metric.WithAttributes(otelAttrs...))
+		}
+		span.End()
+	}()
+
+	stage = "BuildURL"
+	u := uri.Clone(c.requestURL(ctx))
+	var pathParts [1]string
+	pathParts[0] = "/workspaces"
+	uri.AddPathParts(u, pathParts[:]...)
+
+	stage = "EncodeRequest"
+	r, err := ht.NewRequest(ctx, "POST", u)
+	if err != nil {
+		return res, errors.Wrap(err, "create request")
+	}
+	if err := encodeCreateWorkspaceRequest(request, r); err != nil {
+		return res, errors.Wrap(err, "encode request")
+	}
+
+	stage = "SendRequest"
+	resp, err := c.cfg.Client.Do(r)
+	if err != nil {
+		return res, errors.Wrap(err, "do request")
+	}
+	body := resp.Body
+	defer func() {
+		// Drain the body to EOF before closing, so the underlying
+		// connection can be reused by the Transport regardless of the
+		// response status code. See https://github.com/ogen-go/ogen/issues/1670.
+		_, _ = io.Copy(io.Discard, body)
+		_ = body.Close()
+	}()
+
+	stage = "DecodeResponse"
+	result, err := decodeCreateWorkspaceResponse(resp)
+	if err != nil {
+		return res, errors.Wrap(err, "decode response")
+	}
+
+	return result, nil
+}
+
+// EvictCorpusDocument invokes evictCorpusDocument operation.
+//
+// Removes the file's chunks from both the vector and full-text indexes and records an eviction
+// tombstone (status `evicted` until re-indexed). No file on disk is touched. Deleting twice succeeds.
+//
+// DELETE /corpus/documents/{id}
+func (c *Client) EvictCorpusDocument(ctx context.Context, params EvictCorpusDocumentParams) (EvictCorpusDocumentRes, error) {
+	res, err := c.sendEvictCorpusDocument(ctx, params)
+	return res, err
+}
+
+func (c *Client) sendEvictCorpusDocument(ctx context.Context, params EvictCorpusDocumentParams) (res EvictCorpusDocumentRes, err error) {
+	otelAttrs := []attribute.KeyValue{
+		otelogen.OperationID("evictCorpusDocument"),
+		semconv.HTTPRequestMethodKey.String("DELETE"),
+		semconv.URLTemplateKey.String("/corpus/documents/{id}"),
+	}
+	otelAttrs = append(otelAttrs, c.cfg.Attributes...)
+
+	// Run stopwatch.
+	startTime := time.Now()
+	defer func() {
+		// Use floating point division here for higher precision (instead of Millisecond method).
+		elapsedDuration := time.Since(startTime)
+		c.duration.Record(ctx, float64(elapsedDuration)/float64(time.Millisecond), metric.WithAttributes(otelAttrs...))
+	}()
+
+	// Increment request counter.
+	c.requests.Add(ctx, 1, metric.WithAttributes(otelAttrs...))
+
+	// Start a span for this request.
+	ctx, span := c.cfg.Tracer.Start(ctx, EvictCorpusDocumentOperation,
+		trace.WithAttributes(otelAttrs...),
+		clientSpanKind,
+	)
+	// Track stage for error reporting.
+	var stage string
+	defer func() {
+		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, stage)
+			c.errors.Add(ctx, 1, metric.WithAttributes(otelAttrs...))
+		}
+		span.End()
+	}()
+
+	stage = "BuildURL"
+	u := uri.Clone(c.requestURL(ctx))
+	var pathParts [2]string
+	pathParts[0] = "/corpus/documents/"
+	{
+		// Encode "id" parameter.
+		e := uri.NewPathEncoder(uri.PathEncoderConfig{
+			Param:   "id",
+			Style:   uri.PathStyleSimple,
+			Explode: false,
+		})
+		if err := func() error {
+			return e.EncodeValue(conv.StringToString(params.ID))
+		}(); err != nil {
+			return res, errors.Wrap(err, "encode path")
+		}
+		encoded, err := e.Result()
+		if err != nil {
+			return res, errors.Wrap(err, "encode path")
+		}
+		pathParts[1] = encoded
+	}
+	uri.AddPathParts(u, pathParts[:]...)
+
+	stage = "EncodeQueryParams"
+	q := uri.NewQueryEncoder()
+	{
+		// Encode "workspaceId" parameter.
+		cfg := uri.QueryParameterEncodingConfig{
+			Name:    "workspaceId",
+			Style:   uri.QueryStyleForm,
+			Explode: true,
+		}
+
+		if err := q.EncodeParam(cfg, func(e uri.Encoder) error {
+			return e.EncodeValue(conv.StringToString(params.WorkspaceId))
+		}); err != nil {
+			return res, errors.Wrap(err, "encode query")
+		}
+	}
+	u.RawQuery = q.Values().Encode()
+
+	stage = "EncodeRequest"
+	r, err := ht.NewRequest(ctx, "DELETE", u)
+	if err != nil {
+		return res, errors.Wrap(err, "create request")
+	}
+
+	stage = "SendRequest"
+	resp, err := c.cfg.Client.Do(r)
+	if err != nil {
+		return res, errors.Wrap(err, "do request")
+	}
+	body := resp.Body
+	defer func() {
+		// Drain the body to EOF before closing, so the underlying
+		// connection can be reused by the Transport regardless of the
+		// response status code. See https://github.com/ogen-go/ogen/issues/1670.
+		_, _ = io.Copy(io.Discard, body)
+		_ = body.Close()
+	}()
+
+	stage = "DecodeResponse"
+	result, err := decodeEvictCorpusDocumentResponse(resp)
+	if err != nil {
+		return res, errors.Wrap(err, "decode response")
+	}
+
+	return result, nil
+}
+
 // GetBlocks invokes getBlocks operation.
 //
 // GET /documents/{id}/blocks
@@ -682,6 +937,104 @@ func (c *Client) sendGetCandidates(ctx context.Context, params GetCandidatesPara
 
 	stage = "DecodeResponse"
 	result, err := decodeGetCandidatesResponse(resp)
+	if err != nil {
+		return res, errors.Wrap(err, "decode response")
+	}
+
+	return result, nil
+}
+
+// GetCorpus invokes getCorpus operation.
+//
+// Read a workspace's corpus scope, per-document status, and job progress (ADR-0049 §4).
+//
+// GET /corpus
+func (c *Client) GetCorpus(ctx context.Context, params GetCorpusParams) (*CorpusState, error) {
+	res, err := c.sendGetCorpus(ctx, params)
+	return res, err
+}
+
+func (c *Client) sendGetCorpus(ctx context.Context, params GetCorpusParams) (res *CorpusState, err error) {
+	otelAttrs := []attribute.KeyValue{
+		otelogen.OperationID("getCorpus"),
+		semconv.HTTPRequestMethodKey.String("GET"),
+		semconv.URLTemplateKey.String("/corpus"),
+	}
+	otelAttrs = append(otelAttrs, c.cfg.Attributes...)
+
+	// Run stopwatch.
+	startTime := time.Now()
+	defer func() {
+		// Use floating point division here for higher precision (instead of Millisecond method).
+		elapsedDuration := time.Since(startTime)
+		c.duration.Record(ctx, float64(elapsedDuration)/float64(time.Millisecond), metric.WithAttributes(otelAttrs...))
+	}()
+
+	// Increment request counter.
+	c.requests.Add(ctx, 1, metric.WithAttributes(otelAttrs...))
+
+	// Start a span for this request.
+	ctx, span := c.cfg.Tracer.Start(ctx, GetCorpusOperation,
+		trace.WithAttributes(otelAttrs...),
+		clientSpanKind,
+	)
+	// Track stage for error reporting.
+	var stage string
+	defer func() {
+		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, stage)
+			c.errors.Add(ctx, 1, metric.WithAttributes(otelAttrs...))
+		}
+		span.End()
+	}()
+
+	stage = "BuildURL"
+	u := uri.Clone(c.requestURL(ctx))
+	var pathParts [1]string
+	pathParts[0] = "/corpus"
+	uri.AddPathParts(u, pathParts[:]...)
+
+	stage = "EncodeQueryParams"
+	q := uri.NewQueryEncoder()
+	{
+		// Encode "workspaceId" parameter.
+		cfg := uri.QueryParameterEncodingConfig{
+			Name:    "workspaceId",
+			Style:   uri.QueryStyleForm,
+			Explode: true,
+		}
+
+		if err := q.EncodeParam(cfg, func(e uri.Encoder) error {
+			return e.EncodeValue(conv.StringToString(params.WorkspaceId))
+		}); err != nil {
+			return res, errors.Wrap(err, "encode query")
+		}
+	}
+	u.RawQuery = q.Values().Encode()
+
+	stage = "EncodeRequest"
+	r, err := ht.NewRequest(ctx, "GET", u)
+	if err != nil {
+		return res, errors.Wrap(err, "create request")
+	}
+
+	stage = "SendRequest"
+	resp, err := c.cfg.Client.Do(r)
+	if err != nil {
+		return res, errors.Wrap(err, "do request")
+	}
+	body := resp.Body
+	defer func() {
+		// Drain the body to EOF before closing, so the underlying
+		// connection can be reused by the Transport regardless of the
+		// response status code. See https://github.com/ogen-go/ogen/issues/1670.
+		_, _ = io.Copy(io.Discard, body)
+		_ = body.Close()
+	}()
+
+	stage = "DecodeResponse"
+	result, err := decodeGetCorpusResponse(resp)
 	if err != nil {
 		return res, errors.Wrap(err, "decode response")
 	}
@@ -1271,17 +1624,199 @@ func (c *Client) sendGetSessionMessages(ctx context.Context, params GetSessionMe
 	return result, nil
 }
 
+// GetWorkspace invokes getWorkspace operation.
+//
+// Read one workspace record.
+//
+// GET /workspaces/{id}
+func (c *Client) GetWorkspace(ctx context.Context, params GetWorkspaceParams) (*Workspace, error) {
+	res, err := c.sendGetWorkspace(ctx, params)
+	return res, err
+}
+
+func (c *Client) sendGetWorkspace(ctx context.Context, params GetWorkspaceParams) (res *Workspace, err error) {
+	otelAttrs := []attribute.KeyValue{
+		otelogen.OperationID("getWorkspace"),
+		semconv.HTTPRequestMethodKey.String("GET"),
+		semconv.URLTemplateKey.String("/workspaces/{id}"),
+	}
+	otelAttrs = append(otelAttrs, c.cfg.Attributes...)
+
+	// Run stopwatch.
+	startTime := time.Now()
+	defer func() {
+		// Use floating point division here for higher precision (instead of Millisecond method).
+		elapsedDuration := time.Since(startTime)
+		c.duration.Record(ctx, float64(elapsedDuration)/float64(time.Millisecond), metric.WithAttributes(otelAttrs...))
+	}()
+
+	// Increment request counter.
+	c.requests.Add(ctx, 1, metric.WithAttributes(otelAttrs...))
+
+	// Start a span for this request.
+	ctx, span := c.cfg.Tracer.Start(ctx, GetWorkspaceOperation,
+		trace.WithAttributes(otelAttrs...),
+		clientSpanKind,
+	)
+	// Track stage for error reporting.
+	var stage string
+	defer func() {
+		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, stage)
+			c.errors.Add(ctx, 1, metric.WithAttributes(otelAttrs...))
+		}
+		span.End()
+	}()
+
+	stage = "BuildURL"
+	u := uri.Clone(c.requestURL(ctx))
+	var pathParts [2]string
+	pathParts[0] = "/workspaces/"
+	{
+		// Encode "id" parameter.
+		e := uri.NewPathEncoder(uri.PathEncoderConfig{
+			Param:   "id",
+			Style:   uri.PathStyleSimple,
+			Explode: false,
+		})
+		if err := func() error {
+			return e.EncodeValue(conv.StringToString(params.ID))
+		}(); err != nil {
+			return res, errors.Wrap(err, "encode path")
+		}
+		encoded, err := e.Result()
+		if err != nil {
+			return res, errors.Wrap(err, "encode path")
+		}
+		pathParts[1] = encoded
+	}
+	uri.AddPathParts(u, pathParts[:]...)
+
+	stage = "EncodeRequest"
+	r, err := ht.NewRequest(ctx, "GET", u)
+	if err != nil {
+		return res, errors.Wrap(err, "create request")
+	}
+
+	stage = "SendRequest"
+	resp, err := c.cfg.Client.Do(r)
+	if err != nil {
+		return res, errors.Wrap(err, "do request")
+	}
+	body := resp.Body
+	defer func() {
+		// Drain the body to EOF before closing, so the underlying
+		// connection can be reused by the Transport regardless of the
+		// response status code. See https://github.com/ogen-go/ogen/issues/1670.
+		_, _ = io.Copy(io.Discard, body)
+		_ = body.Close()
+	}()
+
+	stage = "DecodeResponse"
+	result, err := decodeGetWorkspaceResponse(resp)
+	if err != nil {
+		return res, errors.Wrap(err, "decode response")
+	}
+
+	return result, nil
+}
+
+// IndexCorpus invokes indexCorpus operation.
+//
+// Bulk (re)index the current scope; async, idempotent per unchanged content (ADR-0049 §4).
+//
+// POST /corpus/index
+func (c *Client) IndexCorpus(ctx context.Context, request *CorpusIndexRequest) (*CorpusJob, error) {
+	res, err := c.sendIndexCorpus(ctx, request)
+	return res, err
+}
+
+func (c *Client) sendIndexCorpus(ctx context.Context, request *CorpusIndexRequest) (res *CorpusJob, err error) {
+	otelAttrs := []attribute.KeyValue{
+		otelogen.OperationID("indexCorpus"),
+		semconv.HTTPRequestMethodKey.String("POST"),
+		semconv.URLTemplateKey.String("/corpus/index"),
+	}
+	otelAttrs = append(otelAttrs, c.cfg.Attributes...)
+
+	// Run stopwatch.
+	startTime := time.Now()
+	defer func() {
+		// Use floating point division here for higher precision (instead of Millisecond method).
+		elapsedDuration := time.Since(startTime)
+		c.duration.Record(ctx, float64(elapsedDuration)/float64(time.Millisecond), metric.WithAttributes(otelAttrs...))
+	}()
+
+	// Increment request counter.
+	c.requests.Add(ctx, 1, metric.WithAttributes(otelAttrs...))
+
+	// Start a span for this request.
+	ctx, span := c.cfg.Tracer.Start(ctx, IndexCorpusOperation,
+		trace.WithAttributes(otelAttrs...),
+		clientSpanKind,
+	)
+	// Track stage for error reporting.
+	var stage string
+	defer func() {
+		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, stage)
+			c.errors.Add(ctx, 1, metric.WithAttributes(otelAttrs...))
+		}
+		span.End()
+	}()
+
+	stage = "BuildURL"
+	u := uri.Clone(c.requestURL(ctx))
+	var pathParts [1]string
+	pathParts[0] = "/corpus/index"
+	uri.AddPathParts(u, pathParts[:]...)
+
+	stage = "EncodeRequest"
+	r, err := ht.NewRequest(ctx, "POST", u)
+	if err != nil {
+		return res, errors.Wrap(err, "create request")
+	}
+	if err := encodeIndexCorpusRequest(request, r); err != nil {
+		return res, errors.Wrap(err, "encode request")
+	}
+
+	stage = "SendRequest"
+	resp, err := c.cfg.Client.Do(r)
+	if err != nil {
+		return res, errors.Wrap(err, "do request")
+	}
+	body := resp.Body
+	defer func() {
+		// Drain the body to EOF before closing, so the underlying
+		// connection can be reused by the Transport regardless of the
+		// response status code. See https://github.com/ogen-go/ogen/issues/1670.
+		_, _ = io.Copy(io.Discard, body)
+		_ = body.Close()
+	}()
+
+	stage = "DecodeResponse"
+	result, err := decodeIndexCorpusResponse(resp)
+	if err != nil {
+		return res, errors.Wrap(err, "decode response")
+	}
+
+	return result, nil
+}
+
 // ListDirectory invokes listDirectory operation.
 //
-// List one directory's direct, non-recursive entries (ADR-0035).
+// Bounded by ALLOWED_ROOTS (ADR-0049 §6): a path outside the allowlist is refused with the typed
+// `path-outside-allowed-roots` error, never silently.
 //
 // GET /directories
-func (c *Client) ListDirectory(ctx context.Context, params ListDirectoryParams) (*DirectoryListing, error) {
+func (c *Client) ListDirectory(ctx context.Context, params ListDirectoryParams) (ListDirectoryRes, error) {
 	res, err := c.sendListDirectory(ctx, params)
 	return res, err
 }
 
-func (c *Client) sendListDirectory(ctx context.Context, params ListDirectoryParams) (res *DirectoryListing, err error) {
+func (c *Client) sendListDirectory(ctx context.Context, params ListDirectoryParams) (res ListDirectoryRes, err error) {
 	otelAttrs := []attribute.KeyValue{
 		otelogen.OperationID("listDirectory"),
 		semconv.HTTPRequestMethodKey.String("GET"),
@@ -1529,6 +2064,10 @@ func (c *Client) sendListModes(ctx context.Context) (res []Mode, err error) {
 
 // ListSessions invokes listSessions operation.
 //
+// Lists sessions newest-first. At least one of `workspaceId` or `documentId` is required:
+// `workspaceId` selects the workspace shard directly; `documentId` resolves the workspace that
+// contains the document (fallback). Both filters may be combined.
+//
 // GET /sessions
 func (c *Client) ListSessions(ctx context.Context, params ListSessionsParams) ([]Session, error) {
 	res, err := c.sendListSessions(ctx, params)
@@ -1579,6 +2118,23 @@ func (c *Client) sendListSessions(ctx context.Context, params ListSessionsParams
 	stage = "EncodeQueryParams"
 	q := uri.NewQueryEncoder()
 	{
+		// Encode "workspaceId" parameter.
+		cfg := uri.QueryParameterEncodingConfig{
+			Name:    "workspaceId",
+			Style:   uri.QueryStyleForm,
+			Explode: true,
+		}
+
+		if err := q.EncodeParam(cfg, func(e uri.Encoder) error {
+			if val, ok := params.WorkspaceId.Get(); ok {
+				return e.EncodeValue(conv.StringToString(val))
+			}
+			return nil
+		}); err != nil {
+			return res, errors.Wrap(err, "encode query")
+		}
+	}
+	{
 		// Encode "documentId" parameter.
 		cfg := uri.QueryParameterEncodingConfig{
 			Name:    "documentId",
@@ -1587,7 +2143,10 @@ func (c *Client) sendListSessions(ctx context.Context, params ListSessionsParams
 		}
 
 		if err := q.EncodeParam(cfg, func(e uri.Encoder) error {
-			return e.EncodeValue(conv.StringToString(params.DocumentId))
+			if val, ok := params.DocumentId.Get(); ok {
+				return e.EncodeValue(conv.StringToString(val))
+			}
+			return nil
 		}); err != nil {
 			return res, errors.Wrap(err, "encode query")
 		}
@@ -1694,6 +2253,86 @@ func (c *Client) sendListTools(ctx context.Context) (res []ToolDef, err error) {
 
 	stage = "DecodeResponse"
 	result, err := decodeListToolsResponse(resp)
+	if err != nil {
+		return res, errors.Wrap(err, "decode response")
+	}
+
+	return result, nil
+}
+
+// ListWorkspaces invokes listWorkspaces operation.
+//
+// List the workspace registry (ADR-0049 §2).
+//
+// GET /workspaces
+func (c *Client) ListWorkspaces(ctx context.Context) ([]Workspace, error) {
+	res, err := c.sendListWorkspaces(ctx)
+	return res, err
+}
+
+func (c *Client) sendListWorkspaces(ctx context.Context) (res []Workspace, err error) {
+	otelAttrs := []attribute.KeyValue{
+		otelogen.OperationID("listWorkspaces"),
+		semconv.HTTPRequestMethodKey.String("GET"),
+		semconv.URLTemplateKey.String("/workspaces"),
+	}
+	otelAttrs = append(otelAttrs, c.cfg.Attributes...)
+
+	// Run stopwatch.
+	startTime := time.Now()
+	defer func() {
+		// Use floating point division here for higher precision (instead of Millisecond method).
+		elapsedDuration := time.Since(startTime)
+		c.duration.Record(ctx, float64(elapsedDuration)/float64(time.Millisecond), metric.WithAttributes(otelAttrs...))
+	}()
+
+	// Increment request counter.
+	c.requests.Add(ctx, 1, metric.WithAttributes(otelAttrs...))
+
+	// Start a span for this request.
+	ctx, span := c.cfg.Tracer.Start(ctx, ListWorkspacesOperation,
+		trace.WithAttributes(otelAttrs...),
+		clientSpanKind,
+	)
+	// Track stage for error reporting.
+	var stage string
+	defer func() {
+		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, stage)
+			c.errors.Add(ctx, 1, metric.WithAttributes(otelAttrs...))
+		}
+		span.End()
+	}()
+
+	stage = "BuildURL"
+	u := uri.Clone(c.requestURL(ctx))
+	var pathParts [1]string
+	pathParts[0] = "/workspaces"
+	uri.AddPathParts(u, pathParts[:]...)
+
+	stage = "EncodeRequest"
+	r, err := ht.NewRequest(ctx, "GET", u)
+	if err != nil {
+		return res, errors.Wrap(err, "create request")
+	}
+
+	stage = "SendRequest"
+	resp, err := c.cfg.Client.Do(r)
+	if err != nil {
+		return res, errors.Wrap(err, "do request")
+	}
+	body := resp.Body
+	defer func() {
+		// Drain the body to EOF before closing, so the underlying
+		// connection can be reused by the Transport regardless of the
+		// response status code. See https://github.com/ogen-go/ogen/issues/1670.
+		_, _ = io.Copy(io.Discard, body)
+		_ = body.Close()
+	}()
+
+	stage = "DecodeResponse"
+	result, err := decodeListWorkspacesResponse(resp)
 	if err != nil {
 		return res, errors.Wrap(err, "decode response")
 	}
@@ -1874,6 +2513,92 @@ func (c *Client) sendProvisionModel(ctx context.Context, params ProvisionModelPa
 
 	stage = "DecodeResponse"
 	result, err := decodeProvisionModelResponse(resp)
+	if err != nil {
+		return res, errors.Wrap(err, "decode response")
+	}
+
+	return result, nil
+}
+
+// PutCorpus invokes putCorpus operation.
+//
+// Roots are canonicalized and deduped; include/exclude globs decide retrievability (default `**/*.md`,
+// hidden directories excluded). The scope change reconciles the index asynchronously; no document file
+// is ever created, modified, or deleted. A root outside ALLOWED_ROOTS is refused with the typed
+// `path-outside-allowed-roots`.
+//
+// PUT /corpus
+func (c *Client) PutCorpus(ctx context.Context, request *PutCorpusRequest) (PutCorpusRes, error) {
+	res, err := c.sendPutCorpus(ctx, request)
+	return res, err
+}
+
+func (c *Client) sendPutCorpus(ctx context.Context, request *PutCorpusRequest) (res PutCorpusRes, err error) {
+	otelAttrs := []attribute.KeyValue{
+		otelogen.OperationID("putCorpus"),
+		semconv.HTTPRequestMethodKey.String("PUT"),
+		semconv.URLTemplateKey.String("/corpus"),
+	}
+	otelAttrs = append(otelAttrs, c.cfg.Attributes...)
+
+	// Run stopwatch.
+	startTime := time.Now()
+	defer func() {
+		// Use floating point division here for higher precision (instead of Millisecond method).
+		elapsedDuration := time.Since(startTime)
+		c.duration.Record(ctx, float64(elapsedDuration)/float64(time.Millisecond), metric.WithAttributes(otelAttrs...))
+	}()
+
+	// Increment request counter.
+	c.requests.Add(ctx, 1, metric.WithAttributes(otelAttrs...))
+
+	// Start a span for this request.
+	ctx, span := c.cfg.Tracer.Start(ctx, PutCorpusOperation,
+		trace.WithAttributes(otelAttrs...),
+		clientSpanKind,
+	)
+	// Track stage for error reporting.
+	var stage string
+	defer func() {
+		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, stage)
+			c.errors.Add(ctx, 1, metric.WithAttributes(otelAttrs...))
+		}
+		span.End()
+	}()
+
+	stage = "BuildURL"
+	u := uri.Clone(c.requestURL(ctx))
+	var pathParts [1]string
+	pathParts[0] = "/corpus"
+	uri.AddPathParts(u, pathParts[:]...)
+
+	stage = "EncodeRequest"
+	r, err := ht.NewRequest(ctx, "PUT", u)
+	if err != nil {
+		return res, errors.Wrap(err, "create request")
+	}
+	if err := encodePutCorpusRequest(request, r); err != nil {
+		return res, errors.Wrap(err, "encode request")
+	}
+
+	stage = "SendRequest"
+	resp, err := c.cfg.Client.Do(r)
+	if err != nil {
+		return res, errors.Wrap(err, "do request")
+	}
+	body := resp.Body
+	defer func() {
+		// Drain the body to EOF before closing, so the underlying
+		// connection can be reused by the Transport regardless of the
+		// response status code. See https://github.com/ogen-go/ogen/issues/1670.
+		_, _ = io.Copy(io.Discard, body)
+		_ = body.Close()
+	}()
+
+	stage = "DecodeResponse"
+	result, err := decodePutCorpusResponse(resp)
 	if err != nil {
 		return res, errors.Wrap(err, "decode response")
 	}

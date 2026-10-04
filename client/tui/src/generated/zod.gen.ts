@@ -122,6 +122,113 @@ export const zDirectoryListing = z.object({
     entries: z.array(zEntry)
 });
 
+export const zWorkspace = z.object({
+    id: z.string(),
+    root: z.string(),
+    name: z.string(),
+    createdAt: z.coerce.bigint(),
+    updatedAt: z.coerce.bigint()
+});
+
+export const zCreateWorkspaceRequest = z.object({
+    root: z.string(),
+    name: z.string().optional()
+});
+
+export const zCorpusState = z.object({
+    workspaceId: z.string(),
+    roots: z.array(z.string()),
+    include: z.array(z.string()),
+    exclude: z.array(z.string()),
+    documents: z.array(z.object({
+        id: z.string(),
+        path: z.string(),
+        status: z.enum([
+            'indexed',
+            'stale',
+            'pending',
+            'evicted',
+            'error'
+        ]),
+        chunkCount: z.number().int().optional(),
+        indexedAt: z.coerce.bigint().optional(),
+        error: z.string().optional()
+    })),
+    job: z.object({
+        id: z.string(),
+        workspaceId: z.string(),
+        kind: z.enum([
+            'reconcile',
+            'index',
+            'path'
+        ]),
+        state: z.enum([
+            'running',
+            'done',
+            'error'
+        ]),
+        total: z.number().int(),
+        completed: z.number().int(),
+        error: z.string().optional(),
+        startedAt: z.coerce.bigint().optional(),
+        finishedAt: z.coerce.bigint().optional()
+    }).optional()
+});
+
+export const zCorpusDocument = z.object({
+    id: z.string(),
+    path: z.string(),
+    status: z.enum([
+        'indexed',
+        'stale',
+        'pending',
+        'evicted',
+        'error'
+    ]),
+    chunkCount: z.number().int().optional(),
+    indexedAt: z.coerce.bigint().optional(),
+    error: z.string().optional()
+});
+
+export const zCorpusJob = z.object({
+    id: z.string(),
+    workspaceId: z.string(),
+    kind: z.enum([
+        'reconcile',
+        'index',
+        'path'
+    ]),
+    state: z.enum([
+        'running',
+        'done',
+        'error'
+    ]),
+    total: z.number().int(),
+    completed: z.number().int(),
+    error: z.string().optional(),
+    startedAt: z.coerce.bigint().optional(),
+    finishedAt: z.coerce.bigint().optional()
+});
+
+export const zPutCorpusRequest = z.object({
+    workspaceId: z.string(),
+    roots: z.array(z.string()).optional(),
+    include: z.array(z.string()).optional(),
+    exclude: z.array(z.string()).optional()
+});
+
+export const zCorpusIndexRequest = z.object({
+    workspaceId: z.string()
+});
+
+export const zPathOutsideAllowedRoots = z.object({
+    error: z.enum([
+        'path-outside-allowed-roots'
+    ]),
+    path: z.string(),
+    allowedRoots: z.array(z.string())
+});
+
 export const zBlock = z.object({
     id: z.string(),
     parentId: z.string().optional(),
@@ -230,6 +337,7 @@ export const zTask = z.object({
     sessionId: z.string(),
     modeName: z.string(),
     documentId: z.string(),
+    workspaceId: z.string().optional(),
     userInput: z.string(),
     selection: zSelection.optional(),
     mentions: z.array(zMention).optional(),
@@ -249,6 +357,7 @@ export const zMessage = z.object({
 export const zSession = z.object({
     id: z.string(),
     documentId: z.string(),
+    workspaceId: z.string().optional(),
     anchorBlockId: z.string().optional(),
     modeType: z.string().optional(),
     title: z.string().optional(),
@@ -259,6 +368,7 @@ export const zSession = z.object({
 
 export const zCreateSessionRequest = z.object({
     documentId: z.string(),
+    workspaceId: z.string().optional(),
     anchorBlockId: z.string().optional(),
     modeType: z.string().optional()
 });
@@ -316,10 +426,19 @@ export const zRagEvent = z.object({
     ok: z.boolean(),
     chunks: z.array(z.object({
         blockId: z.string(),
+        chunkKey: z.string().optional(),
         text: z.string(),
         score: z.number().optional(),
-        source: z.string().optional()
+        source: z.string().optional(),
+        path: z.string().optional(),
+        heading: z.string().optional()
     })).optional()
+});
+
+export const zChunkRef = z.object({
+    path: z.string(),
+    chunkKey: z.string(),
+    hash: z.string().optional()
 });
 
 export const zDoneEvent = z.object({
@@ -353,6 +472,20 @@ export const zListModesResponse = z.array(zMode);
 export const zListToolsResponse = z.array(zToolDef);
 
 export const zListDirectoryResponse = zDirectoryListing;
+
+export const zListWorkspacesResponse = z.array(zWorkspace);
+
+export const zCreateWorkspaceResponse = zWorkspace;
+
+export const zGetWorkspaceResponse = zWorkspace;
+
+export const zGetCorpusResponse = zCorpusState;
+
+export const zPutCorpusResponse = zCorpusState;
+
+export const zIndexCorpusResponse = zCorpusJob;
+
+export const zEvictCorpusDocumentResponse = z.void();
 
 export const zOpenDocumentResponse = zDocument;
 

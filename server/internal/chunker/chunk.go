@@ -44,6 +44,7 @@ func (chunker) Chunk(tree []dto.Block, maxTokens int) ([]dto.Chunk, error) {
 	var curTexts []string
 	curTokens := 0
 	curBlockID := ""
+	curHeading := ""
 
 	flush := func() {
 		if curTokens == 0 {
@@ -54,6 +55,7 @@ func (chunker) Chunk(tree []dto.Block, maxTokens int) ([]dto.Chunk, error) {
 			BlockID: curBlockID,
 			Text:    text,
 			Source:  curBlockID,
+			Heading: curHeading,
 		})
 		curTexts = nil
 		curTokens = 0
@@ -61,10 +63,17 @@ func (chunker) Chunk(tree []dto.Block, maxTokens int) ([]dto.Chunk, error) {
 	}
 
 	add := func(b dto.Block) {
-		toks := estimate(b.Text)
 		if b.Text == "" {
 			return
 		}
+		// A heading starts a new section: flush the current chunk so heading
+		// boundaries are chunk boundaries, and label following chunks with the
+		// heading (ADR-0044 §3: heading-aware chunks with provenance).
+		if b.Kind == dto.BlockKindHeading {
+			flush()
+			curHeading = b.Text
+		}
+		toks := estimate(b.Text)
 		// A single block larger than maxTokens becomes its own (oversized) chunk.
 		if curTokens > 0 && curTokens+toks > maxTokens {
 			flush()

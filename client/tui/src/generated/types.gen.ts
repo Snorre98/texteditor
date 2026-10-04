@@ -100,6 +100,102 @@ export type DirectoryListing = {
     entries: Array<Entry>;
 };
 
+/**
+ * A persistent engine entity: a root directory plus its subdirectories, governing browsing and editing only (ADR-0049 §1/§2). Workspace ≠ Corpus: the corpus is a separate, multi-root retrievability scope.
+ *
+ */
+export type Workspace = {
+    id: string;
+    /**
+     * canonical absolute directory (EvalSymlinks + case-fold)
+     */
+    root: string;
+    name: string;
+    createdAt: number;
+    updatedAt: number;
+};
+
+export type CreateWorkspaceRequest = {
+    /**
+     * absolute directory to open (canonicalized)
+     */
+    root: string;
+    /**
+     * optional display label (default basename of root)
+     */
+    name?: string;
+};
+
+/**
+ * A workspace's corpus scope, per-document status, and job progress (ADR-0049 §4/§16).
+ */
+export type CorpusState = {
+    workspaceId: string;
+    roots: Array<string>;
+    include: Array<string>;
+    exclude: Array<string>;
+    documents: Array<CorpusDocument>;
+    job?: CorpusJob;
+};
+
+/**
+ * One corpus file's index status. Corpus files are never documents rows and never versioned (ADR-0049 §4); `id` is the stable path-derived identity (sha256 prefix of the canonical path).
+ *
+ */
+export type CorpusDocument = {
+    id: string;
+    path: string;
+    status: 'indexed' | 'stale' | 'pending' | 'evicted' | 'error';
+    chunkCount?: number;
+    indexedAt?: number;
+    error?: string;
+};
+
+/**
+ * One observable corpus indexing job; progress is polled via GET /corpus (Phase C pin).
+ */
+export type CorpusJob = {
+    id: string;
+    workspaceId: string;
+    kind: 'reconcile' | 'index' | 'path';
+    state: 'running' | 'done' | 'error';
+    total: number;
+    completed: number;
+    error?: string;
+    startedAt?: number;
+    finishedAt?: number;
+};
+
+/**
+ * Set a workspace's corpus scope (idempotent; reconciles the index).
+ */
+export type PutCorpusRequest = {
+    workspaceId: string;
+    /**
+     * canonicalized and deduped; empty = the workspace root
+     */
+    roots?: Array<string>;
+    /**
+     * include globs; empty = ***.md
+     */
+    include?: Array<string>;
+    exclude?: Array<string>;
+};
+
+export type CorpusIndexRequest = {
+    workspaceId: string;
+};
+
+/**
+ * A path outside the ALLOWED_ROOTS allowlist was refused (ADR-0049 §6). Never silent; the refusal holds even at ENGINE_BIND=0.0.0.0.
+ *
+ */
+export type PathOutsideAllowedRoots = {
+    error: 'path-outside-allowed-roots';
+    path: string;
+    allowedRoots: Array<string>;
+};
+
 export type Block = {
     id: string;
     parentId?: string;
@@ -216,6 +312,11 @@ export type Task = {
     sessionId: string;
     modeName: string;
     documentId: string;
+    /**
+     * The workspace whose shard owns this turn's sessions/meter/index (ADR-0049 §5). Optional: when absent the engine resolves-or-creates a workspace rooted at the canonical parent directory of the turn's document (keeps pre-workspace clients working).
+     *
+     */
+    workspaceId?: string;
     userInput: string;
     selection?: Selection;
     mentions?: Array<Mention>;
@@ -231,6 +332,11 @@ export type Message = {
 export type Session = {
     id: string;
     documentId: string;
+    /**
+     * The workspace whose shard owns this session (ADR-0049 §5). Optional on the wire for backward compatibility; always populated by the engine on responses.
+     *
+     */
+    workspaceId?: string;
     anchorBlockId?: string;
     modeType?: string;
     title?: string;
@@ -241,6 +347,11 @@ export type Session = {
 
 export type CreateSessionRequest = {
     documentId: string;
+    /**
+     * The workspace shard that owns the new session (ADR-0049 §5). Optional: when absent the engine resolves-or-creates a workspace rooted at the canonical parent directory of the document.
+     *
+     */
+    workspaceId?: string;
     anchorBlockId?: string;
     modeType?: string;
 };
@@ -297,16 +408,30 @@ export type DiffEvent = {
 };
 
 /**
- * The retrieve/read_note structured result surfacing retrieval to the UI.
+ * The retrieve/read_note/auto-RAG structured result surfacing retrieval to the UI. Chunks carry provenance: `chunkKey` (path#index for corpus files, documentID#index for versioned documents), `path`, `heading`, and `source` (the citation marker) (ADR-0044 §3, ADR-0049 §4).
+ *
  */
 export type RagEvent = {
     ok: boolean;
     chunks?: Array<{
         blockId: string;
+        chunkKey?: string;
         text: string;
         score?: number;
         source?: string;
+        path?: string;
+        heading?: string;
     }>;
+};
+
+/**
+ * A stable reference to one indexed chunk, used by the context tray for pin/exclude decisions (ADR-0049 §8). `chunkKey` is path#index for corpus files and documentID#index for versioned documents; `path` is the canonical absolute file path. `hash` optionally pins the chunk's content hash so a stale pin is detectable.
+ *
+ */
+export type ChunkRef = {
+    path: string;
+    chunkKey: string;
+    hash?: string;
 };
 
 export type DoneEvent = {
@@ -496,6 +621,15 @@ export type ListDirectoryData = {
     url: '/directories';
 };
 
+export type ListDirectoryErrors = {
+    /**
+     * the path lies outside ALLOWED_ROOTS
+     */
+    403: PathOutsideAllowedRoots;
+};
+
+export type ListDirectoryError = ListDirectoryErrors[keyof ListDirectoryErrors];
+
 export type ListDirectoryResponses = {
     /**
      * the directory's entries (shallow, name-sorted)
@@ -504,6 +638,147 @@ export type ListDirectoryResponses = {
 };
 
 export type ListDirectoryResponse = ListDirectoryResponses[keyof ListDirectoryResponses];
+
+export type ListWorkspacesData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/workspaces';
+};
+
+export type ListWorkspacesResponses = {
+    /**
+     * workspaces, newest-created first
+     */
+    200: Array<Workspace>;
+};
+
+export type ListWorkspacesResponse = ListWorkspacesResponses[keyof ListWorkspacesResponses];
+
+export type CreateWorkspaceData = {
+    body: CreateWorkspaceRequest;
+    path?: never;
+    query?: never;
+    url: '/workspaces';
+};
+
+export type CreateWorkspaceResponses = {
+    /**
+     * created-or-resumed workspace
+     */
+    200: Workspace;
+};
+
+export type CreateWorkspaceResponse = CreateWorkspaceResponses[keyof CreateWorkspaceResponses];
+
+export type GetWorkspaceData = {
+    body?: never;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/workspaces/{id}';
+};
+
+export type GetWorkspaceResponses = {
+    /**
+     * the workspace
+     */
+    200: Workspace;
+};
+
+export type GetWorkspaceResponse = GetWorkspaceResponses[keyof GetWorkspaceResponses];
+
+export type GetCorpusData = {
+    body?: never;
+    path?: never;
+    query: {
+        workspaceId: string;
+    };
+    url: '/corpus';
+};
+
+export type GetCorpusResponses = {
+    /**
+     * corpus state
+     */
+    200: CorpusState;
+};
+
+export type GetCorpusResponse = GetCorpusResponses[keyof GetCorpusResponses];
+
+export type PutCorpusData = {
+    body: PutCorpusRequest;
+    path?: never;
+    query?: never;
+    url: '/corpus';
+};
+
+export type PutCorpusErrors = {
+    /**
+     * a root lies outside ALLOWED_ROOTS
+     */
+    403: PathOutsideAllowedRoots;
+};
+
+export type PutCorpusError = PutCorpusErrors[keyof PutCorpusErrors];
+
+export type PutCorpusResponses = {
+    /**
+     * the reconciled scope (job running)
+     */
+    200: CorpusState;
+};
+
+export type PutCorpusResponse = PutCorpusResponses[keyof PutCorpusResponses];
+
+export type IndexCorpusData = {
+    body: CorpusIndexRequest;
+    path?: never;
+    query?: never;
+    url: '/corpus/index';
+};
+
+export type IndexCorpusResponses = {
+    /**
+     * accepted; poll GET /corpus for progress
+     */
+    202: CorpusJob;
+};
+
+export type IndexCorpusResponse = IndexCorpusResponses[keyof IndexCorpusResponses];
+
+export type EvictCorpusDocumentData = {
+    body?: never;
+    path: {
+        /**
+         * stable path-derived corpus document id (sha256 prefix)
+         */
+        id: string;
+    };
+    query: {
+        workspaceId: string;
+    };
+    url: '/corpus/documents/{id}';
+};
+
+export type EvictCorpusDocumentErrors = {
+    /**
+     * the document path lies outside ALLOWED_ROOTS
+     */
+    403: PathOutsideAllowedRoots;
+};
+
+export type EvictCorpusDocumentError = EvictCorpusDocumentErrors[keyof EvictCorpusDocumentErrors];
+
+export type EvictCorpusDocumentResponses = {
+    /**
+     * evicted (idempotent)
+     */
+    204: void;
+};
+
+export type EvictCorpusDocumentResponse = EvictCorpusDocumentResponses[keyof EvictCorpusDocumentResponses];
 
 export type OpenDocumentData = {
     body: OpenDocumentRequest;
@@ -691,15 +966,16 @@ export type StartTurnResponse = StartTurnResponses[keyof StartTurnResponses];
 export type ListSessionsData = {
     body?: never;
     path?: never;
-    query: {
-        documentId: string;
+    query?: {
+        workspaceId?: string;
+        documentId?: string;
     };
     url: '/sessions';
 };
 
 export type ListSessionsResponses = {
     /**
-     * sessions for a document
+     * sessions for a workspace (optionally filtered by document)
      */
     200: Array<Session>;
 };

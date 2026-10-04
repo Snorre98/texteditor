@@ -138,6 +138,10 @@ paths:
     get:
       operationId: listDirectory
       summary: List one directory's direct, non-recursive entries (ADR-0035)
+      description: >
+        Bounded by ALLOWED_ROOTS (ADR-0049 §6): a path outside the allowlist is
+        refused with the typed `path-outside-allowed-roots` error, never
+        silently.
       parameters:
         - name: path
           in: query
@@ -152,6 +156,159 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/DirectoryListing'
+        '403':
+          description: the path lies outside ALLOWED_ROOTS
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PathOutsideAllowedRoots'
+
+  /workspaces:
+    get:
+      operationId: listWorkspaces
+      summary: List the workspace registry (ADR-0049 §2)
+      responses:
+        '200':
+          description: workspaces, newest-created first
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Workspace'
+    post:
+      operationId: createWorkspace
+      summary: Create-or-resume a workspace by absolute root (ADR-0049 §2)
+      description: >
+        Canonicalizes the root (EvalSymlinks + case-fold): an alias or an
+        already-open nested directory resumes the most specific existing
+        workspace; otherwise a workspace is created and seeded with the root as
+        its first corpus root and `**/*.md` as the default include.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateWorkspaceRequest'
+      responses:
+        '200':
+          description: created-or-resumed workspace
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Workspace'
+
+  /workspaces/{id}:
+    get:
+      operationId: getWorkspace
+      summary: Read one workspace record
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: the workspace
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Workspace'
+
+  /corpus:
+    get:
+      operationId: getCorpus
+      summary: Read a workspace's corpus scope, per-document status, and job progress (ADR-0049 §4)
+      parameters:
+        - name: workspaceId
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: corpus state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CorpusState'
+    put:
+      operationId: putCorpus
+      summary: Set a workspace's corpus scope; idempotent, index-only (ADR-0049 §3/§4)
+      description: >
+        Roots are canonicalized and deduped; include/exclude globs decide
+        retrievability (default `**/*.md`, hidden directories excluded). The
+        scope change reconciles the index asynchronously; no document file is
+        ever created, modified, or deleted. A root outside ALLOWED_ROOTS is
+        refused with the typed `path-outside-allowed-roots`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PutCorpusRequest'
+      responses:
+        '200':
+          description: the reconciled scope (job running)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CorpusState'
+        '403':
+          description: a root lies outside ALLOWED_ROOTS
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PathOutsideAllowedRoots'
+
+  /corpus/index:
+    post:
+      operationId: indexCorpus
+      summary: Bulk (re)index the current scope; async, idempotent per unchanged content (ADR-0049 §4)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CorpusIndexRequest'
+      responses:
+        '202':
+          description: accepted; poll GET /corpus for progress
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CorpusJob'
+
+  /corpus/documents/{id}:
+    delete:
+      operationId: evictCorpusDocument
+      summary: Evict one corpus document from retrieval; idempotent (ADR-0049 §4)
+      description: >
+        Removes the file's chunks from both the vector and full-text indexes and
+        records an eviction tombstone (status `evicted` until re-indexed). No
+        file on disk is touched. Deleting twice succeeds.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: stable path-derived corpus document id (sha256 prefix)
+          schema:
+            type: string
+        - name: workspaceId
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        '204':
+          description: evicted (idempotent)
+        '403':
+          description: the document path lies outside ALLOWED_ROOTS
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PathOutsideAllowedRoots'
 
   /documents:
     post:
@@ -369,15 +526,26 @@ paths:
   /sessions:
     get:
       operationId: listSessions
+      summary: Workspace-scoped session list (ADR-0049)
+      description: >
+        Lists sessions newest-first. At least one of `workspaceId` or
+        `documentId` is required: `workspaceId` selects the workspace shard
+        directly; `documentId` resolves the workspace that contains the
+        document (fallback). Both filters may be combined.
       parameters:
+        - name: workspaceId
+          in: query
+          required: false
+          schema:
+            type: string
         - name: documentId
           in: query
-          required: true
+          required: false
           schema:
             type: string
       responses:
         '200':
-          description: sessions for a document
+          description: sessions for a workspace (optionally filtered by document)
           content:
             application/json:
               schema:
@@ -615,6 +783,162 @@ components:
           items:
             $ref: '#/components/schemas/Entry'
 
+    Workspace:
+      type: object
+      description: >
+        A persistent engine entity: a root directory plus its subdirectories,
+        governing browsing and editing only (ADR-0049 §1/§2). Workspace ≠
+        Corpus: the corpus is a separate, multi-root retrievability scope.
+      required: [id, root, name, createdAt, updatedAt]
+      properties:
+        id:
+          type: string
+        root:
+          type: string
+          description: canonical absolute directory (EvalSymlinks + case-fold)
+        name:
+          type: string
+        createdAt:
+          type: integer
+          format: int64
+        updatedAt:
+          type: integer
+          format: int64
+
+    CreateWorkspaceRequest:
+      type: object
+      required: [root]
+      properties:
+        root:
+          type: string
+          description: absolute directory to open (canonicalized)
+        name:
+          type: string
+          description: optional display label (default basename of root)
+
+    CorpusState:
+      type: object
+      description: A workspace's corpus scope, per-document status, and job progress (ADR-0049 §4/§16).
+      required: [workspaceId, roots, include, exclude, documents]
+      properties:
+        workspaceId:
+          type: string
+        roots:
+          type: array
+          items:
+            type: string
+        include:
+          type: array
+          items:
+            type: string
+        exclude:
+          type: array
+          items:
+            type: string
+        documents:
+          type: array
+          items:
+            $ref: '#/components/schemas/CorpusDocument'
+        job:
+          $ref: '#/components/schemas/CorpusJob'
+
+    CorpusDocument:
+      type: object
+      description: >
+        One corpus file's index status. Corpus files are never documents rows
+        and never versioned (ADR-0049 §4); `id` is the stable path-derived
+        identity (sha256 prefix of the canonical path).
+      required: [id, path, status]
+      properties:
+        id:
+          type: string
+        path:
+          type: string
+        status:
+          type: string
+          enum: [indexed, stale, pending, evicted, error]
+        chunkCount:
+          type: integer
+        indexedAt:
+          type: integer
+          format: int64
+        error:
+          type: string
+
+    CorpusJob:
+      type: object
+      description: One observable corpus indexing job; progress is polled via GET /corpus (Phase C pin).
+      required: [id, workspaceId, kind, state, total, completed]
+      properties:
+        id:
+          type: string
+        workspaceId:
+          type: string
+        kind:
+          type: string
+          enum: [reconcile, index, path]
+        state:
+          type: string
+          enum: [running, done, error]
+        total:
+          type: integer
+        completed:
+          type: integer
+        error:
+          type: string
+        startedAt:
+          type: integer
+          format: int64
+        finishedAt:
+          type: integer
+          format: int64
+
+    PutCorpusRequest:
+      type: object
+      description: Set a workspace's corpus scope (idempotent; reconciles the index).
+      required: [workspaceId]
+      properties:
+        workspaceId:
+          type: string
+        roots:
+          type: array
+          items:
+            type: string
+          description: canonicalized and deduped; empty = the workspace root
+        include:
+          type: array
+          items:
+            type: string
+          description: include globs; empty = **/*.md
+        exclude:
+          type: array
+          items:
+            type: string
+
+    CorpusIndexRequest:
+      type: object
+      required: [workspaceId]
+      properties:
+        workspaceId:
+          type: string
+
+    PathOutsideAllowedRoots:
+      type: object
+      description: >
+        A path outside the ALLOWED_ROOTS allowlist was refused (ADR-0049 §6).
+        Never silent; the refusal holds even at ENGINE_BIND=0.0.0.0.
+      required: [error, path, allowedRoots]
+      properties:
+        error:
+          type: string
+          enum: [path-outside-allowed-roots]
+        path:
+          type: string
+        allowedRoots:
+          type: array
+          items:
+            type: string
+
     Block:
       type: object
       required: [id, kind, position, text]
@@ -800,6 +1124,13 @@ components:
           type: string
         documentId:
           type: string
+        workspaceId:
+          type: string
+          description: >
+            The workspace whose shard owns this turn's sessions/meter/index
+            (ADR-0049 §5). Optional: when absent the engine resolves-or-creates
+            a workspace rooted at the canonical parent directory of the turn's
+            document (keeps pre-workspace clients working).
         userInput:
           type: string
         selection:
@@ -832,6 +1163,12 @@ components:
           type: string
         documentId:
           type: string
+        workspaceId:
+          type: string
+          description: >
+            The workspace whose shard owns this session (ADR-0049 §5). Optional
+            on the wire for backward compatibility; always populated by the
+            engine on responses.
         anchorBlockId:
           type: string
         modeType:
@@ -853,6 +1190,12 @@ components:
       properties:
         documentId:
           type: string
+        workspaceId:
+          type: string
+          description: >
+            The workspace shard that owns the new session (ADR-0049 §5).
+            Optional: when absent the engine resolves-or-creates a workspace
+            rooted at the canonical parent directory of the document.
         anchorBlockId:
           type: string
         modeType:
@@ -955,7 +1298,11 @@ components:
 
     RagEvent:
       type: object
-      description: The retrieve/read_note structured result surfacing retrieval to the UI.
+      description: >
+        The retrieve/read_note/auto-RAG structured result surfacing retrieval to
+        the UI. Chunks carry provenance: `chunkKey` (path#index for corpus
+        files, documentID#index for versioned documents), `path`, `heading`,
+        and `source` (the citation marker) (ADR-0044 §3, ADR-0049 §4).
       required: [ok]
       properties:
         ok:
@@ -968,12 +1315,35 @@ components:
             properties:
               blockId:
                 type: string
+              chunkKey:
+                type: string
               text:
                 type: string
               score:
                 type: number
               source:
                 type: string
+              path:
+                type: string
+              heading:
+                type: string
+
+    ChunkRef:
+      type: object
+      description: >
+        A stable reference to one indexed chunk, used by the context tray for
+        pin/exclude decisions (ADR-0049 §8). `chunkKey` is path#index for
+        corpus files and documentID#index for versioned documents; `path` is
+        the canonical absolute file path. `hash` optionally pins the chunk's
+        content hash so a stale pin is detectable.
+      required: [path, chunkKey]
+      properties:
+        path:
+          type: string
+        chunkKey:
+          type: string
+        hash:
+          type: string
 
     DoneEvent:
       type: object

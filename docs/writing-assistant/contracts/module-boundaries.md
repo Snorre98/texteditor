@@ -8,7 +8,9 @@ REST/HTTP exists only at process boundaries.
 
 Source ADRs: ADR-0001 (base model), ADR-0016 (module inventory + exact APIs),
 ADR-0018 (two-tier fleet manifest), ADR-0019 (mode/tool data), ADR-0020 (storage),
-ADR-0025 (control daemon), ADR-0026 (sessions), ADR-0035 (Workspace).
+ADR-0025 (control daemon), ADR-0026 (sessions), ADR-0035 (filesystem reach),
+ADR-0044 (context engine), ADR-0047 (canonical paths), ADR-0049 (workspaces,
+multi-root corpus, workspace-sharded context storage).
 
 ## 1. Modules
 
@@ -22,16 +24,19 @@ ADR-0025 (control daemon), ADR-0026 (sessions), ADR-0035 (Workspace).
 | **Mode registry** (leaf) | prompt presets (name/systemPrompt/defaultModel) | `List()`, `Get(name)` | mode file loading (go:embed), validation |
 | **Pipeline policy** (leaf) | the one global turn policy (step cap + budgets + auto-RAG top-k) | `Policy() → PipelinePolicy` | `config/pipeline.json` loading, schema validation |
 | **Tool registry** (leaf) | tool definitions + JSON schemas (global) | `Register(tool)`, `List()` | schema validation, name-keyed binding metadata |
-| **Tool executor** | tool execution | `Invoke(name, args) → result` | private `map[name]→handler func` |
+| **Tool executor** | tool execution | `Invoke(ctx, name, args) → result` (ctx carries the turn's shard services; ADR-0049 §5) | private `map[name]→handler func` |
 | **Tool decider** (optional) | tool-intent resolution ("which tool, what args") from a writer's `request_tool` intent | `SignalTool()`, `Decide(ctx, intent, c) → (RouterResult, error)` | prompt layout, Provider.Chat, confidence threshold τ, `.cact` fingerprint |
 | **Context assembler** (leaf) | the exact token payload + per-component attribution | `Assemble(ctx, in) → (Payload, Breakdown)` | prompt layout, budget truncation, attribution accounting |
-| **Token metering** | counts + attribution + persistence | `Attribute(ctx, turnID, breakdown, counts) → Attributed` | scale-to-total, `meter.db` writes, thinking-token reconciliation (ADR-0024) |
-| **Retriever** | retrieval (semantic + lexical) | `Query(ctx, text, topK) → []Chunk`, `Index(ctx, documentID)` | embedding (via Fleet+Provider), sqlite-vec KNN, FTS5, rerank |
-| **Chunker** (leaf) | chunking (paragraph-aligned, size-bounded) | `Chunk(tree []Block, maxTokens int) → ([]Chunk, error)` | splitting algorithm |
+| **Token metering** | counts + attribution + persistence | `Attribute(ctx, turnID, breakdown, counts) → Attributed` | scale-to-total, per-workspace shard `meter.db` writes, thinking-token reconciliation (ADR-0024) |
+| **Retriever** | retrieval (hybrid semantic + lexical, provenance, eviction, status) | `Query(ctx, text, topK) → []Chunk`, `Index(ctx, documentID)`, `IndexPath(ctx, path, hash)`, `Evict(ctx, ref)`, `Status() → []IndexedDocument`, `Get(ctx, refs) → []Chunk` | embedding (via Fleet+Provider), sqlite-vec KNN + FTS5 bm25 fused with RRF, per-workspace shard `index.db` |
+| **Chunker** (leaf) | chunking (heading-aware, paragraph-aligned, size-bounded) | `Chunk(tree []Block, maxTokens int) → ([]Chunk, error)`, `ChunkMarkdown(raw string, maxTokens int) → ([]Chunk, error)` | splitting algorithm |
 | **TextFormatter** (leaf) | formatting: normalize + validate + format block content | `Normalize(kind, text)`, `Validate(kind, text)`, `Format(kind, text)` | hardcoded opinionated style, structural checks |
 | **Document store** | document, blocks, version history | `Open`, `Save`, `Blocks`, `ApplyEdit`, `Commit`, `Diff`, `History`, `Candidates` | git (go-git), block-UUID minting, candidate side-table, word-diff |
-| **Workspace** (leaf) | read-only filesystem reach: shallow directory listing + bounded raw reads | `List(ctx, dir) → []Entry`, `Read(ctx, path, maxBytes)` | `os.ReadDir`/`os.ReadFile`, path validation, byte caps (ADR-0035) |
-| **Session store** (leaf) | sessions + their messages | `ListByDocument`, `Create`, `Resume`, `Append`, `History` | `sessions.db` |
+| **Filesystem** (leaf) | read-only filesystem reach: shallow directory listing + bounded raw reads, bounded by `ALLOWED_ROOTS` | `List(ctx, dir) → []Entry`, `Read(ctx, path, maxBytes)`, `AllowedRoots()` | `os.ReadDir`/`os.ReadFile`, canonicalization, allowlist + typed refusal, byte caps (ADR-0035, ADR-0049 §6) |
+| **Workspace store** (leaf) | the global workspace registry: workspace records, corpus roots/scope, index jobs, eviction tombstones, turn/session routing | `ResolveOrCreate`, `Get`, `List`, `FindContaining`, `Scope`, `SetScope`, job/tombstone/routing methods (interface.md §9c) | `workspaces.db` (global), canonical root keys, corpus glob persistence |
+| **Shard manager** | per-workspace context-state lifecycle: lazy open + per-shard migrate + LRU close, reference-counted leases | `Services(ctx, workspaceID) → *Lease{Retriever, Sessions, Meter}` | `<data>/workspaces/<id>/{index.db,sessions.db,meter.db}`, LRU cap, lease refcounts |
+| **Corpus service** | the index-only multi-root corpus: scope walk (globs, hidden excluded), reconcile/evict, per-document status, async jobs, lifecycle hook | `Get`, `SetScope`, `Index`, `Evict`, `NotifyChanged` (interface.md §9d) | glob walk through Filesystem, single-flight job runner, tombstones/errors via Workspace store, `DocHook` decorator |
+| **Session store** (leaf) | sessions + their messages | `ListByDocument`, `ListByWorkspace`, `Create`, `Resume`, `Append`, `History` | per-workspace shard `sessions.db` |
 | **API server** | the versioned REST/SSE surface (codegen'd) | HTTP routes + SSE endpoints per the OpenAPI spec | framing, validation, turnID↔client correlation |
 | **SSE event bus** | typed event fan-out | `Emit(event)`, `Subscribe(filter) → stream` | connection registry, bounded chans |
 
@@ -82,7 +87,10 @@ flowchart LR
         TextFormatter[TextFormatter]
         Doc[Document store]
         Sess[Session store]
-        WS[Workspace]
+        FS[Filesystem]
+        WStore[Workspace store]
+        Shards[Shard manager]
+        Corpus[Corpus service]
         Bus[SSE event bus]
     end
     subgraph serving[Serving]
@@ -106,8 +114,11 @@ flowchart LR
     Loop --> Prov
     Loop --> Fleet
     Loop --> Doc
-    Loop --> Retriever
-    Loop --> Sess
+    Loop --> WStore
+    Loop --> Shards
+    Shards --> Retriever
+    Shards --> Sess
+    Shards --> Meter
     Decider --> Fleet
     Decider --> Prov
     Assembler --> Mode
@@ -115,9 +126,16 @@ flowchart LR
     Retriever --> Fleet
     Retriever --> Prov
     Retriever --> Chunker
+    Retriever --> FS
     Doc --> TextFormatter
-    API --> WS
-    Loop --> WS
+    API --> FS
+    API --> WStore
+    API --> Shards
+    API --> Corpus
+    Corpus --> WStore
+    Corpus --> FS
+    Corpus --> Shards
+    Loop --> FS
     Meter --> Bus
     Fleet --> Daemon
     Daemon --> Manifest
@@ -131,10 +149,14 @@ flowchart LR
 - The graph is **acyclic**; direction is inward (clients → engine → serving-data).
 - Leaf modules (no out-edges) hold pure/deterministic logic: `Mode registry`,
   `Pipeline policy`, `Tool registry`, `Context assembler`, `Chunker`,
-  `TextFormatter`, `Session store`, `Workspace`, `Provider gateway`, and the
-  `Fleet manifest`.
-- The `Retriever` is **not** a leaf (depends on Fleet + Provider for the embed call
-  and on the Chunker) — a deliberate consequence of ADR-0016.
+  `TextFormatter`, `Session store`, `Filesystem`, `Workspace store`,
+  `Provider gateway`, and the `Fleet manifest`.
+- The `Retriever` is **not** a leaf (depends on Fleet + Provider for the embed
+  call, on the Chunker, and on the Filesystem for bounded corpus reads) — a
+  deliberate consequence of ADR-0016/ADR-0049.
+- The `Shard manager` is the composition-level lifecycle owner for
+  workspace-scoped service instances (ADR-0049 §5); it is the only module that
+  opens/closes shard files.
 - The `Tool decider` is **not** a leaf (depends on Fleet + Provider to serve the
   router call) — a Retriever-style consequence. It is **parked/unwired** by
   ADR-0045: no mode enables it; the loop no longer depends on it (its edges below
@@ -149,8 +171,9 @@ Precise Go signatures and pure-DTO type definitions live in
 `contracts/interface.md`:
 
 - **Fleet + Provider + Retriever + Assembler + Meter + Document store +
-  Session store + Event bus + TextFormatter + Workspace** — exact Go interface
-  signatures (ADR-0016, ADR-0026, ADR-0029, ADR-0035).
+  Session store + Event bus + TextFormatter + Filesystem + Workspace store +
+  Shard manager** — exact Go interface signatures (ADR-0016, ADR-0026,
+  ADR-0029, ADR-0035, ADR-0049).
 - **Serving lifecycle** — the verb contract (ADR-0007), now transported by the
   control daemon (ADR-0025).
 - The **fleet manifest schema** (two-tier) — `contracts/data-model.md` §2
@@ -181,5 +204,9 @@ Precise Go signatures and pure-DTO type definitions live in
   machine-local LLM control plane every app consumes. The two-repo boundary is a
   contract (`daemon-http.md` + the manifest schema — canonical in
   `macos-dev-config`, mirrored here), never shared source (ADR-0032/0033).
-- The Provider, Context assembler, TextFormatter, Workspace, and Mode/Tool registries are all pure
-  leaves.
+- The Provider, Context assembler, TextFormatter, Filesystem, Workspace store,
+  and Mode/Tool registries are all pure leaves.
+- One SQLite file per service *instance* (ADR-0016 as amended by ADR-0049 §5):
+  document identity/git/worktree and `workspaces.db` are global; the Retriever,
+  Session store, and Token meter each own a per-workspace shard file. No SQLite
+  file is shared across modules; no cross-workspace aggregation exists.

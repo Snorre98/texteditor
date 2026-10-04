@@ -17,6 +17,9 @@ import (
 // SessionStore is the Session store public API (interface.md §10).
 type SessionStore interface {
 	ListByDocument(documentID string) ([]dto.Session, error)
+	// ListByWorkspace returns every session in this workspace shard, newest
+	// first (ADR-0049 §5: sessions are workspace-scoped by shard).
+	ListByWorkspace() ([]dto.Session, error)
 	Create(documentID string, anchorBlockID *string, modeType string) (dto.Session, error)
 	Resume(id string) (dto.Session, error)
 	Append(sessionID string, msg dto.Message) error
@@ -118,6 +121,29 @@ func (s *store) Resume(id string) (dto.Session, error) {
 		return dto.Session{}, err
 	}
 	return sess, nil
+}
+
+// ListByWorkspace returns every session in the shard, newest first.
+func (s *store) ListByWorkspace() ([]dto.Session, error) {
+	rows, err := s.db.Query(
+		`SELECT id, document_id, anchor_block_id, mode_type, title, token_budget, created_at, updated_at
+		 FROM sessions ORDER BY updated_at DESC`,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []dto.Session
+	for rows.Next() {
+		var sess dto.Session
+		if err := rows.Scan(
+			&sess.ID, &sess.DocumentID, &sess.AnchorBlockID, &sess.ModeType, &sess.Title, &sess.TokenBudget, &sess.CreatedAt, &sess.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		out = append(out, sess)
+	}
+	return out, rows.Err()
 }
 
 // ListByDocument returns every session sharing a document id, newest first.

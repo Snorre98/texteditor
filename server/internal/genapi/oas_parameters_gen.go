@@ -144,6 +144,117 @@ func decodeCommitDocumentParams(args [1]string, argsEscaped bool, r *http.Reques
 	return params, nil
 }
 
+// EvictCorpusDocumentParams is parameters of evictCorpusDocument operation.
+type EvictCorpusDocumentParams struct {
+	// Stable path-derived corpus document id (sha256 prefix).
+	ID          string
+	WorkspaceId string
+}
+
+func unpackEvictCorpusDocumentParams(packed middleware.Parameters) (params EvictCorpusDocumentParams) {
+	{
+		key := middleware.ParameterKey{
+			Name: "id",
+			In:   "path",
+		}
+		params.ID = packed[key].(string)
+	}
+	{
+		key := middleware.ParameterKey{
+			Name: "workspaceId",
+			In:   "query",
+		}
+		params.WorkspaceId = packed[key].(string)
+	}
+	return params
+}
+
+func decodeEvictCorpusDocumentParams(args [1]string, argsEscaped bool, r *http.Request) (params EvictCorpusDocumentParams, _ error) {
+	q := uri.NewQueryDecoder(r.URL.Query())
+	// Decode path: id.
+	if err := func() error {
+		param := args[0]
+		if argsEscaped {
+			unescaped, err := url.PathUnescape(args[0])
+			if err != nil {
+				return errors.Wrap(err, "unescape path")
+			}
+			param = unescaped
+		}
+		if len(param) > 0 {
+			d := uri.NewPathDecoder(uri.PathDecoderConfig{
+				Param:   "id",
+				Value:   param,
+				Style:   uri.PathStyleSimple,
+				Explode: false,
+			})
+
+			if err := func() error {
+				val, err := d.DecodeValue()
+				if err != nil {
+					return err
+				}
+
+				c, err := conv.ToString(val)
+				if err != nil {
+					return err
+				}
+
+				params.ID = c
+				return nil
+			}(); err != nil {
+				return err
+			}
+		} else {
+			return validate.ErrFieldRequired
+		}
+		return nil
+	}(); err != nil {
+		return params, &ogenerrors.DecodeParamError{
+			Name: "id",
+			In:   "path",
+			Err:  err,
+		}
+	}
+	// Decode query: workspaceId.
+	if err := func() error {
+		cfg := uri.QueryParameterDecodingConfig{
+			Name:    "workspaceId",
+			Style:   uri.QueryStyleForm,
+			Explode: true,
+		}
+
+		if err := q.HasParam(cfg); err == nil {
+			if err := q.DecodeParam(cfg, func(d uri.Decoder) error {
+				val, err := d.DecodeValue()
+				if err != nil {
+					return err
+				}
+
+				c, err := conv.ToString(val)
+				if err != nil {
+					return err
+				}
+
+				params.WorkspaceId = c
+				return nil
+			}); err != nil {
+				return err
+			}
+		} else {
+			return err
+		}
+		return nil
+	}(); err != nil {
+		return params, &ogenerrors.DecodeParamError{
+			Name: "workspaceId",
+			In:   "query",
+			Err:  err,
+		}
+	}
+	return params, nil
+}
+
 // GetBlocksParams is parameters of getBlocks operation.
 type GetBlocksParams struct {
 	ID string
@@ -321,6 +432,63 @@ func decodeGetCandidatesParams(args [2]string, argsEscaped bool, r *http.Request
 		return params, &ogenerrors.DecodeParamError{
 			Name: "bid",
 			In:   "path",
+			Err:  err,
+		}
+	}
+	return params, nil
+}
+
+// GetCorpusParams is parameters of getCorpus operation.
+type GetCorpusParams struct {
+	WorkspaceId string
+}
+
+func unpackGetCorpusParams(packed middleware.Parameters) (params GetCorpusParams) {
+	{
+		key := middleware.ParameterKey{
+			Name: "workspaceId",
+			In:   "query",
+		}
+		params.WorkspaceId = packed[key].(string)
+	}
+	return params
+}
+
+func decodeGetCorpusParams(args [0]string, argsEscaped bool, r *http.Request) (params GetCorpusParams, _ error) {
+	q := uri.NewQueryDecoder(r.URL.Query())
+	// Decode query: workspaceId.
+	if err := func() error {
+		cfg := uri.QueryParameterDecodingConfig{
+			Name:    "workspaceId",
+			Style:   uri.QueryStyleForm,
+			Explode: true,
+		}
+
+		if err := q.HasParam(cfg); err == nil {
+			if err := q.DecodeParam(cfg, func(d uri.Decoder) error {
+				val, err := d.DecodeValue()
+				if err != nil {
+					return err
+				}
+
+				c, err := conv.ToString(val)
+				if err != nil {
+					return err
+				}
+
+				params.WorkspaceId = c
+				return nil
+			}); err != nil {
+				return err
+			}
+		} else {
+			return err
+		}
+		return nil
+	}(); err != nil {
+		return params, &ogenerrors.DecodeParamError{
+			Name: "workspaceId",
+			In:   "query",
 			Err:  err,
 		}
 	}
@@ -676,6 +844,71 @@ func decodeGetSessionMessagesParams(args [1]string, argsEscaped bool, r *http.Re
 	return params, nil
 }
 
+// GetWorkspaceParams is parameters of getWorkspace operation.
+type GetWorkspaceParams struct {
+	ID string
+}
+
+func unpackGetWorkspaceParams(packed middleware.Parameters) (params GetWorkspaceParams) {
+	{
+		key := middleware.ParameterKey{
+			Name: "id",
+			In:   "path",
+		}
+		params.ID = packed[key].(string)
+	}
+	return params
+}
+
+func decodeGetWorkspaceParams(args [1]string, argsEscaped bool, r *http.Request) (params GetWorkspaceParams, _ error) {
+	// Decode path: id.
+	if err := func() error {
+		param := args[0]
+		if argsEscaped {
+			unescaped, err := url.PathUnescape(args[0])
+			if err != nil {
+				return errors.Wrap(err, "unescape path")
+			}
+			param = unescaped
+		}
+		if len(param) > 0 {
+			d := uri.NewPathDecoder(uri.PathDecoderConfig{
+				Param:   "id",
+				Value:   param,
+				Style:   uri.PathStyleSimple,
+				Explode: false,
+			})
+
+			if err := func() error {
+				val, err := d.DecodeValue()
+				if err != nil {
+					return err
+				}
+
+				c, err := conv.ToString(val)
+				if err != nil {
+					return err
+				}
+
+				params.ID = c
+				return nil
+			}(); err != nil {
+				return err
+			}
+		} else {
+			return validate.ErrFieldRequired
+		}
+		return nil
+	}(); err != nil {
+		return params, &ogenerrors.DecodeParamError{
+			Name: "id",
+			In:   "path",
+			Err:  err,
+		}
+	}
+	return params, nil
+}
+
 // ListDirectoryParams is parameters of listDirectory operation.
 type ListDirectoryParams struct {
 	// Absolute path of the directory to list.
@@ -736,22 +969,75 @@ func decodeListDirectoryParams(args [0]string, argsEscaped bool, r *http.Request
 
 // ListSessionsParams is parameters of listSessions operation.
 type ListSessionsParams struct {
-	DocumentId string
+	WorkspaceId OptString `json:",omitempty,omitzero"`
+	DocumentId  OptString `json:",omitempty,omitzero"`
 }
 
 func unpackListSessionsParams(packed middleware.Parameters) (params ListSessionsParams) {
 	{
 		key := middleware.ParameterKey{
+			Name: "workspaceId",
+			In:   "query",
+		}
+		if v, ok := packed[key]; ok {
+			params.WorkspaceId = v.(OptString)
+		}
+	}
+	{
+		key := middleware.ParameterKey{
 			Name: "documentId",
 			In:   "query",
 		}
-		params.DocumentId = packed[key].(string)
+		if v, ok := packed[key]; ok {
+			params.DocumentId = v.(OptString)
+		}
 	}
 	return params
 }
 
 func decodeListSessionsParams(args [0]string, argsEscaped bool, r *http.Request) (params ListSessionsParams, _ error) {
 	q := uri.NewQueryDecoder(r.URL.Query())
+	// Decode query: workspaceId.
+	if err := func() error {
+		cfg := uri.QueryParameterDecodingConfig{
+			Name:    "workspaceId",
+			Style:   uri.QueryStyleForm,
+			Explode: true,
+		}
+
+		if err := q.HasParam(cfg); err == nil {
+			if err := q.DecodeParam(cfg, func(d uri.Decoder) error {
+				var paramsDotWorkspaceIdVal string
+				if err := func() error {
+					val, err := d.DecodeValue()
+					if err != nil {
+						return err
+					}
+
+					c, err := conv.ToString(val)
+					if err != nil {
+						return err
+					}
+
+					paramsDotWorkspaceIdVal = c
+					return nil
+				}(); err != nil {
+					return err
+				}
+				params.WorkspaceId.SetTo(paramsDotWorkspaceIdVal)
+				return nil
+			}); err != nil {
+				return err
+			}
+		}
+		return nil
+	}(); err != nil {
+		return params, &ogenerrors.DecodeParamError{
+			Name: "workspaceId",
+			In:   "query",
+			Err:  err,
+		}
+	}
 	// Decode query: documentId.
 	if err := func() error {
 		cfg := uri.QueryParameterDecodingConfig{
@@ -762,23 +1048,28 @@ func decodeListSessionsParams(args [0]string, argsEscaped bool, r *http.Request)
 
 		if err := q.HasParam(cfg); err == nil {
 			if err := q.DecodeParam(cfg, func(d uri.Decoder) error {
-				val, err := d.DecodeValue()
-				if err != nil {
+				var paramsDotDocumentIdVal string
+				if err := func() error {
+					val, err := d.DecodeValue()
+					if err != nil {
+						return err
+					}
+
+					c, err := conv.ToString(val)
+					if err != nil {
+						return err
+					}
+
+					paramsDotDocumentIdVal = c
+					return nil
+				}(); err != nil {
 					return err
 				}
-
-				c, err := conv.ToString(val)
-				if err != nil {
-					return err
-				}
-
-				params.DocumentId = c
+				params.DocumentId.SetTo(paramsDotDocumentIdVal)
 				return nil
 			}); err != nil {
 				return err
 			}
-		} else {
-			return err
 		}
 		return nil
 	}(); err != nil {

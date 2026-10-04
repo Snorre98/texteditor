@@ -2,131 +2,239 @@ package workspace
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"os"
 	"path/filepath"
 	"testing"
+
+	_ "modernc.org/sqlite"
+
+	"texteditor/internal/pathutil"
+	"texteditor/shared/dto"
 )
 
-func TestListShallowSorted(t *testing.T) {
-	dir := t.TempDir()
-	for _, name := range []string{"B.txt", "a.txt", ".hidden", "Zdir"} {
-		p := filepath.Join(dir, name)
-		if name == "Zdir" {
-			if err := os.Mkdir(p, 0o755); err != nil {
-				t.Fatal(err)
-			}
-			// A child inside Zdir must NOT appear (shallow).
-			if err := os.WriteFile(filepath.Join(p, "child.md"), []byte("x"), 0o644); err != nil {
-				t.Fatal(err)
-			}
-			continue
-		}
-		if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	w := New()
-	entries, err := w.List(context.Background(), dir)
+func newTestStore(t *testing.T) Interface {
+	t.Helper()
+	db, err := sql.Open("sqlite", ":memory:")
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	// Hidden dotfiles returned (client filters for display).
-	seen := map[string]bool{}
-	for _, e := range entries {
-		seen[e.Name] = true
-	}
-	if !seen[".hidden"] {
-		t.Fatalf("dotfile not returned: %+v", entries)
-	}
-	if seen["child.md"] {
-		t.Fatalf("shallow list leaked a subdir child: %+v", entries)
-	}
-	// Case-insensitive sort: .hidden first, then a.txt, B.txt, Zdir.
-	want := []string{".hidden", "a.txt", "B.txt", "Zdir"}
-	if len(entries) != len(want) {
-		t.Fatalf("entries = %d, want %d (%+v)", len(entries), len(want), entries)
-	}
-	for i, n := range want {
-		if entries[i].Name != n {
-			t.Fatalf("entry[%d].Name = %q, want %q", i, entries[i].Name, n)
-		}
-	}
-	// IsDir flag correctness.
-	for _, e := range entries {
-		if e.Name == "Zdir" && !e.IsDir {
-			t.Fatalf("Zdir should be IsDir: %+v", e)
-		}
-		if e.Name == "a.txt" && e.IsDir {
-			t.Fatalf("a.txt should not be IsDir: %+v", e)
-		}
-	}
-}
-
-func TestListNotFound(t *testing.T) {
-	w := New()
-	_, err := w.List(context.Background(), filepath.Join(t.TempDir(), "nope"))
-	if !errors.Is(err, ErrNotFound) {
-		t.Fatalf("err = %v, want ErrNotFound", err)
-	}
-}
-
-func TestListNotADirectory(t *testing.T) {
-	dir := t.TempDir()
-	f := filepath.Join(dir, "file.txt")
-	if err := os.WriteFile(f, []byte("x"), 0o644); err != nil {
+	db.SetMaxOpenConns(1)
+	t.Cleanup(func() { db.Close() })
+	if err := Migrate(context.Background(), db); err != nil {
 		t.Fatal(err)
 	}
-	w := New()
-	_, err := w.List(context.Background(), f)
-	if !errors.Is(err, ErrNotADirectory) {
-		t.Fatalf("err = %v, want ErrNotADirectory", err)
-	}
+	return New(db)
 }
 
-func TestReadRawBytes(t *testing.T) {
+func TestResolveOrCreateExactResume(t *testing.T) {
+	s := newTestStore(t)
 	dir := t.TempDir()
-	f := filepath.Join(dir, "note.md")
-	content := []byte("hello mention world")
-	if err := os.WriteFile(f, content, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	w := New()
-	b, err := w.Read(context.Background(), f, 256*1024)
+	a, err := s.ResolveOrCreate(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(b) != string(content) {
-		t.Fatalf("read = %q, want %q", b, content)
-	}
-}
-
-func TestReadTooLarge(t *testing.T) {
-	dir := t.TempDir()
-	f := filepath.Join(dir, "big.md")
-	if err := os.WriteFile(f, []byte("1234567890"), 0o644); err != nil {
+	b, err := s.ResolveOrCreate(dir)
+	if err != nil {
 		t.Fatal(err)
 	}
-	w := New()
-	_, err := w.Read(context.Background(), f, 5)
-	if !errors.Is(err, ErrTooLarge) {
-		t.Fatalf("err = %v, want ErrTooLarge", err)
+	if a.ID != b.ID {
+		t.Fatalf("resume minted a new workspace: %s != %s", a.ID, b.ID)
+	}
+	if a.Name != filepath.Base(a.Root) {
+		t.Fatalf("name = %q, want basename of root", a.Name)
 	}
 }
 
-func TestReadNotFoundAndNotRegular(t *testing.T) {
+func TestResolveOrCreateCanonicalAlias(t *testing.T) {
+	s := newTestStore(t)
 	dir := t.TempDir()
-	w := New()
-	if _, err := w.Read(context.Background(), filepath.Join(dir, "nope.md"), 1024); !errors.Is(err, ErrNotFound) {
+	alias := filepath.Join(t.TempDir(), "alias")
+	if err := os.Symlink(dir, alias); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	a, err := s.ResolveOrCreate(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := s.ResolveOrCreate(alias)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.ID != b.ID {
+		t.Fatalf("alias resolved to a different workspace: %s != %s", a.ID, b.ID)
+	}
+}
+
+// TestResolveOrCreateNestedResolvesToMostSpecific covers ADR-0049 §2: opening a
+// nested directory resolves to the existing containing workspace.
+func TestResolveOrCreateNestedResolvesToMostSpecific(t *testing.T) {
+	s := newTestStore(t)
+	root := t.TempDir()
+	nested := filepath.Join(root, "chapters", "one")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	parent, err := s.ResolveOrCreate(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	child, err := s.ResolveOrCreate(nested)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if child.ID != parent.ID {
+		t.Fatalf("nested directory created a second workspace: %s != %s", child.ID, parent.ID)
+	}
+	if got, err := s.List(); err != nil || len(got) != 1 {
+		t.Fatalf("workspaces = %+v, err %v; want exactly 1", got, err)
+	}
+}
+
+// TestFindContainingMostSpecific inserts a nested workspace directly (explicit
+// nested creation is deferred by ADR-0049) to prove most-specific selection.
+func TestFindContainingMostSpecific(t *testing.T) {
+	s := newTestStore(t)
+	root := t.TempDir()
+	nested := filepath.Join(root, "sub")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	parent, err := s.ResolveOrCreate(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonicalNested, key := pathutil.Canonical(nested)
+	st := s.(*store)
+	if _, err := st.db.Exec(
+		`INSERT INTO workspaces (id, root, root_key, name, created_at, updated_at) VALUES ('nested', ?, ?, 'nested', 0, 0)`,
+		canonicalNested, key,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	got, ok, err := s.FindContaining(filepath.Join(nested, "file.md"))
+	if err != nil || !ok {
+		t.Fatalf("FindContaining: %v ok=%v", err, ok)
+	}
+	if got.ID != "nested" {
+		t.Fatalf("most specific = %s, want nested", got.ID)
+	}
+	// A file directly under root still resolves to the parent.
+	got, ok, err = s.FindContaining(filepath.Join(root, "top.md"))
+	if err != nil || !ok || got.ID != parent.ID {
+		t.Fatalf("root file resolved to %s (ok=%v err=%v), want %s", got.ID, ok, err, parent.ID)
+	}
+}
+
+func TestResolveOrCreateSeedsDefaultScope(t *testing.T) {
+	s := newTestStore(t)
+	ws, err := s.ResolveOrCreate(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	scope, err := s.Scope(ws.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(scope.Roots) != 1 || scope.Roots[0] != ws.Root {
+		t.Fatalf("default roots = %v, want [%s]", scope.Roots, ws.Root)
+	}
+	if len(scope.Include) != 1 || scope.Include[0] != dto.DefaultCorpusInclude {
+		t.Fatalf("default include = %v, want [%s]", scope.Include, dto.DefaultCorpusInclude)
+	}
+}
+
+func TestSetScopeIdempotentAndCanonical(t *testing.T) {
+	s := newTestStore(t)
+	ws, err := s.ResolveOrCreate(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	other := t.TempDir()
+	alias := filepath.Join(t.TempDir(), "alias")
+	if err := os.Symlink(other, alias); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	scope := dto.CorpusScope{
+		Roots:   []string{ws.Root, alias, other}, // alias + target dedupe to one
+		Include: []string{"**/*.md", "notes/**"},
+		Exclude: []string{"drafts/**"},
+	}
+	first, err := s.SetScope(ws.ID, scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first.Roots) != 2 {
+		t.Fatalf("deduped roots = %v, want 2", first.Roots)
+	}
+	second, err := s.SetScope(ws.ID, scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(second.Roots) != len(first.Roots) || len(second.Include) != len(first.Include) || len(second.Exclude) != len(first.Exclude) {
+		t.Fatalf("re-applying the same scope changed it: %+v vs %+v", first, second)
+	}
+}
+
+func TestGetNotFound(t *testing.T) {
+	s := newTestStore(t)
+	if _, err := s.Get("nope"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("err = %v, want ErrNotFound", err)
 	}
-	sub := filepath.Join(dir, "sub")
-	if err := os.Mkdir(sub, 0o755); err != nil {
+	if _, err := s.ResolveOrCreate(filepath.Join(t.TempDir(), "missing")); !errors.Is(err, ErrRootUnavailable) {
+		t.Fatalf("err = %v, want ErrRootUnavailable", err)
+	}
+}
+
+func TestJobs(t *testing.T) {
+	s := newTestStore(t)
+	ws, err := s.ResolveOrCreate(t.TempDir())
+	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := w.Read(context.Background(), sub, 1024); !errors.Is(err, ErrNotRegular) {
-		t.Fatalf("err = %v, want ErrNotRegular", err)
+	job, err := s.StartJob(ws.ID, "index", 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.State != "running" || job.Total != 3 {
+		t.Fatalf("job = %+v", job)
+	}
+	if err := s.UpdateJob(job.ID, 3, "done", ""); err != nil {
+		t.Fatal(err)
+	}
+	got, ok, err := s.LatestJob(ws.ID)
+	if err != nil || !ok {
+		t.Fatalf("LatestJob: %v ok=%v", err, ok)
+	}
+	if got.State != "done" || got.Completed != 3 || got.FinishedAt == 0 {
+		t.Fatalf("job = %+v", got)
+	}
+}
+
+func TestRoutes(t *testing.T) {
+	s := newTestStore(t)
+	ws, err := s.ResolveOrCreate(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RouteSession("sess1", ws.ID); err != nil {
+		t.Fatal(err)
+	}
+	gotWS, ok, err := s.SessionWorkspace("sess1")
+	if err != nil || !ok || gotWS != ws.ID {
+		t.Fatalf("SessionWorkspace = %q ok=%v err=%v", gotWS, ok, err)
+	}
+	if err := s.RouteTurn("turn1", ws.ID, "sess1"); err != nil {
+		t.Fatal(err)
+	}
+	wsID, sessID, ok, err := s.TurnRoute("turn1")
+	if err != nil || !ok || wsID != ws.ID || sessID != "sess1" {
+		t.Fatalf("TurnRoute = %q %q ok=%v err=%v", wsID, sessID, ok, err)
+	}
+	if _, _, ok, _ := s.TurnRoute("missing"); ok {
+		t.Fatal("unknown turn must not resolve")
 	}
 }

@@ -2,12 +2,32 @@
 
 Precise spec for the durable data formats the system owns. Source ADRs: ADR-0016
 (per-service SQLite), ADR-0018 (two-tier manifest), ADR-0019 (mode/tool data),
-ADR-0020 (block IDs, candidates, chunking), ADR-0036 (mentions meter component).
+ADR-0020 (block IDs, candidates, chunking), ADR-0036 (mentions meter component),
+ADR-0047 (canonical paths + write-through state), ADR-0049 (workspaces,
+multi-root corpus, workspace-sharded context storage).
 
-## 1. SQLite app databases — per-service files
+## 1. SQLite app databases — one file per service *instance*
 
-Per ADR-0016, SQLite state is **partitioned by service**, one file per locked
-service. No SQLite file is shared across modules.
+Per ADR-0016 as amended by ADR-0049 §5, SQLite state is partitioned by service
+**instance**: global files carry document identity and the workspace registry;
+each workspace shard carries only its context state. No SQLite file is shared
+across modules, and no cross-workspace aggregation exists.
+
+```
+<data>/                         # --data, default ~/.local/share/texteditor
+  app.db                        # GLOBAL: documents, blocks, candidates
+  git/<docID>.git               # GLOBAL: per-document history
+  worktree/<docID>/             # GLOBAL: canonical file per document
+  workspaces.db                 # GLOBAL registry: workspace records + corpus scope
+  workspaces/<workspaceID>/     # per-workspace shard (context state only)
+    index.db                    #   corpus vec0 + FTS + chunks + status
+    sessions.db                 #   sessions + messages
+    meter.db                    #   meter events
+```
+
+Shards open lazily on first use, migrate per shard, and close on LRU eviction
+(open-handle cap 4) under a reference-counted lease; a leased shard is never
+closed underneath a running turn or corpus job.
 
 ### 1.1 `app.db` — Document store
 
@@ -16,9 +36,11 @@ service. No SQLite file is shared across modules.
 | Column | Type | Notes |
 |---|---|---|
 | `id` | TEXT PK | surrogate id (UUID) — the REST identity |
-| `path` | TEXT UNIQUE | absolute path; the Document store's open resolver |
+| `path` | TEXT UNIQUE | canonical absolute path; the Document store's open resolver |
+| `path_key` | TEXT | case-folded canonical path; alias/symlink identity (ADR-0047 §2) |
 | `root_block_id` | TEXT | id of the root block (document = tree of blocks) |
 | `updated_at` | INTEGER | unix epoch seconds |
+| `content_hash` | TEXT | last-known disk content hash (external-change anchor, ADR-0047) |
 
 #### `blocks` — stable block IDs (paragraphs/headings/tables, UUID)
 
@@ -48,28 +70,73 @@ hashes are rejected (not stable across edits).
 Candidates are *unaccepted AI edits* (ADR-0020): accepting commits the block's new
 content and clears the row; rejecting drops it. They are **not** stored in git.
 
-### 1.2 `index.db` — Retriever (rebuildable projection)
+### 1.2 `index.db` — Retriever (rebuildable projection, per workspace shard)
+
+Lives at `<data>/workspaces/<workspaceID>/index.db` (ADR-0049 §5). A **derived,
+rebuildable projection** of versioned documents and corpus files (the Chunker
+produces it; `Index`/`IndexPath` rebuild it); it may denormalize chunk text.
+Identity (ADR-0049 §4):
+
+- `file_key` keys `indexed_files`: a `documentID` for versioned documents, the
+  case-folded canonical path for path-keyed corpus files.
+- `chunk_key` keys chunks/vec/FTS: `documentID#index` for versioned documents,
+  `path#index` for corpus files.
+
+#### `index_meta` — learned properties
+
+| Column | Type | Notes |
+|---|---|---|
+| `key` | TEXT PK | e.g. `dim` |
+| `value` | TEXT | the embedding dimension the vec table was created with |
+
+#### `indexed_files` — one status row per indexed file
+
+| Column | Type | Notes |
+|---|---|---|
+| `file_key` | TEXT PK | documentID or canonical path key |
+| `path_key` | TEXT | case-folded canonical path |
+| `path` | TEXT | canonical absolute path |
+| `document_id` | TEXT | empty for corpus files |
+| `content_hash` | TEXT | last-indexed content hash (stale detection) |
+| `chunk_count` | INTEGER | indexed chunk count |
+| `indexed_at` | INTEGER | unix epoch seconds |
+
+#### `chunks` — chunk corpus + provenance
+
+| Column | Type | Notes |
+|---|---|---|
+| `chunk_key` | TEXT PK | `documentID#index` \| `path#index` |
+| `file_key` | TEXT | owning identity (delete/rebuild unit) |
+| `path_key` | TEXT | canonical path key |
+| `path` | TEXT | canonical absolute path |
+| `heading` | TEXT | heading stack / nearest heading |
+| `block_id` | TEXT | versioned block id (empty for corpus) |
+| `content` | TEXT | chunk text |
 
 #### `blocks_ft` — FTS5 full-text index
 
 | Column | Type | Notes |
 |---|---|---|
-| `block_id` | TEXT | unindexed, → block id |
-| `content` | TEXT | indexed text of the block/chunk |
+| `chunk_key` | TEXT | unindexed, → `chunks.chunk_key` |
+| `content` | TEXT | indexed text of the chunk |
 
 #### `vec_chunks` — embeddings (`sqlite-vec` `vec0` table)
 
 | Column | Type | Notes |
 |---|---|---|
-| `id` | INTEGER PK | chunk id |
-| `document_id` | TEXT | → documents.id |
-| `block_id` | TEXT NULL | → block id if the chunk aligns to a block |
+| `chunk_key` | TEXT | metadata column, → `chunks.chunk_key` |
 | `embedding` | vec0 | float32 vector, KNN-indexed |
 
-`index.db` is a **derived, rebuildable projection** of documents (the Chunker
-produces it; `Index` rebuilds it). It may denormalize block text.
+No explicit integer id: vec0 assigns rowids, so per-document index counters
+cannot collide across files (the Phase C id-collision fix). The vec table is
+created when the embedding dimension is first learned (`index_meta.dim`), after
+the base schema; `Query`/`Index`/`IndexPath` ensure it, `Status`/`Evict` do not
+need it. Eviction deletes both vec0 and FTS rows by chunk key and is idempotent.
 
-### 1.3 `meter.db` — Token metering
+### 1.3 `meter.db` — Token metering (per workspace shard)
+
+Lives at `<data>/workspaces/<workspaceID>/meter.db`; no global meter total
+(ADR-0049 §5).
 
 #### `meter_events` — token-metering events
 
@@ -85,9 +152,11 @@ produces it; `Index` rebuilds it). It may denormalize block text.
 | `approx` | INTEGER | 1 when the component is a labeled approximation (thinking, ADR-0024) |
 | `model` | TEXT | logical model name actually used (`usedName`) |
 
-### 1.4 `sessions.db` — Session store
+### 1.4 `sessions.db` — Session store (per workspace shard)
 
-Source ADR-0026. Dedicated file (renamed from `messages.db`). Owned by the
+Source ADR-0026 as amended by ADR-0049 §5: lives at
+`<data>/workspaces/<workspaceID>/sessions.db`; sessions are workspace-scoped by
+shard and `workspaces.db` routes session/turn ids to the shard. Owned by the
 Session store only.
 
 #### `sessions` — session entity
@@ -116,6 +185,69 @@ reopens the same session.
 | `role` | TEXT | `user` \| `assistant` \| `tool` |
 | `content` | TEXT | |
 | `ts` | INTEGER | |
+
+### 1.5 `workspaces.db` — Workspace store (global registry)
+
+Source ADR-0049 §2/§3/§5. The only global index; owned by the Workspace store.
+It never stores document identity (that stays in `app.db`) or per-workspace
+context state (that lives in the shard).
+
+#### `workspaces` — workspace records
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | TEXT PK | UUID, client-facing identity |
+| `root` | TEXT | canonical absolute directory (EvalSymlinks + case-fold) |
+| `root_key` | TEXT UNIQUE | case-folded canonical root (alias identity) |
+| `name` | TEXT | display label (default: basename of root) |
+| `created_at` / `updated_at` | INTEGER | unix epoch seconds |
+
+#### `corpus_roots` — multi-root corpus scope
+
+| Column | Type | Notes |
+|---|---|---|
+| `workspace_id` | TEXT | → `workspaces.id` |
+| `path` | TEXT | canonical absolute root (file or directory) |
+| `path_key` | TEXT | case-folded canonical path |
+| `position` | INTEGER | order; the workspace root seeds position 0 |
+
+PK `(workspace_id, path_key)`.
+
+#### `corpus_scope` — include/exclude globs
+
+| Column | Type | Notes |
+|---|---|---|
+| `workspace_id` | TEXT | → `workspaces.id` |
+| `kind` | TEXT | `include` \| `exclude` |
+| `pattern` | TEXT | glob (`**/*.md` default; hidden dirs excluded by the walker) |
+
+PK `(workspace_id, kind, pattern)`.
+
+#### `corpus_jobs` — observable indexing progress
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | TEXT PK | job id |
+| `workspace_id` | TEXT | → `workspaces.id` |
+| `kind` | TEXT | `reconcile` \| `index` \| `path` |
+| `state` | TEXT | `running` \| `done` \| `error` |
+| `total` / `completed` | INTEGER | file counts |
+| `error` | TEXT | failure label |
+| `started_at` / `finished_at` | INTEGER | unix epoch seconds |
+
+Progress is polled through `GET /corpus` (Phase C pin; no SSE stream).
+
+#### `corpus_evicted` / `corpus_errors` — per-path status
+
+Eviction tombstones (status `evicted` until re-indexed) and the last index
+error per path (status `error`); PK `(workspace_id, path_key)`.
+
+#### `session_routes` / `turn_routes` — routing index
+
+`session_routes(session_id PK, workspace_id, created_at)` and
+`turn_routes(turn_id PK, workspace_id, session_id, created_at)` let
+`GET /sessions/{id}/meter` and `GET /turns/{id}/context` resolve a shard with no
+cross-workspace scan; `turn_routes` rows are pruned after 30 days.
 
 ## 2. Fleet manifest (`models.json` in `macos-dev-config`) — two-tier
 
@@ -228,8 +360,10 @@ remains.
 
 ## 4. Invariants (cross-store)
 
-- Each SQLite file is owned by exactly one service; no module reads/writes
-  another's file (ADR-0016). Supersedes the prior "Document store owns all SQLite."
+- Each SQLite file is owned by exactly one service *instance*; no module
+  reads/writes another's file (ADR-0016 as amended by ADR-0049 §5). Global:
+  `app.db`, `workspaces.db`, git, worktree. Per workspace shard: `index.db`,
+  `sessions.db`, `meter.db`. Supersedes the prior "Document store owns all SQLite."
 - Block IDs are stable UUIDs across edits (ADR-0020). Content *hashes* are used
   only as transient guard anchors, never as identity.
 - **Canonical-content invariant (ADR-0029):** block content is stored canonical —

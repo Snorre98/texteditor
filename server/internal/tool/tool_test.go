@@ -1,6 +1,7 @@
 package tool
 
 import (
+	"context"
 	"encoding/json"
 	"testing"
 
@@ -44,11 +45,11 @@ func TestRegistryRegisterList(t *testing.T) {
 func TestExecutorNameKeyedInvoke(t *testing.T) {
 	e := NewExecutor()
 
-	e.Bind("echo", func(args json.RawMessage) (json.RawMessage, error) {
+	e.Bind("echo", func(ctx context.Context, args json.RawMessage) (json.RawMessage, error) {
 		return args, nil
 	})
 
-	out, err := e.Invoke("echo", json.RawMessage(`{"a":1}`))
+	out, err := e.Invoke(context.Background(), "echo", json.RawMessage(`{"a":1}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -56,7 +57,7 @@ func TestExecutorNameKeyedInvoke(t *testing.T) {
 		t.Fatalf("echo returned %s", out)
 	}
 
-	if _, err := e.Invoke("nohandler", nil); err != ErrToolNoHandler {
+	if _, err := e.Invoke(context.Background(), "nohandler", nil); err != ErrToolNoHandler {
 		t.Fatalf("got %v want ErrToolNoHandler", err)
 	}
 }
@@ -75,7 +76,7 @@ func TestVerifyHandlers(t *testing.T) {
 	}
 
 	e := NewExecutor()
-	e.Bind("a", func(args json.RawMessage) (json.RawMessage, error) { return nil, nil })
+	e.Bind("a", func(ctx context.Context, args json.RawMessage) (json.RawMessage, error) { return nil, nil })
 
 	// "b" is registered but has no handler.
 	if err := VerifyHandlers(r, e.HandlerNames()); err == nil {
@@ -83,7 +84,7 @@ func TestVerifyHandlers(t *testing.T) {
 	}
 
 	// Bind "b" and the cross-check passes.
-	e.Bind("b", func(args json.RawMessage) (json.RawMessage, error) { return nil, nil })
+	e.Bind("b", func(ctx context.Context, args json.RawMessage) (json.RawMessage, error) { return nil, nil })
 	if err := VerifyHandlers(r, e.HandlerNames()); err != nil {
 		t.Fatalf("expected clean cross-check, got %v", err)
 	}

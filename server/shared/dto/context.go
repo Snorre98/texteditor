@@ -52,9 +52,35 @@ type Document struct {
 
 // Chunk is a retrieved passage (interface.md §3). JSON tags are camelCase: the
 // chunk crosses the API wire via the `rag` SSE event (recorded amendment).
+// ChunkKey/Path/Heading are the ADR-0044 §3 / ADR-0049 §4 provenance additions:
+// chunkKey is path#index for corpus files and documentID#index for versioned
+// documents; path is the canonical file path; heading is the nearest heading
+// (markdown heading stack for corpus files, preceding heading for block trees).
 type Chunk struct {
-	BlockID string  `json:"blockId"`
-	Text    string  `json:"text"`
-	Score   float32 `json:"score"`
-	Source  string  `json:"source"` // citation/provenance marker
+	BlockID  string  `json:"blockId"`
+	ChunkKey string  `json:"chunkKey,omitempty"`
+	Text     string  `json:"text"`
+	Score    float32 `json:"score"`
+	Source   string  `json:"source"` // citation/provenance marker
+	Path     string  `json:"path,omitempty"`
+	Heading  string  `json:"heading,omitempty"`
+}
+
+// IndexedDocument is one indexed file's status row (Retriever.Status,
+// interface.md §3): the engine's last-known content hash and chunk count, so the
+// corpus layer can detect stale disk files (ADR-0049 §4).
+type IndexedDocument struct {
+	Path        string
+	DocumentID  string // empty for path-keyed corpus files
+	ContentHash string
+	ChunkCount  int
+	IndexedAt   int64
+}
+
+// ChunkRef is a stable reference to one indexed chunk for tray pin/exclude
+// decisions (ADR-0049 §8, api/openapi.yaml ChunkRef).
+type ChunkRef struct {
+	Path     string `json:"path"`
+	ChunkKey string `json:"chunkKey"`
+	Hash     string `json:"hash,omitempty"`
 }

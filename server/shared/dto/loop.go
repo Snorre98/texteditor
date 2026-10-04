@@ -20,11 +20,12 @@ type Mention struct {
 
 // Task is the input to AgentLoop.Run (interface.md §7, ADR-0026).
 type Task struct {
-	SessionID  string // the owning session (ADR-0026)
-	ModeName   string
-	DocumentID string
-	UserInput  string
-	Selection  *Selection
-	Mentions   []Mention // turn-scoped context attachments (ADR-0036); never persisted
-	Options    *TurnOptions
+	SessionID   string // the owning session (ADR-0026)
+	ModeName    string
+	DocumentID  string
+	WorkspaceID string // the workspace shard owning this turn (ADR-0049 §5); optional
+	UserInput   string
+	Selection   *Selection
+	Mentions    []Mention // turn-scoped context attachments (ADR-0036); never persisted
+	Options     *TurnOptions
 }

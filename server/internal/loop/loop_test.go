@@ -7,6 +7,9 @@ import (
 	"testing"
 	"time"
 
+	"texteditor/internal/filesystem"
+	"texteditor/internal/retriever"
+	"texteditor/internal/shard"
 	"texteditor/internal/workspace"
 	"texteditor/shared/dto"
 )
@@ -37,7 +40,9 @@ func (s stubTools) List() []dto.ToolDef        { return s.defs }
 
 type stubExecutor struct{}
 
-func (stubExecutor) Invoke(string, json.RawMessage) (json.RawMessage, error) { return nil, nil }
+func (stubExecutor) Invoke(context.Context, string, json.RawMessage) (json.RawMessage, error) {
+	return nil, nil
+}
 
 // recordingExecutor records invocations and returns a fixed result.
 type recordingExecutor struct {
@@ -47,7 +52,7 @@ type recordingExecutor struct {
 	errResp error
 }
 
-func (r *recordingExecutor) Invoke(name string, args json.RawMessage) (json.RawMessage, error) {
+func (r *recordingExecutor) Invoke(_ context.Context, name string, args json.RawMessage) (json.RawMessage, error) {
 	r.mu.Lock()
 	r.calls = append(r.calls, name)
 	r.mu.Unlock()
@@ -89,6 +94,7 @@ func (s stubFleet) Fingerprint(string) (string, error)                      { re
 type stubDoc struct{}
 
 func (stubDoc) Open(string) (dto.OpenResult, error) { return dto.OpenResult{}, nil }
+func (stubDoc) Path(string) (string, error)         { return "/vault/d1.md", nil }
 func (stubDoc) SaveTree(string, []dto.BlockWrite, dto.SaveOptions) (dto.WriteResult, error) {
 	return dto.WriteResult{}, nil
 }
@@ -115,7 +121,13 @@ func (s *stubRetriever) Query(_ context.Context, _ string, topK int) ([]dto.Chun
 	s.mu.Unlock()
 	return s.chunks, nil
 }
-func (*stubRetriever) Index(context.Context, string) error { return nil }
+func (*stubRetriever) Index(context.Context, string) error             { return nil }
+func (*stubRetriever) IndexPath(context.Context, string, string) error { return nil }
+func (*stubRetriever) Evict(context.Context, string) error             { return nil }
+func (*stubRetriever) Status() ([]dto.IndexedDocument, error)          { return nil, nil }
+func (*stubRetriever) Get(context.Context, []dto.ChunkRef) ([]dto.Chunk, error) {
+	return nil, nil
+}
 
 func (s *stubRetriever) queries() []int {
 	s.mu.Lock()
@@ -131,6 +143,7 @@ func (s stubPipeline) Policy() dto.PipelinePolicy { return s.policy }
 type stubSessions struct{ hist []dto.Message }
 
 func (s stubSessions) ListByDocument(string) ([]dto.Session, error) { return nil, nil }
+func (s stubSessions) ListByWorkspace() ([]dto.Session, error)      { return nil, nil }
 func (stubSessions) Create(string, *string, string) (dto.Session, error) {
 	return dto.Session{}, nil
 }
@@ -138,24 +151,79 @@ func (stubSessions) Resume(string) (dto.Session, error)      { return dto.Sessio
 func (stubSessions) Append(string, dto.Message) error        { return nil }
 func (s stubSessions) History(string) ([]dto.Message, error) { return s.hist, nil }
 
-// stubWorkspace implements the loop's workspace.Interface over an in-memory
-// map keyed by path → (content, error). Used to drive mention resolution.
-type stubWorkspace struct {
+// stubFilesystem implements filesystem.Interface over an in-memory map keyed by
+// path → (content, error). Used to drive mention resolution and the
+// ALLOWED_ROOTS refusal path.
+type stubFilesystem struct {
 	files map[string]string
 	err   map[string]error
 }
 
-func (s *stubWorkspace) List(context.Context, string) ([]workspace.Entry, error) { return nil, nil }
-func (s *stubWorkspace) Read(_ context.Context, path string, maxBytes int) ([]byte, error) {
+func (s *stubFilesystem) List(context.Context, string) ([]filesystem.Entry, error) { return nil, nil }
+func (s *stubFilesystem) AllowedRoots() []string                                   { return []string{"/"} }
+func (s *stubFilesystem) Check(string) error                                       { return nil }
+func (s *stubFilesystem) Read(_ context.Context, path string, maxBytes int) ([]byte, error) {
 	if e, ok := s.err[path]; ok {
 		return nil, e
 	}
 	b := []byte(s.files[path])
 	if maxBytes > 0 && len(b) > maxBytes {
-		return nil, workspace.ErrTooLarge
+		return nil, filesystem.ErrTooLarge
 	}
 	return b, nil
 }
+
+// stubWorkspaces implements workspace.Interface with permissive defaults; the
+// loop only calls Get (explicit workspaceId) and ResolveOrCreate (fallback).
+type stubWorkspaces struct{}
+
+func (stubWorkspaces) ResolveOrCreate(root string) (dto.Workspace, error) {
+	return dto.Workspace{ID: "ws1", Root: root}, nil
+}
+func (stubWorkspaces) Get(id string) (dto.Workspace, error) {
+	return dto.Workspace{ID: id, Root: "/vault"}, nil
+}
+func (stubWorkspaces) List() ([]dto.Workspace, error) { return nil, nil }
+func (stubWorkspaces) FindContaining(string) (dto.Workspace, bool, error) {
+	return dto.Workspace{ID: "ws1", Root: "/vault"}, true, nil
+}
+func (stubWorkspaces) Scope(string) (dto.CorpusScope, error) { return dto.CorpusScope{}, nil }
+func (stubWorkspaces) SetScope(string, dto.CorpusScope) (dto.CorpusScope, error) {
+	return dto.CorpusScope{}, nil
+}
+func (stubWorkspaces) StartJob(string, string, int) (dto.CorpusJob, error) {
+	return dto.CorpusJob{}, nil
+}
+func (stubWorkspaces) UpdateJob(string, int, string, string) error { return nil }
+func (stubWorkspaces) LatestJob(string) (dto.CorpusJob, bool, error) {
+	return dto.CorpusJob{}, false, nil
+}
+func (stubWorkspaces) MarkEvicted(string, string) error         { return nil }
+func (stubWorkspaces) ClearEvicted(string, string) error        { return nil }
+func (stubWorkspaces) EvictedPaths(string) ([]string, error)    { return nil, nil }
+func (stubWorkspaces) MarkError(string, string, string) error   { return nil }
+func (stubWorkspaces) ClearError(string, string) error          { return nil }
+func (stubWorkspaces) Errors(string) (map[string]string, error) { return nil, nil }
+func (stubWorkspaces) RouteSession(string, string) error        { return nil }
+func (stubWorkspaces) SessionWorkspace(string) (string, bool, error) {
+	return "ws1", true, nil
+}
+func (stubWorkspaces) RouteTurn(string, string, string) error { return nil }
+func (stubWorkspaces) TurnRoute(string) (string, string, bool, error) {
+	return "ws1", "s1", true, nil
+}
+
+var _ workspace.Interface = stubWorkspaces{}
+
+// stubShards returns one fixed shard lease; tests mutate the Services pointer
+// to swap in their fake retriever/sessions/meter.
+type stubShards struct{ svc *shard.Services }
+
+func (s stubShards) Services(context.Context, string) (*shard.Lease, error) {
+	return shard.NewLease(*s.svc), nil
+}
+
+var _ retriever.Interface = (*stubRetriever)(nil)
 
 type stubMeter struct {
 	mu     sync.Mutex
@@ -197,6 +265,11 @@ func (e *stubErr) Error() string { return e.msg }
 // --------------------------- tests ---------------------------
 
 func happyPathDeps(bus *stubBus) Deps {
+	svc := &shard.Services{
+		Retriever: &stubRetriever{},
+		Sessions:  stubSessions{},
+		Meter:     &stubMeter{},
+	}
 	return Deps{
 		Modes: stubMode{modes: map[string]dto.Mode{
 			"proofreader": {Name: "proofreader", DefaultModel: "gemma4-12b"},
@@ -214,11 +287,11 @@ func happyPathDeps(bus *stubBus) Deps {
 			EffectiveParams: dto.SamplingParams{Temperature: 0.3, MaxTokens: 10},
 			UsedName:        "gemma4-12b",
 		}},
-		Doc:       stubDoc{},
-		Retriever: &stubRetriever{},
-		Sessions:  stubSessions{},
-		Meter:     &stubMeter{},
-		Bus:       bus,
+		Doc:        stubDoc{},
+		Shards:     stubShards{svc: svc},
+		Workspaces: stubWorkspaces{},
+		Filesystem: &stubFilesystem{files: map[string]string{}, err: map[string]error{}},
+		Bus:        bus,
 		Pipeline: stubPipeline{policy: dto.PipelinePolicy{
 			MaxSteps:         6,
 			MaxHistoryTokens: 32000,
@@ -228,6 +301,9 @@ func happyPathDeps(bus *stubBus) Deps {
 		}},
 	}
 }
+
+// shardSvc returns the mutable services behind happyPathDeps' fake shard.
+func shardSvc(deps Deps) *shard.Services { return deps.Shards.(stubShards).svc }
 
 func TestRunHappyPath(t *testing.T) {
 	bus := &stubBus{done: make(chan struct{})}
@@ -422,8 +498,9 @@ func TestBudgetExceeded(t *testing.T) {
 	deps := happyPathDeps(bus)
 
 	budget := 10
-	deps.Sessions = budgetSessions{budget: &budget}
-	deps.Meter = &budgetMeter{used: 11}
+	svc := shardSvc(deps)
+	svc.Sessions = budgetSessions{budget: &budget}
+	svc.Meter = &budgetMeter{used: 11}
 
 	l := New(deps)
 	_, err := l.Run(context.Background(), dto.Task{
@@ -460,6 +537,7 @@ func TestBudgetExceeded(t *testing.T) {
 type budgetSessions struct{ budget *int }
 
 func (budgetSessions) ListByDocument(string) ([]dto.Session, error) { return nil, nil }
+func (budgetSessions) ListByWorkspace() ([]dto.Session, error)      { return nil, nil }
 func (budgetSessions) Create(string, *string, string) (dto.Session, error) {
 	return dto.Session{}, nil
 }
@@ -599,7 +677,7 @@ func TestAutoRagRunsForEveryPreset(t *testing.T) {
 			deps, _ := presetDeps(bus)
 			ret := &stubRetriever{chunks: []dto.Chunk{{BlockID: "b9", Text: "retrieved"}}}
 			asm := &recordingAssembler{}
-			deps.Retriever = ret
+			shardSvc(deps).Retriever = ret
 			deps.Assembler = asm
 
 			l := New(deps)
@@ -665,7 +743,8 @@ func TestGlobalMaxStepsCap(t *testing.T) {
 // --------------------- mention resolution (ADR-0036 §2) ---------------------
 
 // recordingAssembler captures the MentionContent and RAG chunks handed to it,
-// asserting the loop resolves mentions through Workspace and always retrieves.
+// asserting the loop resolves mentions through the Filesystem leaf and always
+// retrieves.
 type recordingAssembler struct {
 	mu       sync.Mutex
 	mentions []dto.MentionContent
@@ -746,15 +825,15 @@ func TestWireModelIDReachesAssembler(t *testing.T) {
 
 func mentionDeps(bus *stubBus) Deps {
 	d := happyPathDeps(bus)
-	d.Workspace = &stubWorkspace{
+	d.Filesystem = &stubFilesystem{
 		files: map[string]string{"/notes/a.md": "mentioned content"},
 		err:   map[string]error{},
 	}
 	return d
 }
 
-// TestMentionsResolvedAndSpliced: valid mentions resolve through Workspace and
-// reach the assembler as MentionContent.
+// TestMentionsResolvedAndSpliced: valid mentions resolve through the Filesystem
+// leaf and reach the assembler as MentionContent.
 func TestMentionsResolvedAndSpliced(t *testing.T) {
 	bus := &stubBus{done: make(chan struct{})}
 	assembler := &recordingAssembler{}
@@ -789,15 +868,16 @@ func TestMentionNotFoundFailsFast(t *testing.T) {
 		err  error
 		code string
 	}{
-		{"not-found", workspace.ErrNotFound, "mention-not-found"},
-		{"not-regular", workspace.ErrNotRegular, "mention-not-found"},
-		{"too-large", workspace.ErrTooLarge, "mention-too-large"},
-		{"read-failed", workspace.ErrReadFailed, "mention-unreadable"},
+		{"not-found", filesystem.ErrNotFound, "mention-not-found"},
+		{"not-regular", filesystem.ErrNotRegular, "mention-not-found"},
+		{"too-large", filesystem.ErrTooLarge, "mention-too-large"},
+		{"read-failed", filesystem.ErrReadFailed, "mention-unreadable"},
+		{"outside-roots", filesystem.ErrPathOutsideAllowedRoots, "path-outside-allowed-roots"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			bus := &stubBus{done: make(chan struct{})}
 			deps := happyPathDeps(bus)
-			deps.Workspace = &stubWorkspace{
+			deps.Filesystem = &stubFilesystem{
 				files: map[string]string{},
 				err:   map[string]error{"/x.md": tc.err},
 			}
@@ -841,7 +921,7 @@ func TestMentionNotFoundFailsFast(t *testing.T) {
 func TestTooManyMentionsFailsFast(t *testing.T) {
 	bus := &stubBus{done: make(chan struct{})}
 	deps := happyPathDeps(bus)
-	deps.Workspace = &stubWorkspace{files: map[string]string{}, err: map[string]error{}}
+	deps.Filesystem = &stubFilesystem{files: map[string]string{}, err: map[string]error{}}
 
 	mentions := make([]dto.Mention, maxMentions+1)
 	for i := range mentions {
@@ -867,6 +947,103 @@ func TestTooManyMentionsFailsFast(t *testing.T) {
 	}
 	if err := json.Unmarshal(events[0].Data, &d); err != nil || d.Code != "too-many-mentions" {
 		t.Fatalf("code = %q, want too-many-mentions (%s)", d.Code, events[0].Data)
+	}
+}
+
+// --------------------- workspace resolution (ADR-0049 §2/§5) ---------------------
+
+// captureShards records which workspace ids were leased.
+type captureShards struct {
+	mu  sync.Mutex
+	ids []string
+	svc *shard.Services
+}
+
+func (c *captureShards) Services(_ context.Context, workspaceID string) (*shard.Lease, error) {
+	c.mu.Lock()
+	c.ids = append(c.ids, workspaceID)
+	c.mu.Unlock()
+	return shard.NewLease(*c.svc), nil
+}
+
+func (c *captureShards) leased() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]string(nil), c.ids...)
+}
+
+// captureWorkspaces records fallback ResolveOrCreate roots.
+type captureWorkspaces struct {
+	stubWorkspaces
+	mu    sync.Mutex
+	roots []string
+	id    string
+}
+
+func (c *captureWorkspaces) ResolveOrCreate(root string) (dto.Workspace, error) {
+	c.mu.Lock()
+	c.roots = append(c.roots, root)
+	c.mu.Unlock()
+	return dto.Workspace{ID: c.id, Root: root}, nil
+}
+
+func (c *captureWorkspaces) resolved() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]string(nil), c.roots...)
+}
+
+// TestWorkspaceFallbackResolvesFromDocument: an absent Task.workspaceId
+// resolve-or-creates a workspace rooted at the canonical parent directory of
+// the turn's document (keeps pre-workspace clients working).
+func TestWorkspaceFallbackResolvesFromDocument(t *testing.T) {
+	bus := &stubBus{done: make(chan struct{})}
+	deps := happyPathDeps(bus)
+	shards := &captureShards{svc: shardSvc(deps)}
+	workspaces := &captureWorkspaces{id: "ws-fallback"}
+	deps.Shards = shards
+	deps.Workspaces = workspaces
+
+	l := New(deps)
+	if _, err := l.Run(context.Background(), dto.Task{
+		SessionID: "s1", ModeName: "proofreader", DocumentID: "d1", UserInput: "fix",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	waitDone(t, bus)
+
+	if got := shards.leased(); len(got) != 1 || got[0] != "ws-fallback" {
+		t.Fatalf("leased workspaces = %v, want [ws-fallback]", got)
+	}
+	roots := workspaces.resolved()
+	if len(roots) != 1 || roots[0] != "/vault" {
+		t.Fatalf("fallback root = %v, want [/vault] (parent of /vault/d1.md)", roots)
+	}
+}
+
+// TestExplicitWorkspaceIDWins: an explicit workspaceId is used as-is and never
+// falls back to the document parent.
+func TestExplicitWorkspaceIDWins(t *testing.T) {
+	bus := &stubBus{done: make(chan struct{})}
+	deps := happyPathDeps(bus)
+	shards := &captureShards{svc: shardSvc(deps)}
+	workspaces := &captureWorkspaces{id: "ws-fallback"}
+	deps.Shards = shards
+	deps.Workspaces = workspaces
+
+	l := New(deps)
+	if _, err := l.Run(context.Background(), dto.Task{
+		SessionID: "s1", ModeName: "proofreader", DocumentID: "d1", WorkspaceID: "ws-explicit", UserInput: "fix",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	waitDone(t, bus)
+
+	if got := shards.leased(); len(got) != 1 || got[0] != "ws-explicit" {
+		t.Fatalf("leased workspaces = %v, want [ws-explicit]", got)
+	}
+	if got := workspaces.resolved(); len(got) != 0 {
+		t.Fatalf("explicit workspace must not fall back: resolved %v", got)
 	}
 }
 

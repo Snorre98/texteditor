@@ -5,6 +5,18 @@ type CommitDocumentRes interface {
 	commitDocumentRes()
 }
 
+type EvictCorpusDocumentRes interface {
+	evictCorpusDocumentRes()
+}
+
+type ListDirectoryRes interface {
+	listDirectoryRes()
+}
+
+type PutCorpusRes interface {
+	putCorpusRes()
+}
+
 type SaveDocumentRes interface {
 	saveDocumentRes()
 }

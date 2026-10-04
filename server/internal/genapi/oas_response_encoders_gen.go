@@ -67,6 +67,43 @@ func encodeCreateSessionResponse(response *Session, w http.ResponseWriter, span 
 	return nil
 }
 
+func encodeCreateWorkspaceResponse(response *Workspace, w http.ResponseWriter, span trace.Span) error {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(200)
+
+	e := new(jx.Encoder)
+	response.Encode(e)
+	if _, err := e.WriteTo(w); err != nil {
+		return errors.Wrap(err, "write")
+	}
+
+	return nil
+}
+
+func encodeEvictCorpusDocumentResponse(response EvictCorpusDocumentRes, w http.ResponseWriter, span trace.Span) error {
+	switch response := response.(type) {
+	case *EvictCorpusDocumentNoContent:
+		w.WriteHeader(204)
+
+		return nil
+
+	case *PathOutsideAllowedRoots:
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(403)
+
+		e := new(jx.Encoder)
+		response.Encode(e)
+		if _, err := e.WriteTo(w); err != nil {
+			return errors.Wrap(err, "write")
+		}
+
+		return nil
+
+	default:
+		return errors.Errorf("unexpected response type: %T", response)
+	}
+}
+
 func encodeGetBlocksResponse(response []Block, w http.ResponseWriter, span trace.Span) error {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(200)
@@ -94,6 +131,19 @@ func encodeGetCandidatesResponse(response []Candidate, w http.ResponseWriter, sp
 		elem.Encode(e)
 	}
 	e.ArrEnd()
+	if _, err := e.WriteTo(w); err != nil {
+		return errors.Wrap(err, "write")
+	}
+
+	return nil
+}
+
+func encodeGetCorpusResponse(response *CorpusState, w http.ResponseWriter, span trace.Span) error {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(200)
+
+	e := new(jx.Encoder)
+	response.Encode(e)
 	if _, err := e.WriteTo(w); err != nil {
 		return errors.Wrap(err, "write")
 	}
@@ -191,7 +241,7 @@ func encodeGetSessionMessagesResponse(response []Message, w http.ResponseWriter,
 	return nil
 }
 
-func encodeListDirectoryResponse(response *DirectoryListing, w http.ResponseWriter, span trace.Span) error {
+func encodeGetWorkspaceResponse(response *Workspace, w http.ResponseWriter, span trace.Span) error {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(200)
 
@@ -202,6 +252,50 @@ func encodeListDirectoryResponse(response *DirectoryListing, w http.ResponseWrit
 	}
 
 	return nil
+}
+
+func encodeIndexCorpusResponse(response *CorpusJob, w http.ResponseWriter, span trace.Span) error {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(202)
+
+	e := new(jx.Encoder)
+	response.Encode(e)
+	if _, err := e.WriteTo(w); err != nil {
+		return errors.Wrap(err, "write")
+	}
+
+	return nil
+}
+
+func encodeListDirectoryResponse(response ListDirectoryRes, w http.ResponseWriter, span trace.Span) error {
+	switch response := response.(type) {
+	case *DirectoryListing:
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(200)
+
+		e := new(jx.Encoder)
+		response.Encode(e)
+		if _, err := e.WriteTo(w); err != nil {
+			return errors.Wrap(err, "write")
+		}
+
+		return nil
+
+	case *PathOutsideAllowedRoots:
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(403)
+
+		e := new(jx.Encoder)
+		response.Encode(e)
+		if _, err := e.WriteTo(w); err != nil {
+			return errors.Wrap(err, "write")
+		}
+
+		return nil
+
+	default:
+		return errors.Errorf("unexpected response type: %T", response)
+	}
 }
 
 func encodeListModelsResponse(response []Model, w http.ResponseWriter, span trace.Span) error {
@@ -272,6 +366,23 @@ func encodeListToolsResponse(response []ToolDef, w http.ResponseWriter, span tra
 	return nil
 }
 
+func encodeListWorkspacesResponse(response []Workspace, w http.ResponseWriter, span trace.Span) error {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(200)
+
+	e := new(jx.Encoder)
+	e.ArrStart()
+	for _, elem := range response {
+		elem.Encode(e)
+	}
+	e.ArrEnd()
+	if _, err := e.WriteTo(w); err != nil {
+		return errors.Wrap(err, "write")
+	}
+
+	return nil
+}
+
 func encodeOpenDocumentResponse(response *Document, w http.ResponseWriter, span trace.Span) error {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(200)
@@ -296,6 +407,37 @@ func encodeProvisionModelResponse(response *ProvisionResponse, w http.ResponseWr
 	}
 
 	return nil
+}
+
+func encodePutCorpusResponse(response PutCorpusRes, w http.ResponseWriter, span trace.Span) error {
+	switch response := response.(type) {
+	case *CorpusState:
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(200)
+
+		e := new(jx.Encoder)
+		response.Encode(e)
+		if _, err := e.WriteTo(w); err != nil {
+			return errors.Wrap(err, "write")
+		}
+
+		return nil
+
+	case *PathOutsideAllowedRoots:
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(403)
+
+		e := new(jx.Encoder)
+		response.Encode(e)
+		if _, err := e.WriteTo(w); err != nil {
+			return errors.Wrap(err, "write")
+		}
+
+		return nil
+
+	default:
+		return errors.Errorf("unexpected response type: %T", response)
+	}
 }
 
 func encodeSaveDocumentResponse(response SaveDocumentRes, w http.ResponseWriter, span trace.Span) error {

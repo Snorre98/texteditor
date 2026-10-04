@@ -17,6 +17,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"texteditor/internal/pathutil"
 	"texteditor/internal/sqlmigrate"
 	"texteditor/internal/textformatter"
 	"texteditor/shared/dto"
@@ -27,6 +28,10 @@ import (
 // working tree (ADR-0020 §2).
 type DocumentStore interface {
 	Open(path string) (dto.OpenResult, error)
+	// Path returns a document's canonical absolute path by surrogate id. The
+	// Retriever uses it for chunk provenance and the Agent loop for the
+	// workspace fallback (ADR-0049 §2).
+	Path(documentID string) (string, error)
 	SaveTree(documentID string, tree []dto.BlockWrite, opts dto.SaveOptions) (dto.WriteResult, error)
 	Blocks(documentID string) ([]dto.Block, error)
 	ApplyEdit(ctx context.Context, documentID string, edit dto.BlockEdit) (dto.Revision, error)
@@ -144,6 +149,20 @@ func (s *store) lockFor(docID string) *sync.Mutex {
 		s.locks[docID] = m
 	}
 	return m
+}
+
+// Path returns a document's canonical absolute path by surrogate id (the
+// Retriever's provenance seam and the loop's workspace fallback).
+func (s *store) Path(documentID string) (string, error) {
+	var path string
+	err := s.db.QueryRow(`SELECT path FROM documents WHERE id = ?`, documentID).Scan(&path)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ErrDocumentNotFound
+	}
+	if err != nil {
+		return "", err
+	}
+	return path, nil
 }
 
 // Open resolves a document by canonical path (ADR-0047 §2): an existing row
@@ -1077,20 +1096,11 @@ func (s *store) blockIDs(documentID string) ([]string, error) {
 	return out, rows.Err()
 }
 
-// canonicalPath resolves a path to its canonical absolute form: symlinks are
-// evaluated (falling back to a clean absolute path when the file does not exist
-// yet) and the key is case-folded so aliases of the same file resolve to one
-// document row (ADR-0047 §2).
+// canonicalPath resolves a path to its canonical absolute form and case-folded
+// identity key through the shared pathutil discipline (ADR-0047 §2), so
+// document, workspace, corpus, and filesystem identity agree.
 func canonicalPath(path string) (canonical, key string) {
-	abs, err := filepath.Abs(path)
-	if err != nil {
-		abs = filepath.Clean(path)
-	}
-	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
-		abs = resolved
-	}
-	canonical = filepath.Clean(abs)
-	return canonical, strings.ToLower(canonical)
+	return pathutil.Canonical(path)
 }
 
 // contentHash returns the full SHA-256 content hash of the disk bytes — the
