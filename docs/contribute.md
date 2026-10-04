@@ -14,7 +14,7 @@ client/tauri/      the Tauri 2 + Vue 3 editor (dumb; generated Rust client +
                    engine spawned as a bundled sidecar, ADR-0021 §1)
 docs/writing-assistant/   architecture, ADRs, contracts, behavior specs
 tools/             build.sh (standalone daemon) · build-tauri.sh (desktop
-                   bundle: gates + sidecar + tauri build, ADR-0041) ·
+                   bundle: gates + sidecar + tauri build, ADR-0043) ·
                    install-daemon.sh (launchd)
 deploy/            launchd agent template (standalone daemon)
 ```
@@ -64,11 +64,15 @@ cd client/tauri && bun test && bun run typecheck
 cd client/tauri/src-tauri && cargo test         # sidecar handshake (needs the daemon)
 ```
 
-The 9 `.feature` behavior specs (`docs/writing-assistant/behaviors/`) are
+The 13 `.feature` behavior specs (`docs/writing-assistant/behaviors/`) are
 prose contracts, verified through the boundary tests — there is no Gherkin
 runner, and no CI yet (see `docs/writing-assistant/status.md`).
 
-## Tauri client details
+## Tauri client details (frozen, ADR-0044)
+
+The Tauri editor is landed but frozen — no new work. This section is retained
+for maintenance and for a future unfreeze (which requires an explicit decision
+against ADR-0044 and Rust codegen regeneration).
 
 - **Sidecar handshake** (`src-tauri/src/sidecar.rs`): spawn the bundled engine
   with `-bind 127.0.0.1 -port 0`, bootstrap the base URL from the startup log
@@ -92,7 +96,7 @@ runner, and no CI yet (see `docs/writing-assistant/status.md`).
 - **Sidecar binary naming**: `src-tauri/binaries/texteditor-<target-triple>`
   (e.g. `texteditor-aarch64-apple-darwin`); built from `server/` source by
   `tools/build-tauri.sh` (host triple from `rustc -vV`, always fresh —
-  ADR-0041). The one desktop-build entry point is `./tools/build-tauri.sh`
+  ADR-0043). The one desktop-build entry point is `./tools/build-tauri.sh`
   from the repo root; `--sidecar-only` is the dev refresh, `--skip-gates`
   skips the test gates. **Rust lives on the external SSD** — if `cargo`
   isn't on PATH (`tauri:dev`, `tauri:build`, and `cargo test` all shell out

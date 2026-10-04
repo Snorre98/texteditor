@@ -1,16 +1,18 @@
-# Implementation Sequence — Future (Mandatory)
+# Implementation Sequence — Track 2 (Landed, Frozen)
 
 Track 2 of the roadmap, referenced from
 [`implementation-sequence.md`](implementation-sequence.md). The phased execution
 detail (order, dependencies, recorded amendments) lives in
 [`implementation-sequence-track2.md`](implementation-sequence-track2.md); this
-document pins only *what* to build. These phases are
-**required, not optional**: the TUI (Plan C) is the proof-of-concept accelerator —
-the fastest path to a working system with a live token meter (ADR-0013) — but the
-shipped product is the engine deployed two ways (standalone daemon *and* Tauri
-sidecar) with the rich Tauri markdown editor. Nothing here is "if we get to it";
-it is sequenced *after* the POC only because the engine and OpenAPI contract must
-be locked first (contract-first, ADR-0002/0017).
+document pins only *what* was built.
+
+**Status: landed and frozen (ADR-0044).** Every phase below shipped (E1–E7,
+F6–F8). The Tauri editor and web target are no longer the active product: the
+TUI is the only actively developed client, and the active roadmap is the
+context-engine refocus
+([`implementation-sequence-context-engine.md`](implementation-sequence-context-engine.md)).
+Nothing here receives new work; unfreezing requires an explicit decision against
+ADR-0044. This document is retained as the record of what Track 2 built.
 
 This plan references ADRs only as the source of *what* to build; it decides only
 the *order*.

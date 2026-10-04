@@ -2,12 +2,12 @@
 Feature: Document versioning
   Every accepted edit is versioned and revertible, with paragraph-level
   granularity via stable block IDs.
-  Normative per ADR-0004, ADR-0020.
+  Normative per ADR-0004, ADR-0020, ADR-0039, ADR-0047.
 
   Scenario: Accepted AI edits produce a git commit
     Given a document with an accepted AI edit
     When the Document store commits on accept
-    Then a new commit exists with an auto-derived message naming the mode and block
+    Then a new commit exists with an auto-derived message naming the preset and block
 
   Scenario: Manual edits autosave on a silence interval
     Given a document the user is typing in directly
@@ -39,3 +39,21 @@ Feature: Document versioning
     Given three rewrites are proposed for paragraph P
     When the client lists candidates for P
     Then three candidates are diffed against the base, keyed by P's stable block ID
+
+  Scenario: Approving an edit writes through to the opened file
+    Given a candidate for block P is approved
+    When the engine commits the accept
+    Then the commit response reports writtenThrough true and the file path
+    And the file at that path contains the new block text
+
+  Scenario: External changes surface as a conflict, not a clobber
+    Given the file on disk changed after the engine last read it
+    When a write-through is attempted
+    Then the write is refused with file-changed-externally
+    And the engine reports the current on-disk hash
+
+  Scenario: Stale candidates cannot be committed
+    Given a candidate whose base revision no longer matches the block
+    When the commit re-validates it
+    Then it fails with guard-failed
+    And no bytes are written

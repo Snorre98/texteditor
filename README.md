@@ -1,8 +1,9 @@
 # texteditor
 
 A local-first writing assistant. One Go **engine** (REST/SSE, all logic and
-state), two **clients**: a terminal **TUI** and a **Tauri** desktop editor. Every
-token that goes into a model call is metered and visible.
+state), with a terminal **TUI** as the active client; the **Tauri** desktop
+editor is landed but frozen (ADR-0044). Every token that goes into a model call
+is metered and visible.
 
 Serving is reached only through the control daemon in the sibling
 [`macos-dev-config`](../macos-dev-config) repo — the engine never reads
@@ -18,6 +19,10 @@ Serving is reached only through the control daemon in the sibling
   [constraints](#constraints))
 
 ## Use the TUI
+
+> The TUI is being replaced by a standalone Ratatui (Rust) client (ADR-0046).
+> This OpenTUI client is frozen and stays usable until the new one reaches
+> parity.
 
 ```sh
 # 1. control daemon (sibling repo)
@@ -47,7 +52,7 @@ bun run src/index.tsx /path/to/note.md
 
 **Keys:** `enter` send · `a` accept candidate · `esc` quit.
 
-## Use the Tauri editor
+## Use the Tauri editor (frozen, ADR-0044)
 
 ```sh
 # 1. rebuild the engine sidecar (from the repo root) — ALWAYS after engine
@@ -70,7 +75,7 @@ bun run tauri:dev
 > running engine keeps the old binary until step 1 is re-run. This is a classic
 > stale-binary trap: the app UI looks fresh but the engine behind it is not.
 > `tools/build-tauri.sh` makes the trap impossible for shipped bundles (it
-> always rebuilds the sidecar first, ADR-0041); `--sidecar-only` is the
+> always rebuilds the sidecar first, ADR-0043); `--sidecar-only` is the
 > one-command dev refresh above.
 
 **What you can do:**
@@ -95,7 +100,7 @@ bun run tauri:dev
 ENGINE_PORT=9100 ./tools/install-daemon.sh
 ```
 
-**Tauri app** — the shipped desktop bundle, engine included (ADR-0041):
+**Tauri app** — the desktop bundle, engine included (ADR-0043; frozen, ADR-0044):
 
 ```sh
 ./tools/build-tauri.sh              # gates → fresh engine sidecar → deps → .app/.dmg

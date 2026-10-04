@@ -1,4 +1,4 @@
-# ADR-0041: One-script Tauri build — `tools/build-tauri.sh` owns sidecar + client
+# ADR-0043: One-script Tauri build — `tools/build-tauri.sh` owns sidecar + client
 
 Status: Accepted
 

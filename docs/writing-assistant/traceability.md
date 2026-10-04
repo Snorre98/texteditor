@@ -38,6 +38,7 @@ row: ADR-0001/0016 map to it and to §2/§5.2/§8.
 | 0028 | §4, §5.2, §8 | tool-routing | module-boundaries, interface, data-model, failure-semantics, state-machine | Q1 (router metered), Q2 (per-mode toggle), Q5 |
 | 0029 | §4, §5.2, §8 | edit-integrity | module-boundaries, interface, data-model, failure-semantics, state-machine | Q4 |
 | 0030 | §2, §3.2, §4, §8 | serving-control | data-model | Q2 |
+| 0031 | §6, §8 | token-metering, client-swap | interface | — |
 | 0032 | §5.2, §7, §8 | serving-control | module-boundaries, interface | Q2 |
 | 0033 | §3.2, §5.2, §7 | serving-control | module-boundaries, interface | Q2 |
 | 0034 | §5, §7 | — | — | — |
@@ -49,6 +50,12 @@ row: ADR-0001/0016 map to it and to §2/§5.2/§8.
 | 0040 | §3.2, §4, §7, §8 | fleet-observability, serving-control | interface, daemon-http, failure-semantics | Q2, Q5 |
 | 0041 | §3, §7 | chat-window, sessions | — | — |
 | 0042 | §3 | chat-window | — | — |
+| 0043 | §7 | — | — | — |
+| 0044 | §1, §4, §5.2, §7, §8, §10 | context-inspector | interface, data-model, failure-semantics | Q1, Q6 |
+| 0045 | §4, §5.2, §8 | provider-hotswap, token-metering | data-model | Q2 |
+| 0046 | §3, §7 | client-swap | module-boundaries | — |
+| 0047 | §5.2, §6, §8 | versioning | interface, data-model, failure-semantics | Q4 |
+| 0048 | §4, §5.2, §6, §8 | locate-anchor | interface, data-model | Q4, Q6 |
 
 ## Behavior contract ↔ quality scenario coverage
 
@@ -57,8 +64,9 @@ row: ADR-0001/0016 map to it and to §2/§5.2/§8.
 | Q1 (transparent token cost) | token-metering.feature |
 | Q2 (modifiability) | serving-control.feature, provider-hotswap.feature |
 | Q3 (hot-swappable serving) | provider-hotswap.feature |
-| Q4 (edit integrity) | versioning.feature |
+| Q4 (edit integrity) | versioning.feature, locate-anchor.feature |
 | Q5 (testability) | client-swap.feature (dumb generated clients) |
+| Q6 (explainable context) | context-inspector.feature, locate-anchor.feature |
 
 ## Behavior contract ↔ ADR coverage
 
@@ -75,6 +83,8 @@ row: ADR-0001/0016 map to it and to §2/§5.2/§8.
 | workspace.feature | 0035, 0036 |
 | fleet-observability.feature | 0040 |
 | chat-window.feature | 0041, 0042 |
+| context-inspector.feature | 0044, 0011, 0024, 0036 |
+| locate-anchor.feature | 0048, 0036, 0029, 0047 |
 
 ## Supersession notes
 
@@ -87,8 +97,9 @@ row: ADR-0001/0016 map to it and to §2/§5.2/§8.
 - ADR-0009/0010 → superseded by ADR-0016/0019 (mode field set; tool registry split).
 - ADR-0011 → superseded by ADR-0016 (meter scale-to-total), ADR-0022 (measurable
   target), and ADR-0024 (thinking fallback).
-- ADR-0013 → partially superseded by ADR-0023 (Solid renderer only; TUI-first,
-  Tauri-later still stands).
+- ADR-0013 → partially superseded by ADR-0023 (Solid renderer), then ADR-0046
+  (Ratatui TUI v2); the Tauri-later half is frozen by ADR-0044 (TUI-first
+  stands; Tauri landed and parked).
 - ADR-0014 → partially superseded by ADR-0021 (sidecar spawn mechanics only; the
   three-target deployment concept stands).
 - ADR-0016/0017/0020 → *extended* (not reversed) by ADR-0026: the `conversation_id`
@@ -122,6 +133,28 @@ row: ADR-0001/0016 map to it and to §2/§5.2/§8.
   `Mentions` assembler/meter component, `ContextBudget.MaxMentionTokens`).
   The `Task`/`MeterEvent` spec amendments land in `api/openapi.yaml` at
   implementation, in lockstep with codegen regeneration.
+- ADR-0013 §2, ADR-0014, ADR-0021 (Tauri-facing parts), ADR-0037, ADR-0039,
+  ADR-0041, ADR-0042, ADR-0043 → *frozen* (not superseded) by ADR-0044: landed
+  artifacts remain in the tree, no active development; the frontend-swap
+  guarantee stands, and unfreezing requires an explicit decision against
+  ADR-0044 plus Rust codegen regeneration.
+- ADR-0019 → *amended* by ADR-0045: the mode schema is reduced to `name`,
+  `systemPrompt`, `defaultModel`; all behavioral fields (`agentic`, `maxSteps`,
+  `toolAllowlist`, `toolCalling`, `contextBudget`, `params`, `preamble`,
+  `kind`) are removed and replaced by one fixed pipeline plus
+  `config/pipeline.json`.
+- ADR-0023 → superseded by ADR-0046 (Ratatui TUI v2); OpenTUI is frozen and
+  retired on parity. `client-swap.feature`'s Solid scenario is replaced.
+- ADR-0028 → *parked* by ADR-0045: the loop no longer reads `toolCalling`; the
+  `ToolDecider` package and routergate remain in-tree but unwired.
+- ADR-0039 → *amended* by ADR-0047: approve is the write boundary (auto
+  write-through), open and pre-write hash checks surface
+  `file-changed-externally` instead of clobbering, candidates are newest-first
+  and base-validated, guards are live on the model path, and symlink targets
+  are preserved.
+- ADR-0044 → *extended* (not reversed) by ADR-0045 (the decision layer gets
+  one global policy, not per-mode config) and ADR-0046 (Rust codegen is
+  unfrozen for the Ratatui TUI only; Tauri/web remain frozen).
 
 Superseded ADRs remain in the log, untouched; supersession is recorded in the
 superseding ADR's header and in the §9 index.

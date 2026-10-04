@@ -26,22 +26,25 @@ Fleet gateway depends on; the client is built last, from the locked OpenAPI spec
 
 ## Roadmap overview
 
-Two tracks, in order:
+Three tracks:
 
-- **Track 1 — proof of concept (build now).** Engine (Plan A) + serving control
-  (Plan B) + the TUI client (Plan C). The TUI is the *fastest path to a working
-  system with a live token meter* (ADR-0013) — it is the POC accelerator, not the
-  destination.
-- **Track 2 — mandatory completion (build after the POC).** Engine deployment &
-  packaging (Plan E) and the Tauri markdown editor (Plan F). These are **required**,
-  not optional: the two-way engine shipping (standalone daemon *and* Tauri sidecar)
-  and the rich Tauri editor are the shipped product. Track 2 lives in its own
-  dedicated plan — [`implementation-sequence-future.md`](implementation-sequence-future.md)
-  (what to build) with the phased execution detail in
-  [`implementation-sequence-track2.md`](implementation-sequence-track2.md) (order).
+- **Track 1 — proof of concept (landed).** Engine (Plan A) + serving control
+  (Plan B) + the TUI client (Plan C).
+- **Track 2 — deployment & Tauri editor (landed, frozen).** Engine deployment &
+  packaging (Plan E) and the Tauri markdown editor (Plan F). Shipped; frozen by
+  ADR-0044 — the TUI is the active client. Record:
+  [`implementation-sequence-future.md`](implementation-sequence-future.md) (what
+  was built) with the phased detail in
+  [`implementation-sequence-track2.md`](implementation-sequence-track2.md)
+  (order).
+- **Track 3 — context engine (active).** ADR-0044 as extended by ADR-0045–0048:
+  trustworthy write-through, prompt presets + one pipeline, real RAG + context
+  inspector, `/locate` anchoring, and the Ratatui TUI v2 —
+  [`implementation-sequence-context-engine.md`](implementation-sequence-context-engine.md).
 
-The router (Plan D) is additive and off-by-default in both tracks: its *seam* is
-built in Track 1, its *enablement* is deferred (see Plan D).
+The router (Plan D) is additive and off-by-default: its *seam* is built in
+Track 1, its *enablement* is deferred (see Plan D); the ADR-0044 decision layer
+is a separate, broader seam.
 
 ---
 

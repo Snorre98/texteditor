@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
 # Build the Tauri desktop editor: verification gates -> the Go engine rebuilt as
 # the bundled sidecar -> bun deps -> `tauri build` (.app/.dmg). The one entry
-# point for the desktop bundle (ADR-0041). Run from the repo root or tools/.
+# point for the desktop bundle (ADR-0043). Run from the repo root or tools/.
 #
 # The sidecar is ALWAYS rebuilt from server/ source first — this is the fix for
 # the stale-binary trap (an app whose UI is fresh but whose engine is not).
 #
 # Flags:
-#   --skip-gates     skip go/bun/cargo test gates (ADR-0041 §3)
+#   --skip-gates     skip go/bun/cargo test gates (ADR-0043 §3)
 #   --sidecar-only   rebuild only the sidecar binary, then print the tauri:dev
 #                    hint (the dev-refresh path; no bundle is produced)
 #
-# Env knobs (respected, never auto-set — ADR-0041 §4):
+# Env knobs (respected, never auto-set — ADR-0043 §4):
 #   RUSTUP_HOME/CARGO_HOME/PATH — where cargo lives (this machine keeps Rust on
 #                    the external SSD; export the SSD paths if `cargo` is not
 #                    on PATH, see client/tauri/README.md)
@@ -42,7 +42,7 @@ if ! command -v cargo >/dev/null 2>&1; then
   exit 1
 fi
 
-# ---- 2. Verification gates (ADR-0041 §3) --------------------------------------
+# ---- 2. Verification gates (ADR-0043 §3) --------------------------------------
 if [[ "$SKIP_GATES" -eq 0 && "$SIDECAR_ONLY" -eq 0 ]]; then
   echo "== gates: engine tests"
   (cd "$REPO_ROOT/server" && CGO_ENABLED=0 go test ./...)
@@ -60,7 +60,7 @@ if [[ "$SKIP_GATES" -eq 0 && "$SIDECAR_ONLY" -eq 0 ]]; then
   fi
 fi
 
-# ---- 3. Sidecar — always rebuilt from source (ADR-0041 §2, ADR-0021 §1) --------
+# ---- 3. Sidecar — always rebuilt from source (ADR-0043 §2, ADR-0021 §1) --------
 echo "== sidecar: build engine for the host target triple"
 HOST_TRIPLE="$(rustc -vV | awk '/^host:/{print $2}')"
 SIDECAR="$TAURI_DIR/src-tauri/binaries/texteditor-$HOST_TRIPLE"
@@ -77,7 +77,7 @@ if [[ "$SIDECAR_ONLY" -eq 1 ]]; then
   exit 0
 fi
 
-# ---- 4. Frontend deps + Tauri bundle (ADR-0041 §5) ----------------------------
+# ---- 4. Frontend deps + Tauri bundle (ADR-0043 §5) ----------------------------
 echo "== deps: bun install (frozen lockfile)"
 (cd "$TAURI_DIR" && bun install --frozen-lockfile)
 

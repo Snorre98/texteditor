@@ -208,15 +208,39 @@ paths:
   /documents/{id}/commits:
     post:
       operationId: commitDocument
+      summary: Accept staged candidates (one commit, write-through)
+      description: >
+        Accepts the staged candidates (newest-first, deterministic), re-validates
+        each candidate's base content hash, formats, makes one git commit with an
+        auto-derived message (`mode · blockID · diff`), and mirrors the canonical
+        markdown back to the opened file (ADR-0047 §1/§5/§8). An empty accept
+        creates no commit. If the file on disk changed since the engine last read
+        it, the write-through is refused with `file-changed-externally` unless
+        `overwrite` is true — never a silent clobber.
       parameters:
         - $ref: '#/components/parameters/DocumentID'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CommitRequest'
       responses:
         '200':
-          description: committed
+          description: committed (revision populated; write-through reported)
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/Revision'
+        '409':
+          description: >
+            The file at `documents.path` changed externally since the engine last
+            read it; no bytes were written. Reload the document or retry with
+            `overwrite: true`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FileChangedExternally'
 
   /documents/{id}/tree:
     put:
@@ -232,7 +256,9 @@ paths:
         HEAD). A manual save of a block drops its open candidates. When
         `writeThrough` is true (explicit Save / Cmd+S, not the periodic autosave),
         the engine also mirrors the canonical markdown back to the opened file
-        path (ADR-0039).
+        path (ADR-0039). Per ADR-0047 §4 a no-op save still re-syncs a stale disk
+        (no new commit), and an external change surfaces as a
+        `file-changed-externally` conflict — never a silent clobber.
       parameters:
         - $ref: '#/components/parameters/DocumentID'
       requestBody:
@@ -248,6 +274,15 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Revision'
+        '409':
+          description: >
+            The file at `documents.path` changed externally since the engine last
+            read it; no bytes were written. Reload the document or retry with
+            `overwrite: true`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FileChangedExternally'
 
   /documents/{id}/history:
     get:
@@ -560,11 +595,18 @@ components:
           type: string
         path:
           type: string
+          description: The canonical (symlink-resolved) absolute path the engine keys the document by (ADR-0047 §2).
         rootBlockId:
           type: string
         updatedAt:
           type: integer
           format: int64
+        externalChange:
+          type: boolean
+          description: >
+            True when the file changed on disk since the engine last read it and
+            was re-read into the worktree on this open (ADR-0047 §2). Aliases of
+            the same file resolve to one document row.
 
     Entry:
       type: object

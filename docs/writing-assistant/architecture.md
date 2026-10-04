@@ -8,15 +8,16 @@ arc42 skeleton, 12 sections. Related: [ADR log](adr/), [behavioral contracts](be
 
 ### 1.1 Requirements overview
 
-A local-first, single-machine assistant for academic writing and editing. You
-drive it from a terminal TUI today and a richer markdown editor later; it reasons
-over your own notes and ingested literature, edits markdown in place, and makes
-every token that goes into a model call visible. It is **not** an inference
-engine (that's delegated) and **not** a full IDE. One user governs it, and that
-user also controls — from `macos-dev-config` — **which models are served on the
-machine**.
+A local-first, single-machine assistant for academic writing and editing. The
+active client is the terminal TUI (Ratatui, Rust — ADR-0046); the Tauri/web
+editor is landed but **frozen** (ADR-0044). The engine is a **context engine**: it indexes the author's markdown
+vault, retrieves and gates evidence, assembles the model payload, and makes
+every token — and every inclusion, exclusion, and drop — visible and replayable.
+It is **not** an inference engine (that's delegated) and **not** a full IDE. One
+user governs it, and that user also controls — from `macos-dev-config` — **which
+models are served on the machine**.
 
-### 1.2 Quality goals (top 5)
+### 1.2 Quality goals (top 6)
 
 Ranked; each has a measurable, Gherkin-style scenario and links to its ADR.
 
@@ -27,6 +28,7 @@ Ranked; each has a measurable, Gherkin-style scenario and links to its ADR.
 | Q3 | **Hot-swappable serving** | Given a preferred model is down, when a turn runs, then a tagged fallback serves it and the substitution is labeled | ADR-0005, ADR-0015 |
 | Q4 | **Edit integrity** | Given any accepted edit, when it is committed, then it is versioned in git and revertible at word-level granularity | ADR-0004 |
 | Q5 | **Testability** | Given any module, when exercised through its public API, then it can be verified in isolation against a stubbed endpoint | ADR-0001 |
+| Q6 | **Explainable context** | Given any turn, when the context is assembled, then a persisted snapshot reports every message's component and provenance, the retrieval/decision outcomes, and every truncation or drop is labeled | ADR-0044, ADR-0011 |
 
 ### 1.3 Stakeholders
 
@@ -55,8 +57,8 @@ Ranked; each has a measurable, Gherkin-style scenario and links to its ADR.
 
 ```mermaid
 flowchart LR
-    U([User]) --> T[TUI]
-    U --> M[Markdown editor]
+    U([User]) --> T[TUI — active]
+    U --> M[Markdown editor — frozen, ADR-0044]
     T --> E[Writing Assistant engine]
     M --> E
     E --> S[(Serving: llama.cpp / MLX, Metal)]
@@ -73,7 +75,7 @@ flowchart LR
 | Fleet manifest | file (JSON) + JSON Schema + semantic lanes validator | two-tier, in macos-dev-config, read only by the daemon (ADR-0018) |
 | Serving lifecycle | the control daemon's HTTP verb contract | `serve.sh` wrapped by the daemon (ADR-0007, ADR-0025) |
 | Model downloads | HF API (`huggingface-cli`) | provisioning (ADR-0008) |
-| Clients | REST + SSE (the OpenAPI contract) | codegen: ogen (Go) · Hey API + Zod (TS) · openapi-to-rust (Rust) (ADR-0017) |
+| Clients | REST + SSE (the OpenAPI contract) | codegen: ogen (Go) · Hey API + Zod (TS) · openapi-to-rust (Rust) (ADR-0017); Rust codegen regenerated for the Ratatui TUI (ADR-0046); Tauri/web remain frozen (ADR-0044) |
 
 ## 4. Solution Strategy
 
@@ -95,6 +97,10 @@ The architecture's defining moves:
 5. **Storage split by concern.** Per-service SQLite files for metadata/search/
    embeddings/history; git for versioning; the `Retriever` behind an interface
    (ADR-0004, 0020).
+6. **Context is the product.** The engine's value is what reaches the model:
+   indexed vault → retrieval → decision gate → one metered assembler → provider,
+   with a persisted, explainable snapshot per turn (ADR-0044, ADR-0011). The
+   TUI is the active client; Tauri/web are frozen.
 
 ## 5. Building Block View
 
@@ -103,8 +109,8 @@ The architecture's defining moves:
 ```mermaid
 flowchart TB
     subgraph clients[Clients]
-        TUI[TUI — OpenTUI/Solid]
-        Tauri[Tauri editor — Rust + Vue + CM6]
+        TUI[TUI — Ratatui (Rust), active — ADR-0046]
+        Tauri[Tauri editor — frozen, ADR-0044]
     end
     Engine[Go engine — single daemon]:::engine
     subgraph serving[Serving — macos-dev-config]
@@ -282,10 +288,10 @@ flowchart TD
 flowchart TB
     subgraph mac[Mac mini M4 / 32GB]
         Engine[Go engine: daemon or Tauri sidecar]
-        subgraph desktop[Desktop]
+        subgraph desktop[Desktop — frozen, ADR-0044]
             Tauri[Tauri app + sidecar engine]
         end
-        subgraph web[Web]
+        subgraph web[Web — frozen, ADR-0044]
             UI[Vue+CodeMirror served]
         end
         TUI[TUI]
@@ -300,9 +306,13 @@ flowchart TB
     Engine -->|REST| Runners
 ```
 
+- **TUI: the active client** (ADR-0044) — standalone Ratatui (Rust) terminal
+  client, same contract (ADR-0046); the OpenTUI client is frozen and retired on
+  parity.
 - Desktop (Tauri): Go engine bundled as a sidecar, spawned by the Rust core.
+  **Frozen** — landed, no new work (ADR-0044).
 - Web: same UI served locally; engine self-hosted on the machine/LAN.
-- TUI: OpenTUI terminal client, same contract.
+  **Frozen** with Tauri (ADR-0044).
 
 ## 8. Cross-cutting Concepts
 
@@ -316,7 +326,12 @@ flowchart TB
 | Streaming | SSE typed events + NDJSON fallback; events turnID-correlated — ADR-0012, ADR-0017 |
 | Versioning | git (coarse, commit-per-AI-edit + autosave) + stable UUID block IDs (fine) + candidate side-table — ADR-0004, ADR-0020 |
 | Fleet policy | MoE over dense, 14B+ citation floor, temperature sheet — ADR-0015 |
-| Tool routing | optional `ToolDecider`: writer emits `request_tool`, specialist resolves tool+args; per-mode `toolCalling` toggle; fail-fast sync gate — ADR-0028 |
+| Tool routing | optional `ToolDecider`: parked — the loop no longer reads `toolCalling`; seam and startup gates remain in-tree, unwired — ADR-0028, ADR-0045 |
+| Prompt presets | modes are `name` + `systemPrompt` + `defaultModel`; one fixed pipeline (all tools, one global step cap and budget set); tabs are presentation, the wire term stays `mode` — ADR-0045 |
+| Write-through safety | approve = commit + atomic mirror; open and pre-write hash checks; typed `file-changed-externally` conflict; newest-first, base-validated candidates; guards live on the model path — ADR-0047 (amends ADR-0039) |
+| Vault locate | `/locate` command; deterministic markdown-stripped exact-then-fuzzy search over the open document then the vault index; typed `LocateResult`; anchored, guarded edit — ADR-0048 |
+| Decision layer | retrieval gating as a second metered model call; one global pipeline policy; fail-open with labeled degradation — ADR-0044 (extends ADR-0028); no per-mode config (ADR-0045) |
+| Context inspector | persisted per-turn snapshot: assembled messages with component + provenance, retrieval/decision outcomes, budgets, labeled drops; engine data, clients render — ADR-0044, ADR-0011 |
 | Edit formatting | the engine owns the bytes: whole-block edits, `TextFormatter` normalize/validate/format, block-level guard, structured edit result — ADR-0029 |
 | Workspace navigation | engine-served shallow directory listing (Workspace leaf) + turn-scoped, metered `@`-mentions that are read-only context, never versioned documents — ADR-0035, ADR-0036 |
 | Inference control surface | a future `InferenceControl` interface *behind* the Provider seam (a sibling of `ProviderGateway`, not a change to it); the "knobs" (logprobs, grammar, KV, speculative decoding) are decoupled from the OpenAI-compatible contract for the MVP — `research/vision-native-local-llm-text-editing.md` |
@@ -340,22 +355,22 @@ Full records in [adr/](adr/). Index:
 | 0010 | Tool registry: tools as data with JSON schemas | Superseded by 0016/0019 |
 | 0011 | Context assembler: single metered choke point | Superseded by 0016 (scale-to-total), 0022 (measurable target), 0024 (thinking tokenizer) |
 | 0012 | SSE typed events + NDJSON fallback | Accepted |
-| 0013 | Clients: OpenTUI first, Tauri later, both dumb | Partially superseded by 0023 (OpenTUI renderer only) |
-| 0014 | Deployment targets + capability adapter | Partially superseded by 0021 (sidecar spawn mechanics only) |
+| 0013 | Clients: OpenTUI first, Tauri later, both dumb | Partially superseded by 0023, then 0046 (TUI technology); Tauri half frozen (0044) |
+| 0014 | Deployment targets + capability adapter | Partially superseded by 0021 (sidecar spawn mechanics only); Tauri/web targets frozen (0044) |
 | 0015 | Fleet sizing policy (MoE, 14B+ floor, temperature) | Accepted |
 | 0016 | Module inventory + exact public APIs, pure-DTO boundaries | Accepted |
-| 0017 | OpenAPI contract surface: endpoints, SSE, codegen (ogen/Zod/openapi-to-rust) | Accepted |
+| 0017 | OpenAPI contract surface: endpoints, SSE, codegen (ogen/Zod/openapi-to-rust) | Accepted — Rust codegen regenerated for the Ratatui TUI (0046); Tauri/web remain frozen (0044) |
 | 0018 | Fleet manifest: two-tier + serve.sh migration + lanes + async provision | Partially superseded by 0030 (runner enum narrowed) |
-| 0019 | Modes/tools as data: engine-repo, fail-fast, name-keyed handler bind | Accepted |
+| 0019 | Modes/tools as data: engine-repo, fail-fast, name-keyed handler bind | Amended by 0045 (behavioral mode fields removed; one turn pipeline) |
 | 0020 | Storage: commit cadence, worktree, UUID blocks, candidates, Chunker | Accepted |
-| 0021 | Deployment + security: sidecar spawn, bind policy, Tailscale-only | Accepted |
+| 0021 | Deployment + security: sidecar spawn, bind policy, Tailscale-only | Accepted — sidecar/Tauri-facing parts frozen (0044) |
 | 0022 | Quality goals as measurable SEI scenarios | Accepted |
-| 0023 | OpenTUI renderer: Solid | Accepted |
+| 0023 | OpenTUI renderer: Solid | Superseded by 0046 (Ratatui TUI v2) |
 | 0024 | Thinking-token attribution: bundled tokenizer fallback | Accepted |
 | 0025 | Serving control transport: HTTP control daemon wrapping serve.sh | Accepted |
 | 0026 | Sessions as first-class entities (session store, per-session concurrency, budget) | Accepted |
 | 0027 | Locked-service tenet: shared-DTO ownership + stream seams; daemon sole manifest reader | Accepted |
-| 0028 | Tool decider: optional router ("writer signals, specialist decides") | Accepted |
+| 0028 | Tool decider: optional router ("writer signals, specialist decides") | Accepted — parked by 0045 (no mode enables the router; seam unwired) |
 | 0029 | Edit verification + TextFormatter: "the engine owns the bytes" | Accepted |
 | 0030 | Fleet substrate: pure llama.cpp + MLX on Metal | Accepted |
 | 0031 | SSE server transport is hand-framed; ogen scope clarified | Accepted |
@@ -364,9 +379,18 @@ Full records in [adr/](adr/). Index:
 | 0034 | Repository layout: client/server split, contract at root | Accepted |
 | 0035 | Directory listing: engine-served Workspace capability | Accepted |
 | 0036 | File mentions: metered, turn-scoped context attachments | Accepted |
-| 0037 | API server CORS policy: explicit origin allowlist for the webview/web targets | Accepted |
+| 0037 | API server CORS policy: explicit origin allowlist for the webview/web targets | Accepted — web/Tauri frozen (0044) |
 | 0038 | Manual-edit wire route: `PUT /documents/{id}/tree` autosave path | Accepted |
-| 0039 | Manual saves and accepted edits write through to the opened file | Accepted |
+| 0039 | Manual saves and accepted edits write through to the opened file | Amended by 0047 (auto write-through + conflict detection); Tauri-facing flow frozen (0044) |
+| 0040 | Fleet observability surface: `/fleet`, batch status, last-good cache | Accepted |
+| 0041 | Floating draggable chat window (Tauri) | Accepted — frozen (0044) |
+| 0042 | Tailwind v4 + shadcn-vue for the Tauri client | Accepted — frozen (0044) |
+| 0043 | One-script Tauri build (`tools/build-tauri.sh`) | Accepted — frozen (0044) |
+| 0044 | Context-engine north-star: TUI-first, explainable context, decision layer | Accepted — extended by 0045 (no per-mode decision config) and 0046 (Rust TUI) |
+| 0045 | Prompt presets: one turn pipeline, behavioral mode fields removed | Accepted |
+| 0046 | TUI v2: standalone Ratatui (Rust) client, replacing OpenTUI | Accepted |
+| 0047 | Auto write-through on approve with external-change detection | Accepted |
+| 0048 | `/locate`: anchor a pasted chunk to its vault location | Accepted |
 
 ## 10. Quality Requirements
 
@@ -379,6 +403,7 @@ flowchart TD
     Q --> Swappability[Hot-swappable serving]
     Q --> Integrity[Edit integrity]
     Q --> Testability
+    Q --> Explainability[Explainable context]
 ```
 
 ### 10.2 Quality scenarios
@@ -392,6 +417,7 @@ Each is an SEI general scenario with a concrete response-measure (ADR-0022).
 | Q3 | Given a down model, a tagged fallback serves and is labeled (ADR-0015/0016) | fallback ≤60 s cold; degradation label guaranteed |
 | Q4 | Given an accepted edit, it is git-versioned and word-level revertible (ADR-0020) | diff ≤100 ms; revert isolates blocks |
 | Q5 | Given any module, it is verifiable in isolation through its public API (ADR-0001/0016) | 100% of public ops stub-tested |
+| Q6 | Given any turn, the assembled context is persisted and explainable — provenance per message, decision outcomes, labeled drops (ADR-0044/0011) | snapshot retrievable after the turn; 0 unlabeled drops; snapshot ↔ payload agreement |
 
 ### 10.2b Functional behavior contracts
 
@@ -406,6 +432,10 @@ Each is an SEI general scenario with a concrete response-measure (ADR-0022).
 | tool-routing.feature | writer-signals-router-decides, per-mode toggle, fail-fast gates | 0028 |
 | edit-integrity.feature | whole-block edits, engine-owned formatting, block-level guard, structured result | 0029 |
 | workspace.feature | engine-served directory listing, `@`-mentions as metered read-only context | 0035, 0036 |
+| context-inspector.feature | persisted turn snapshots: provenance, retrieval/decision outcomes, labeled drops | 0044, 0011, 0024, 0036 |
+| fleet-observability.feature | fleet state surface + last-good cache + remediation | 0040 |
+| chat-window.feature | Tauri floating chat window (frozen) | 0041, 0042 |
+| locate-anchor.feature | `/locate` chunk anchoring: deterministic resolve, ambiguity, anchored guarded edit | 0048, 0036, 0029, 0047 |
 
 ### 10.3 Definition of done (documentation)
 
@@ -448,6 +478,13 @@ The documentation set is complete when:
 | Session | a persisted conversation — doc-level or anchored to a block selection; multiple per file, runnable concurrently |
 | Pure DTO | a boundary type with no behavior; the only thing that crosses a module seam (locked-service tenet) |
 | Provision | fetch model weights via the HF API (async, observable) |
+| Vault | the author's markdown corpus (thesis chapters + notes) that is indexed and retrieved over |
+| Context snapshot | the persisted per-turn record of the assembled payload: messages, component + provenance, retrieval/decision outcomes, budgets, labeled drops |
+| Context inspector | the contract surface + TUI panel that renders context snapshots (ADR-0044) |
+| Decision layer | the optional typed-decision model (Laya) that gates retrieval as a second metered call under one global policy (ADR-0044, ADR-0045) |
+| Preset | a mode's minimal form — name + system prompt + default model; presented as TUI tabs (ADR-0045) |
+| Locate anchor | the document + block resolved from a pasted chunk by `/locate` (ADR-0048) |
+| Write-through conflict | `file-changed-externally`: the disk file changed since the engine last read it; the write is refused, never clobbered (ADR-0047) |
 
 ---
 

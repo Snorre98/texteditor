@@ -1,6 +1,6 @@
 # Academic Writing Assistant — General Architecture
 
-A local-first, single-machine assistant for academic writing and editing. You drive it from a terminal UI or a Tauri markdown editor; it reasons over your own notes and ingested literature, edits markdown in place, and — deliberately — makes every token that goes into a model call visible, so the system itself becomes the way you learn what costs tokens and what doesn't.
+A local-first, single-machine assistant for academic writing and editing. You drive it from the terminal UI; the Tauri markdown editor is landed but frozen (ADR-0044). It reasons over your own notes and ingested literature, edits markdown in place, and — deliberately — makes every token that goes into a model call visible, so the system itself becomes the way you learn what costs tokens and what doesn't.
 
 > **Status:** see [`writing-assistant/status.md`](writing-assistant/status.md) for
 > what is complete and what is TODO, cross-checked against the ADR set and the code.
@@ -10,8 +10,8 @@ It is **not** an inference engine (that's delegated) and **not** a full IDE.
 ## Stack
 
 - **Engine/backend** — **Go**, a single static binary running as a local daemon.
-- **TUI** — [OpenTUI](https://opentui.com), the terminal-UI library from the OpenCode team (Zig core, TypeScript bindings; write TS directly or via React/Solid).
-- **Markdown editor** — **Tauri 2** (Rust core + system WebView) with a Vue 3 + CodeMirror 6 frontend, in the spirit of [Texodus](https://github.com/w512/texodus). Component system: Tailwind v4 + shadcn-vue (Reka UI), ADR-0042. No Node at runtime; Node/Bun is build-time only.
+- **TUI** — [OpenTUI](https://opentui.com), the terminal-UI library from the OpenCode team (Zig core, TypeScript bindings; write TS directly or via React/Solid). **Frozen** — being replaced by a standalone Ratatui (Rust) client, ADR-0046.
+- **Markdown editor** — **Tauri 2** (Rust core + system WebView) with a Vue 3 + CodeMirror 6 frontend, in the spirit of [Texodus](https://github.com/w512/texodus). Component system: Tailwind v4 + shadcn-vue (Reka UI), ADR-0042. No Node at runtime; Node/Bun is build-time only. **Frozen (ADR-0044)** — landed, no active development.
 - **Model serving** — external, over REST, reached through the machine's control daemon (`macos-dev-config`); runners are `llama.cpp | mlx-lm | mlx-vlm | delegate` on the Metal GPU (ADR-0030).
 - **Database** — SQLite via `modernc.org/sqlite` (pure Go, no CGO), the single-file app DB.
 - **Contract** — a single OpenAPI/JSON Schema spec (see below), the source of truth shared by every client.
@@ -21,7 +21,7 @@ It is **not** an inference engine (that's delegated) and **not** a full IDE.
 ```
 ┌────────────────────────────────────────────────────────────────┐
 │ Layer 3 — Clients (dumb, swappable)                             │
-│   OpenTUI TUI (TS)   ·   Markdown editor (Tauri: Rust+Vue+CM6)  │
+│   TUI (Ratatui v2)   ·   Markdown editor (Tauri — frozen)       │
 └──────────────────────────┬─────────────────────────────────────┘
                            │ one versioned REST API + SSE (typed events)
 ┌──────────────────────────▼─────────────────────────────────────┐
@@ -86,14 +86,14 @@ SQLite (via `modernc.org/sqlite`, pure Go, no CGO) is the local store holding ev
 - **FTS5** full-text index (keyword retrieval)
 - **token-metering events** and **conversation history**
 
-Vector search is just *one* feature of this database, alongside FTS5, enabling **hybrid retrieval** (semantic + lexical) — important for academic citation-matching. `git` remains the versioning engine (coarse history + block candidates); SQLite is the query/metadata/vector layer.
+Vector search is just *one* feature of this database, alongside FTS5, designed to enable **hybrid retrieval** (semantic + lexical) — important for academic citation-matching. As-built, the query path is vec0-KNN-only and FTS5 is not yet queried; the hybrid fusion is Phase 1 of the context-engine plan (ADR-0044, see [`writing-assistant/status.md`](writing-assistant/status.md)). `git` remains the versioning engine (coarse history + block candidates); SQLite is the query/metadata/vector layer.
 
 The **Retriever** sits behind a Go interface, so the storage backend (SQLite-vec today) is swappable without touching the agent loop, modes, or context assembler.
 
 ## Layer 3 — Clients
 
 - **OpenTUI TUI** — panels: markdown editor, chat, live token meter, model/mode switcher, RAG results, diff preview. OpenTUI ships native `Markdown`, `Diff`, and `TextTable` renderables.
-- **Tauri markdown editor** — CodeMirror 6 editor (syntax highlighting, large-doc performance), live GFM preview, Mermaid, workspace sidebar, plus assistant affordances: a **floating, draggable chat window** over the workspace (ADR-0041 — drag/resize/minimize/snap-dock, session list with resume, markdown bubbles, collapsible meter/RAG, model+mode selectors) and **side-by-side candidate views** (`@codemirror/merge`).
+- **Tauri markdown editor (frozen, ADR-0044)** — CodeMirror 6 editor (syntax highlighting, large-doc performance), live GFM preview, Mermaid, plus assistant affordances: a **floating, draggable chat window** over the workspace (ADR-0041 — drag/resize/minimize/snap-dock, session list with resume, markdown bubbles, collapsible meter/RAG, model+mode selectors) and **side-by-side candidate views** (`@codemirror/merge`).
 
 Both talk to the *same* API. The Tauri app can keep native file browsing/OS integration, but all edits and versioning go through the engine so history is consistent across clients.
 

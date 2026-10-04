@@ -144,7 +144,7 @@ UI also requires the engine's CORS allowlist to include the serving origin
 ## Build (Tauri shell, F8)
 
 ```sh
-# from the repo root — the one desktop-build entry point (ADR-0041)
+# from the repo root — the one desktop-build entry point (ADR-0043)
 ./tools/build-tauri.sh              # gates → fresh engine sidecar → deps → bundle
 ./tools/build-tauri.sh --skip-gates # fast path, no test gates
 ./tools/build-tauri.sh --sidecar-only   # dev refresh: rebuild the sidecar, print the tauri:dev hint

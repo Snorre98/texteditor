@@ -8,16 +8,17 @@ plus the `macos-dev-config` sibling repo). Markers:
 - ✅ **Complete** — landed, tested, consistent with the ADRs.
 - 🚧 **TODO** — not done (deferred by an ADR, or an open gap).
 
-Last verified: 2026-09-07.
+Last verified: 2026-10-04.
 
 ## Snapshot
 
 | Area | Status |
 |---|---|
 | Track 1 — Engine (A) · Serving control (B) · TUI (C) | ✅ |
-| Router seam (D2–D5) + enablement seam (D1 minus the ML job) | ✅ (D1 **uncommitted**) |
-| Track 2 — Deployment (E) · Tauri editor (F) | ✅ |
+| Router seam (D2–D5) + enablement seam (D1 minus the ML job) | ✅ committed (`504cd16`) |
+| Track 2 — Deployment (E) · Tauri editor (F) | ✅ landed — **frozen** (ADR-0044) |
 | Fleet observability surface (ADR-0040 — `/fleet`, batch status, selectors) | ✅ |
+| Context-engine refocus (write-through safety, presets, RAG wiring, context inspector, `/locate`, Ratatui TUI) | 🚧 active roadmap — [`plans/implementation-sequence-context-engine.md`](plans/implementation-sequence-context-engine.md) |
 | D1 ML fine-tune (Needle 2 `.cact` + flip a mode to `router`) | 🚧 deferred by trigger |
 | CI automation | 🚧 none |
 | `InferenceControl` surface (risk #9) | 🚧 deferred |
@@ -28,8 +29,8 @@ Last verified: 2026-09-07.
 | Item | Status | Notes |
 |---|---|---|
 | Go engine — single static binary, no CGO (ADR-0003) | ✅ | `server/cmd/texteditor`; 20 `internal/*` packages |
-| OpenTUI TUI (TS/Solid) | ✅ | `client/tui/` |
-| Tauri 2 + Vue 3 + CodeMirror 6 editor | ✅ | `client/tauri/` (landed in Track 2; no longer "later"); Tailwind v4 + shadcn-vue (ADR-0042) power the floating chat window |
+| OpenTUI TUI (TS/Solid) | ⏸ frozen | `client/tui/` — replaced by the Ratatui TUI v2 (ADR-0046); retired on parity |
+| Tauri 2 + Vue 3 + CodeMirror 6 editor | ⏸ frozen | `client/tauri/` (landed in Track 2; frozen by ADR-0044 — no new work); Tailwind v4 + shadcn-vue (ADR-0042) power the floating chat window |
 | Model serving — external, over REST | ✅ | reached via the `macos-dev-config` control daemon; runners `llama.cpp \| mlx-lm \| mlx-vlm \| delegate` (ADR-0030 — **no Ollama/LM Studio**) |
 | SQLite via `modernc.org/sqlite` | ✅ | four per-service files: `app.db`, `index.db`, `meter.db`, `sessions.db` |
 | Single OpenAPI/JSON Schema contract | ✅ | `api/openapi.yaml`; codegen → ogen (Go) + Hey API (TS) + `openapi-to-rust` (Rust) |
@@ -38,7 +39,7 @@ Last verified: 2026-09-07.
 
 | Layer | Status | Notes |
 |---|---|---|
-| Layer 3 — Clients (dumb, swappable) | ✅ | TUI + Tauri editor + web, one contract (ADR-0014) |
+| Layer 3 — Clients (dumb, swappable) | ✅ | TUI v2 (Ratatui, ADR-0046) in progress; OpenTUI + Tauri editor + web frozen; one contract (ADR-0014) |
 | API contract | ✅ | 20 routes incl. Track-1.5 + ADR-0038/0040 amendments; the deferred `/sessions/{id}/meter` is intentionally absent |
 | Layer 2 — Engine | ✅ | all modules below |
 | Layer 0 — Model serving | ✅ | via control daemon (ADR-0025/0027/0033), not a raw Ollama port |
@@ -69,7 +70,8 @@ Last verified: 2026-09-07.
 
 Shipped **modes** (4): `drafter`, `editor`, `proofreader`, `grammar`
 (`literature-reviewer` from architecture.md §64 is a future mode, not shipped —
-superseded by ADR-0019's "modes are data").
+superseded by ADR-0019's "modes are data"). Collapse to prompt presets is
+accepted (ADR-0045) but not yet implemented.
 
 Shipped **tools** (4): `diff`, `edit_markdown`, `read_note`, `retrieve`
 (`suggest_revision`, `cite`, `search_vault` from architecture.md §65 are future
@@ -99,7 +101,7 @@ format, never registered).
 | Target | Status |
 |---|---|
 | Standalone daemon (launchd, fixed port) | ✅ `tools/build.sh` + `tools/install-daemon.sh` + `deploy/*.plist` |
-| Tauri sidecar (spawn + SIGTERM/SIGKILL) | ✅ `client/tauri/src-tauri/src/sidecar.rs`, headlessly tested; bundled by `tools/build-tauri.sh` (ADR-0041) |
+| Tauri sidecar (spawn + SIGTERM/SIGKILL) | ✅ `client/tauri/src-tauri/src/sidecar.rs`, headlessly tested; bundled by `tools/build-tauri.sh` (ADR-0043) |
 | Tauri editor UI | ✅ | floating chat window (ADR-0041) over a full-viewport workspace; Tailwind v4 + shadcn-vue component system (ADR-0042) |
 | Web (self-host caveat) | ✅ capability adapter web branch; `ENGINE_BIND` opt-in |
 | mDNS LAN discovery | 🚧 deferred (ADR-0021 §1 — `baseUrl` on `/health` is the landed answer) |
@@ -115,14 +117,17 @@ format, never registered).
 ## The core learning surface (token metering)
 
 All six levers metered and surfaced ✅ — system prompt & mode, tool schemas, RAG
-chunks, history, thinking, completion length (Q1, ADR-0022).
+chunks, history, thinking, completion length (Q1, ADR-0022). What is not yet
+surfaced is the **content** of those components — which messages, which chunks,
+what was dropped; the context inspector (ADR-0044, Phase 2) closes that.
 
 ## RAG design
 
 | Stage | Status |
 |---|---|
-| Chunk → embed (`nomic-embed` via Fleet) → `vec0` + FTS5 | ✅ |
-| Hybrid retrieval + source markers | ✅ |
+| Chunk → embed (`nomic-embed` via Fleet) → `vec0` | 🚧 implemented but **no production caller** — `Retriever.Index` is exercised by tests only; a fresh `index.db` is empty |
+| FTS5 full-text index | 🚧 written but never queried — `Query` is vec0-KNN-only; no hybrid fusion, dedupe, or rerank |
+| Auto-RAG provenance visible to clients | 🚧 auto-retrieved chunks emit no `rag` event; only tool-invoked retrieval does |
 | Literature **bulk ingest** / citation tool | 🚧 thin — per-document `Index` only; no bulk-ingest or `cite`/`search_vault` tool shipped |
 
 ## Modularity principles
@@ -134,16 +139,26 @@ point, contract-first, interface-first coupling.
 
 ## TODO list (actionable, ordered)
 
-1. **Deferred chat affordances (ADR-0041 §5)** — "Stop generating" needs a cancel route in the contract + engine + three-way codegen; session titles need an engine field on `CreateSessionRequest`. Both recorded as future work; the chat window derives labels until titles land.
-2. **Commit the D1 seam** — texteditor (`cmd/toolhash`, `routergate/contract_mirror_test.go`, `contracts/needle-facade.md`, plan docs) and `macos-dev-config` (`cmd/serve-needle`, `tools/serve-needle.sh`, `tools/needle-finetune.sh`, `docs/contracts/needle-facade.md`, `models.json`, `daemon_test.go`).
-3. **D1 ML fine-tune** (deferred by design, trigger-gated) — fine-tune Needle 2 over the `cmd/toolhash` vocabulary → produce `needle2.cact` → `needle-finetune.sh` archives it + records `source.fingerprint` → flip one mode to `toolCalling:"router"` → `router-tools-stale` gate clears. Finalize the `.cact` stdout-format assumption (`needle-facade.md §2`).
-4. **Add CI** — no `.github/workflows` exists, yet the plans frame every acceptance criterion as a "CI gate". Add CI for `go test`, `bun test` + typecheck (tui/tauri), `cargo test`; optionally a Gherkin runner for the 9 `.feature` specs (currently prose-only). The build seam is ready: `tools/build-tauri.sh` (ADR-0041) is CI-shaped — no machine-specific paths, frozen lockfile, skippable gates.
-5. **Fix provision tooling** — `macos-dev-config/internal/fleetdaemon/provision.go` shells the deprecated `huggingface-cli`; switch to `hf download` (huggingface-hub ≥ 1.27).
-6. **`InferenceControl` surface** (architecture.md risk #9) — future sibling interface behind the Provider seam, not a planned phase.
-7. **Optional doc-sync** — `macos-dev-config/inference-readme.md` documents the needle2 archive but not the new `serve-needle` facade.
-8. **Deferred endpoints** — `GET /sessions/{id}/meter` (ADR-0017), bare `/files` read (ADR-0035); land only when a client needs them.
-9. **Future tools/modes** — `suggest_revision`, `cite`, `search_vault` tools and a `literature-reviewer` mode (architecture.md §64–§65), as data files per ADR-0019.
-10. **Move fleet orchestration into the engine** — `startModel`/`stopModel`/`startFleetPoll`/`stopFleetPoll` + the `FleetView` slice are duplicated in the TUI and Tauri stores. Future ADR: the engine becomes the source of truth serving exactly what selectors need (state feed / higher-level switch surface), shrinking clients to rendering. Recorded in ADR-0040 "Recorded note (2026-09-07)".
+The phases (A–F) are detailed in
+[`plans/implementation-sequence-context-engine.md`](plans/implementation-sequence-context-engine.md)
+(ADR-0044 as extended by ADR-0045–0048).
+
+1. **Phase A — trustworthy write-through (ADR-0047)** — open revalidation + path canonicalization; pre-write conflict check (`file-changed-externally`); no-op re-sync; newest-first, base-validated candidates; guards live on the model path; symlink-safe writes; HTTP-level E2E tests.
+2. **Phase B — prompt presets + one pipeline (ADR-0045)** — collapse mode data to name/systemPrompt/defaultModel; `config/pipeline.json`; one agentic loop, all tools, global budgets; park the router seam.
+3. **Phase C — real RAG + context inspector (ADR-0044)** — production indexing + vault bulk ingest (`VAULT_ROOT`); hybrid FTS5 + vec0 fusion; auto-RAG `rag` events; labeled truncation; assembler v2 + persisted snapshots + `context` route + `GET /sessions/{id}/meter`.
+4. **Phase D — `/locate` (ADR-0048)** — engine-side command parse; normalized exact-then-fuzzy resolver over the open document then the vault; `locate` event + snapshot record; ambiguity picker; anchored guarded edit.
+5. **Phase E — Ratatui TUI v2 (ADR-0046)** — `client/tui-rs/`; regenerated Rust client + Rust SSE decoder; preset tabs, meter, context panel, diff/approve, write-through status, bracketed paste, mentions/sessions/cancel; fleet orchestration engine-side + daemon reliability fixes; retire OpenTUI on parity.
+6. **Phase F — decision layer (Laya) + thesis validation** — `laya-decider` runner; one global retrieval-gating policy; second meter row; golden-query metrics; model evaluation; budget defaults recorded.
+7. **Add CI** — no `.github/workflows` exists, yet the plans frame every acceptance criterion as a "CI gate". Engine `go test ./...`, TUI (`cargo test` for tui-rs; OpenTUI/Tauri gates skipped while frozen); optionally a Gherkin runner for the 13 `.feature` specs (currently prose-only). The build seam is ready: `tools/build-tauri.sh` (ADR-0043) is CI-shaped — no machine-specific paths, frozen lockfile, skippable gates.
+8. **Fix provision tooling** — `macos-dev-config/internal/fleetdaemon/provision.go` shells the deprecated `huggingface-cli`; switch to `hf download` (huggingface-hub ≥ 1.27).
+9. **D1 ML fine-tune** (deferred by design, trigger-gated; the router seam is parked by ADR-0045) — fine-tune Needle 2 over the `cmd/toolhash` vocabulary → produce `needle2.cact` → `needle-finetune.sh` archives it + records `source.fingerprint` → wiring a mode to the router now requires revisiting ADR-0045. Finalize the `.cact` stdout-format assumption (`needle-facade.md §2`).
+10. **`InferenceControl` surface** (architecture.md risk #9) — future sibling interface behind the Provider seam, not a planned phase.
+11. **Optional doc-sync** — `macos-dev-config/inference-readme.md` documents the needle2 archive but not the new `serve-needle` facade.
+12. **Future tools/modes** — `suggest_revision`, `cite`, `search_vault` tools (per ADR-0045, tools are global; `search_vault` may reuse the `/locate` resolver); preset additions stay three-field data files.
+13. **Tauri unfreeze** — requires an explicit decision against ADR-0044 plus Rust codegen regeneration against the then-current OpenAPI spec; deferred chat affordances ("Stop generating", session titles) move with it.
+
+Deferred endpoint note: the bare `/files` read (ADR-0035) still lands only when a
+client needs it; `GET /sessions/{id}/meter` is now Phase 2.
 
 ## Verification status
 
@@ -151,4 +166,5 @@ point, contract-first, interface-first coupling.
 - `macos-dev-config`: `go test ./...` — green (incl. facade parser + daemon needle-projection tests).
 - Mirror drift tests pass: `daemon-http.md`, `fleet-manifest.schema.json`, `needle-facade.md`.
 - `go run ./cmd/toolhash` hash == `routergate.ToolSetHash`.
-- Client suites (`bun test`/typecheck in `client/tui` + `client/tauri`; `cargo test` in `src-tauri`) are claimed green in the plans but were **not re-run** during this review.
+- D1 seam committed in `504cd16` — the earlier "uncommitted" note was stale.
+- Client suites (`bun test`/typecheck in `client/tui` + `client/tauri`; `cargo test` in `src-tauri`) are claimed green in the plans but were **not re-run** during this review. Tauri suites are frozen with the client (ADR-0044).
