@@ -79,13 +79,13 @@ echo "label:    $SMOKE_LABEL"
 echo
 
 # Run one turn; write the SSE stream and the snapshot. Echo the turnId.
-run_turn() { # user_input decision_on stream_file snap_file
+run_turn() { # user_input decision_gated stream_file snap_file
   local body stream="$3" snap="$4"
   body="$(python3 - "$ws_id" "$1" "$2" "$SMOKE_MODE" <<'PY'
 import json, sys
 ws, user, on, mode = sys.argv[1], sys.argv[2], sys.argv[3] == "on", sys.argv[4]
 print(json.dumps({"sessionId": "eval-decision-session", "modeName": mode, "workspaceId": ws,
-                  "documentId": "", "userInput": user, "context": {"decision": "on" if on else "off"}}))
+                  "documentId": "", "userInput": user, "context": {"decision": "planner+gate" if on else "off"}}))
 PY
 )"
   curl -fsS -N -X POST "$ENGINE_URL/turn" -H 'content-type: application/json' -d "$body" >"$stream" || true

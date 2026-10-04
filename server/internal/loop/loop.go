@@ -20,6 +20,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 
@@ -415,12 +416,14 @@ func (l *loop) runTurn(ctx context.Context, turnID string, task dto.Task) {
 		return
 	}
 
-	// Laya decision layer — gate (ADR-0053): filter the post-exclude auto set by
-	// per-chunk relevance. Pins/mentions/anchor bypass the gate (ADR-0049 §11);
-	// the gate never touches them. The rag event stays the pre-gate candidate set.
+	// Laya decision layer — gate (ADR-0053, ADR-0055): filter the post-exclude
+	// auto set by per-chunk relevance, only in `planner+gate` mode. Pins/
+	// mentions/anchor bypass the gate (ADR-0049 §11); the gate never touches
+	// them. `planner` mode keeps every candidate. The rag event stays the
+	// pre-gate candidate set.
 	preGate := autoChunks
 	var gateDrops []dto.ContextDrop
-	if dres.record != nil && dres.retrieve {
+	if dres.mode == dto.DecisionModePlannerGate && dres.retrieve {
 		autoChunks, gateDrops = l.gate(ctx, turnID, task, svc, policy, dres.record, eff.Query, autoChunks)
 	}
 
@@ -720,6 +723,22 @@ func estimateReasoning(text string) int {
 		return 0
 	}
 	return (len(text) + 3) / 4
+}
+
+// clampTokens truncates s to at most maxTokens using the ADR-0051 deterministic
+// bytes/4 estimator (the same unit as estimateHistoryTokens/estimateReasoning).
+// It returns the clamped string and true when it cut anything; a non-positive
+// cap means unbounded. The cut is trimmed to a valid UTF-8 boundary so a
+// multi-byte rune is never split. Callers label the clamp (Q1: never silent).
+func clampTokens(s string, maxTokens int) (string, bool) {
+	if maxTokens <= 0 || len(s) <= maxTokens*4 {
+		return s, false
+	}
+	clamped := s[:maxTokens*4]
+	for len(clamped) > 0 && !utf8.ValidString(clamped) {
+		clamped = clamped[:len(clamped)-1]
+	}
+	return clamped, true
 }
 
 // summaryMaxTokens bounds the compaction summary call (ADR-0051 §8).
@@ -1182,9 +1201,11 @@ func mergeContextPolicy(sessionRaw json.RawMessage, override *dto.ContextPolicy,
 }
 
 // decisionResolution is the resolved decision-layer effect for one turn
-// (ADR-0053): the record to persist, and the effective retrieval/thinking the
-// rest of the turn uses. record is nil when the layer is disabled.
+// (ADR-0053, ADR-0055): the effective graded mode, the record to persist, and
+// the effective retrieval/thinking the rest of the turn uses. record is nil when
+// the layer is off.
 type decisionResolution struct {
+	mode     dto.DecisionMode
 	record   *dto.DecisionRecord
 	retrieve bool
 	topK     int
@@ -1192,19 +1213,21 @@ type decisionResolution struct {
 }
 
 // decide runs the planner call (ADR-0053) and resolves the effective retrieval
-// and thinking. Human/policy outranks the model: decision=off runs no Laya call;
-// session autoRag=false disables retrieval (Laya cannot re-enable it); a non-nil
-// ContextPolicy.thinking overrides the model. When there is nothing left for
-// Laya to choose (retrieval off AND thinking already resolved) the call is
-// skipped. Every failure degrades fail-open and labeled.
+// and thinking. The effective mode is resolved per-turn > session > global
+// (ADR-0055 §2): `off` runs no Laya call and records nothing; `planner` runs the
+// planner only; `planner+gate` runs the planner (the gate runs later). Human/
+// policy outranks the model: session autoRag=false disables retrieval (Laya
+// cannot re-enable it); a non-nil ContextPolicy.thinking overrides the model.
+// When there is nothing left for Laya to choose (retrieval off AND thinking
+// already resolved) the call is skipped. Every failure degrades fail-open and
+// labeled.
 func (l *loop) decide(ctx context.Context, turnID string, task dto.Task, svc *shard.Services, policy dto.PipelinePolicy, eff effectiveContext, modeName, request string, history []dto.Message, selection string) decisionResolution {
 	pol := policy.Decision
-	res := decisionResolution{retrieve: eff.AutoRag, topK: policy.AutoRagTopK}
-	enabled := pol.Enabled
+	res := decisionResolution{retrieve: eff.AutoRag, topK: policy.AutoRagTopK, mode: pol.Mode}
 	if eff.Decision != nil {
-		enabled = *eff.Decision == dto.DecisionOn
+		res.mode = dto.DecisionMode(*eff.Decision)
 	}
-	if !enabled {
+	if res.mode == dto.DecisionModeOff {
 		return res
 	}
 	rec := &dto.DecisionRecord{Enabled: true}
@@ -1220,12 +1243,17 @@ func (l *loop) decide(ctx context.Context, turnID string, task dto.Task, svc *sh
 		rec.Reason = dto.DecisionDegradedUnreachable
 		return res
 	}
-	plan := l.d.Decision.Plan(ctx, dto.DecisionPlannerInput{
+	planIn := dto.DecisionPlannerInput{
 		Request:   request,
 		History:   tailMessages(history, pol.MaxHistoryTurns),
 		Selection: selection,
 		Mode:      modeName,
-	})
+	}
+	// Bound the planner state engine-side (ADR-0055 §3): build it, clamp to
+	// maxPlannerTokens deterministically, and hand the clamped state to the
+	// client. A clamp is labeled, never silent (Q1).
+	planIn.State, planIn.Truncated = clampTokens(laya.PlannerState(planIn), pol.MaxPlannerTokens)
+	plan := l.d.Decision.Plan(ctx, planIn)
 	rec.Planner = &plan
 	if plan.Degraded {
 		rec.Degraded = true
@@ -1255,8 +1283,11 @@ func (l *loop) decide(ctx context.Context, turnID string, task dto.Task, svc *sh
 
 // gate runs the gate call (ADR-0053) over the post-exclude auto set and returns
 // the surviving chunks plus a labeled drop for the removals. The retrieval topK
-// is already bounded by maxCandidates, so the gate input is too. On failure it
-// keeps every chunk (fail-open) and labels the record.
+// is already bounded by maxCandidates, so the gate input is too. Each passage is
+// clamped engine-side to maxChunkTokens (ADR-0055 §3) with a per-chunk
+// `truncated` label; the clamped copy is handed to the client so the displayed
+// chunk text is unchanged. On failure it keeps every chunk (fail-open) and
+// labels the record.
 func (l *loop) gate(ctx context.Context, turnID string, task dto.Task, svc *shard.Services, policy dto.PipelinePolicy, rec *dto.DecisionRecord, request string, chunks []dto.Chunk) ([]dto.Chunk, []dto.ContextDrop) {
 	if len(chunks) == 0 {
 		return chunks, nil
@@ -1266,11 +1297,19 @@ func (l *loop) gate(ctx context.Context, turnID string, task dto.Task, svc *shar
 	if pol.MaxCandidates > 0 && len(cands) > pol.MaxCandidates {
 		cands = cands[:pol.MaxCandidates]
 	}
+	// Clamp each passage into a copy so the caller's chunk text (rag event /
+	// snapshot) stays the retrieved text; label each clamp (Q1).
+	gateIn := make([]dto.Chunk, len(cands))
+	copy(gateIn, cands)
+	truncated := make([]bool, len(gateIn))
+	for i := range gateIn {
+		gateIn[i].Text, truncated[i] = clampTokens(gateIn[i].Text, pol.MaxChunkTokens)
+	}
 	var gres dto.DecisionGateResult
 	if l.d.Decision == nil {
 		gres = dto.DecisionGateResult{Degraded: true, Reason: dto.DecisionDegradedUnreachable, Threshold: pol.GateThreshold}
 	} else {
-		gres = l.d.Decision.Gate(ctx, dto.DecisionGateInput{Request: request, Chunks: cands, Threshold: pol.GateThreshold})
+		gres = l.d.Decision.Gate(ctx, dto.DecisionGateInput{Request: request, Chunks: gateIn, Threshold: pol.GateThreshold, Truncated: truncated})
 	}
 	rec.Gate = &gres
 	if gres.Degraded {

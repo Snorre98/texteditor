@@ -57,9 +57,13 @@ SMOKE_CORPUS=~/thesis SMOKE_QUERIES=~/thesis/queries.jsonl tools/eval-decision.s
 
 ## Provisional defaults (to be confirmed by the live sweep)
 
-- `enabled: false` (ADR-0044 §5; opt-in per session via the tray).
+- `mode: off` (ADR-0054 §2; opt in per session via the tray, cycled
+  `off → planner → planner+gate`).
 - `gateThreshold: 0.5` — the P(relevant) midpoint, pending calibration.
 - `maxCandidates: 24`, `maxHistoryTurns: 4`, `timeoutMs: 3000`.
+- `maxChunkTokens: 384`, `maxPlannerTokens: 1024` — conservative engine-side
+  input caps for the 512-token English checkpoint, leaving room for the
+  question/instruction prefix (ADR-0055 §3).
 - `breadthTopK: {none: 0, few: 3, many: 8}`.
 
 These are starting points; the sweep is expected to move `gateThreshold` and the

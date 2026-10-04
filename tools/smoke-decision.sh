@@ -8,13 +8,13 @@
 # (`laya`) reachable.
 #
 # It exercises the exact path a corpus turn takes once the tray toggle is on:
-#   1. GET /decision -> the global policy block
+#   1. GET /decision -> the global policy block (graded `mode`, not `enabled`)
 #   2. workspace -> corpus -> index (a doc the query retrieves)
-#   3. a turn with a per-turn ContextPolicy.decision=on -> rag + context
+#   3. a turn with a per-turn ContextPolicy.decision=planner+gate -> rag + context
 #   4. GET /turns/{id}/context -> decision.planner + decision.gate.chunks +
 #      survivors + labeled gate drops + rag is pre-gate
 #   5. GET /sessions/{id}/meter -> a `decision` component row
-#   6. PUT /sessions/{id}/context decision=on -> a second turn is gated
+#   6. PUT /sessions/{id}/context decision=planner+gate -> a second turn is gated
 #   7. pins bypass the gate (the pinned chunk survives and is labeled)
 #   8. SMOKE_LAYADOWN=1 -> stop laya, rerun, assert decision.degraded + keep-all
 #
@@ -111,16 +111,17 @@ PY
 
 echo "engine:   $ENGINE_URL"
 echo "vault:    $WORKSPACE_ROOT"
-echo "decision: model=$decision_model enabled=$(printf '%s' "$decision_policy" | python3 -c 'import json,sys; print(json.load(sys.stdin)["enabled"])')"
+echo "decision: model=$decision_model mode=$(printf '%s' "$decision_policy" | python3 -c 'import json,sys; print(json.load(sys.stdin)["mode"])')"
 
 # 1. Global policy surface.
 printf '%s' "$decision_policy" | python3 -c '
 import json, sys
 p = json.load(sys.stdin)
-for k in ("enabled","model","gateThreshold","maxCandidates","maxHistoryTurns","breadthTopK","timeoutMs"):
+for k in ("mode","model","gateThreshold","maxCandidates","maxHistoryTurns","breadthTopK","maxChunkTokens","maxPlannerTokens","timeoutMs"):
     assert k in p, "missing %s" % k
 assert set(p["breadthTopK"]) >= {"none","few","many"}, p["breadthTopK"]
-print("PASS: GET /decision returns the global policy (tau=%.2f, candidates=%d)" % (p["gateThreshold"], p["maxCandidates"]))
+assert p["mode"] in ("off","planner","planner+gate"), p["mode"]
+print("PASS: GET /decision returns the global policy (mode=%s, tau=%.2f, candidates=%d)" % (p["mode"], p["gateThreshold"], p["maxCandidates"]))
 '
 
 # 2. Corpus: one doc the query clearly retrieves.
@@ -153,13 +154,13 @@ echo "PASS: corpus indexed"
 
 QUERY="Which passages are directly relevant to the request, and what happens to the passages the decision gate drops?"
 
-# 3. Turn with a per-turn ContextPolicy.decision=on override.
+# 3. Turn with a per-turn ContextPolicy.decision=planner+gate override.
 stream1="$tmpdir/stream1.sse"
-turn1="$(run_turn "$(turn_body "$QUERY" '{"context":{"decision":"on"}}')" "$stream1")"
+turn1="$(run_turn "$(turn_body "$QUERY" '{"context":{"decision":"planner+gate"}}')" "$stream1")"
 grep -q '^event: rag$' "$stream1" || { echo "FAIL: no rag event" >&2; cat "$stream1" >&2; exit 1; }
 grep -q '^event: context$' "$stream1" || { echo "FAIL: no context event" >&2; cat "$stream1" >&2; exit 1; }
 [ -n "$turn1" ] || { echo "FAIL: no turnId" >&2; cat "$stream1" >&2; exit 1; }
-echo "PASS: turn ran with a per-turn decision=on (turnId $turn1)"
+echo "PASS: turn ran with a per-turn decision=planner+gate (turnId $turn1)"
 
 # 4. Typed decision record in the persisted snapshot.
 snap1="$tmpdir/snap1.json"
@@ -230,7 +231,7 @@ if [ "$SMOKE_LAYADOWN" = "1" ]; then
   echo "SMOKE_LAYADOWN=1: stopping laya and rerunning to exercise the degraded path"
   "$SERVE_LAYA" stop >/dev/null 2>&1 || true
   stream3="$tmpdir/stream3.sse"
-  turn3="$(run_turn "$(turn_body "$QUERY" '{"context":{"decision":"on"}}')" "$stream3")"
+  turn3="$(run_turn "$(turn_body "$QUERY" '{"context":{"decision":"planner+gate"}}')" "$stream3")"
   [ -n "$turn3" ] || { echo "FAIL: degraded turn produced no turnId" >&2; cat "$stream3" >&2; exit 1; }
   curl -fsS "$ENGINE_URL/turns/$turn3/context" >"$tmpdir/snap3.json"
   python3 - "$tmpdir/snap3.json" <<'PY'
@@ -246,8 +247,8 @@ PY
   exit 0
 fi
 
-# 6. Session-policy path: PUT decision=on, then a turn with no per-turn override.
-put "/sessions/smoke-decision-session/context" '{"decision":"on"}' >/dev/null
+# 6. Session-policy path: PUT decision=planner+gate, then a turn with no per-turn override.
+put "/sessions/smoke-decision-session/context" '{"decision":"planner+gate"}' >/dev/null
 stream2="$tmpdir/stream2.sse"
 turn2="$(run_turn "$(turn_body "$QUERY")" "$stream2")"
 [ -n "$turn2" ] || { echo "FAIL: session-policy turn produced no turnId" >&2; cat "$stream2" >&2; exit 1; }
@@ -256,8 +257,8 @@ python3 - "$tmpdir/snap2.json" <<'PY'
 import json, sys
 snap = json.load(open(sys.argv[1]))
 d = snap.get("decision") or {}
-assert d.get("enabled") is True, "session decision=on did not enable the layer: %r" % d
-print("PASS: session ContextPolicy.decision=on enabled the layer")
+assert d.get("enabled") is True, "session decision=planner+gate did not enable the layer: %r" % d
+print("PASS: session ContextPolicy.decision=planner+gate enabled the layer")
 PY
 
 # 7. Pins bypass the gate: pin the first candidate and rerun.
@@ -272,7 +273,7 @@ PY
 if [ -n "$pin_key" ]; then
   put "/sessions/smoke-decision-session/context" "$(python3 - "$pin_key" <<'PY'
 import json, sys
-print(json.dumps({"decision": "on", "pinned": [{"chunkKey": sys.argv[1]}]}))
+print(json.dumps({"decision": "planner+gate", "pinned": [{"chunkKey": sys.argv[1]}]}))
 PY
 )" >/dev/null
   stream4="$tmpdir/stream4.sse"

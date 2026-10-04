@@ -28,18 +28,41 @@ type DecisionBreadthTopK struct {
 	Many int
 }
 
-// DecisionPolicy is the one global Laya decision-layer policy (ADR-0053),
-// loaded from config/pipeline.json and validated fail-fast. Off by default;
-// never a per-preset field (ADR-0045). The engine resolves Model by name via
-// Fleet; Laya's own Router selects the checkpoint per request.
+// DecisionMode is the graded enablement of the Laya decision layer (ADR-0055
+// §1): off (no call), planner (planner only, every post-exclude candidate
+// kept), or planner+gate (the full ADR-0053 behavior). off is the default and a
+// strict no-op relative to the pre-Phase-F pipeline (ADR-0054 §2).
+type DecisionMode string
+
+const (
+	// DecisionModeOff runs no Laya call; a behavioral no-op.
+	DecisionModeOff DecisionMode = "off"
+	// DecisionModePlanner runs only the planner (retrieve-or-not, breadth,
+	// thinking); the gate is skipped and every post-exclude candidate enters
+	// the prompt corpus.
+	DecisionModePlanner DecisionMode = "planner"
+	// DecisionModePlannerGate runs the planner and the per-chunk gate.
+	DecisionModePlannerGate DecisionMode = "planner+gate"
+)
+
+// DecisionPolicy is the one global Laya decision-layer policy (ADR-0053,
+// ADR-0055), loaded from config/pipeline.json and validated fail-fast. Mode
+// `off` by default; never a per-preset field (ADR-0045). The engine resolves
+// Model by name via Fleet; Laya's own Router selects the checkpoint per request.
 type DecisionPolicy struct {
-	Enabled         bool
+	Mode            DecisionMode
 	Model           string
 	GateThreshold   float64
 	MaxCandidates   int
 	MaxHistoryTurns int
 	BreadthTopK     DecisionBreadthTopK
-	TimeoutMs       int
+	// MaxChunkTokens bounds each gate passage; MaxPlannerTokens bounds the
+	// planner state (request + history + selection). Both are engine-side,
+	// deterministic (ADR-0051 estimator), and labeled `truncated` when applied
+	// (ADR-0055 §3, Q1).
+	MaxChunkTokens   int
+	MaxPlannerTokens int
+	TimeoutMs        int
 }
 
 // PipelinePolicy is the one global turn pipeline policy (ADR-0045 §3): the step

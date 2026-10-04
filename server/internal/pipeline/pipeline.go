@@ -80,7 +80,7 @@ func parse(schemaBytes, data []byte) (dto.PipelinePolicy, error) {
 			KeepRecentTurns      int  `json:"keepRecentTurns"`
 		} `json:"compaction"`
 		Decision struct {
-			Enabled         bool    `json:"enabled"`
+			Mode            string  `json:"mode"`
 			Model           string  `json:"model"`
 			GateThreshold   float64 `json:"gateThreshold"`
 			MaxCandidates   int     `json:"maxCandidates"`
@@ -90,11 +90,20 @@ func parse(schemaBytes, data []byte) (dto.PipelinePolicy, error) {
 				Few  int `json:"few"`
 				Many int `json:"many"`
 			} `json:"breadthTopK"`
-			TimeoutMs int `json:"timeoutMs"`
+			MaxChunkTokens   int `json:"maxChunkTokens"`
+			MaxPlannerTokens int `json:"maxPlannerTokens"`
+			TimeoutMs        int `json:"timeoutMs"`
 		} `json:"decision"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return dto.PipelinePolicy{}, fmt.Errorf("%w: %v", ErrInvalid, err)
+	}
+	mode, err := parseDecisionMode(raw.Decision.Mode)
+	if err != nil {
+		return dto.PipelinePolicy{}, err
+	}
+	if raw.Decision.MaxChunkTokens < 1 || raw.Decision.MaxPlannerTokens < 1 {
+		return dto.PipelinePolicy{}, fmt.Errorf("%w: decision caps must be >= 1 (maxChunkTokens=%d, maxPlannerTokens=%d)", ErrInvalid, raw.Decision.MaxChunkTokens, raw.Decision.MaxPlannerTokens)
 	}
 	return dto.PipelinePolicy{
 		MaxSteps:               raw.MaxSteps,
@@ -112,7 +121,7 @@ func parse(schemaBytes, data []byte) (dto.PipelinePolicy, error) {
 			KeepRecentTurns:      raw.Compaction.KeepRecentTurns,
 		},
 		Decision: dto.DecisionPolicy{
-			Enabled:         raw.Decision.Enabled,
+			Mode:            mode,
 			Model:           raw.Decision.Model,
 			GateThreshold:   raw.Decision.GateThreshold,
 			MaxCandidates:   raw.Decision.MaxCandidates,
@@ -122,7 +131,20 @@ func parse(schemaBytes, data []byte) (dto.PipelinePolicy, error) {
 				Few:  raw.Decision.BreadthTopK.Few,
 				Many: raw.Decision.BreadthTopK.Many,
 			},
-			TimeoutMs: raw.Decision.TimeoutMs,
+			MaxChunkTokens:   raw.Decision.MaxChunkTokens,
+			MaxPlannerTokens: raw.Decision.MaxPlannerTokens,
+			TimeoutMs:        raw.Decision.TimeoutMs,
 		},
 	}, nil
+}
+
+// parseDecisionMode validates the graded enablement (ADR-0055 §1). The schema
+// already enforces the enum; this is the defense-in-depth typed failure.
+func parseDecisionMode(s string) (dto.DecisionMode, error) {
+	switch dto.DecisionMode(s) {
+	case dto.DecisionModeOff, dto.DecisionModePlanner, dto.DecisionModePlannerGate:
+		return dto.DecisionMode(s), nil
+	default:
+		return "", fmt.Errorf("%w: unknown decision.mode %q", ErrInvalid, s)
+	}
 }

@@ -337,13 +337,15 @@ type stubPipeline struct{}
 
 func (stubPipeline) Policy() dto.PipelinePolicy {
 	return dto.PipelinePolicy{Decision: dto.DecisionPolicy{
-		Enabled:         true,
-		Model:           "laya",
-		GateThreshold:   0.5,
-		MaxCandidates:   24,
-		MaxHistoryTurns: 4,
-		BreadthTopK:     dto.DecisionBreadthTopK{None: 0, Few: 3, Many: 8},
-		TimeoutMs:       3000,
+		Mode:             dto.DecisionModePlannerGate,
+		Model:            "laya",
+		GateThreshold:    0.5,
+		MaxCandidates:    24,
+		MaxHistoryTurns:  4,
+		BreadthTopK:      dto.DecisionBreadthTopK{None: 0, Few: 3, Many: 8},
+		MaxChunkTokens:   384,
+		MaxPlannerTokens: 1024,
+		TimeoutMs:        3000,
 	}}
 }
 
@@ -356,7 +358,7 @@ func TestGetDecisionPolicy(t *testing.T) {
 		t.Fatalf("decision = %d, body %s", rec.Code, rec.Body.String())
 	}
 	var got struct {
-		Enabled         bool    `json:"enabled"`
+		Mode            string  `json:"mode"`
 		Model           string  `json:"model"`
 		GateThreshold   float64 `json:"gateThreshold"`
 		MaxCandidates   int     `json:"maxCandidates"`
@@ -366,13 +368,16 @@ func TestGetDecisionPolicy(t *testing.T) {
 			Few  int `json:"few"`
 			Many int `json:"many"`
 		} `json:"breadthTopK"`
-		TimeoutMs int `json:"timeoutMs"`
+		MaxChunkTokens   int `json:"maxChunkTokens"`
+		MaxPlannerTokens int `json:"maxPlannerTokens"`
+		TimeoutMs        int `json:"timeoutMs"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
 		t.Fatal(err)
 	}
-	if !got.Enabled || got.Model != "laya" || got.GateThreshold != 0.5 || got.MaxCandidates != 24 ||
-		got.MaxHistoryTurns != 4 || got.BreadthTopK.Few != 3 || got.BreadthTopK.Many != 8 || got.TimeoutMs != 3000 {
+	if got.Mode != "planner+gate" || got.Model != "laya" || got.GateThreshold != 0.5 || got.MaxCandidates != 24 ||
+		got.MaxHistoryTurns != 4 || got.BreadthTopK.Few != 3 || got.BreadthTopK.Many != 8 ||
+		got.MaxChunkTokens != 384 || got.MaxPlannerTokens != 1024 || got.TimeoutMs != 3000 {
 		t.Fatalf("decision policy = %+v", got)
 	}
 }
@@ -1472,7 +1477,7 @@ func TestPutSessionContextPersistsAndReadsBack(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	body := `{"pinned":[{"path":"/v/a.md","chunkKey":"/v/a.md#0"}],"excluded":[{"path":"/v/b.md"}],"autoRag":false,"retrievalQuery":"rq","decision":"on"}`
+	body := `{"pinned":[{"path":"/v/a.md","chunkKey":"/v/a.md#0"}],"excluded":[{"path":"/v/b.md"}],"autoRag":false,"retrievalQuery":"rq","decision":"planner+gate"}`
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPut, "/sessions/s1/context", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
@@ -1494,8 +1499,8 @@ func TestPutSessionContextPersistsAndReadsBack(t *testing.T) {
 	if v, ok := cp.AutoRag.Get(); !ok || v {
 		t.Fatalf("read-back autoRag = %v, want false", cp.AutoRag)
 	}
-	if v, ok := cp.Decision.Get(); !ok || v != genapi.ContextPolicyDecisionOn {
-		t.Fatalf("read-back decision = %v, want on", cp.Decision)
+	if v, ok := cp.Decision.Get(); !ok || v != genapi.ContextPolicyDecisionPlannerGate {
+		t.Fatalf("read-back decision = %v, want planner+gate", cp.Decision)
 	}
 	raw, err := ps.ContextPolicy("s1")
 	if err != nil {
@@ -1504,7 +1509,7 @@ func TestPutSessionContextPersistsAndReadsBack(t *testing.T) {
 	if !strings.Contains(string(raw), `"autoRag":false`) || !strings.Contains(string(raw), `"chunkKey":"/v/a.md#0"`) {
 		t.Fatalf("persisted policy = %s", raw)
 	}
-	if !strings.Contains(string(raw), `"decision":"on"`) {
+	if !strings.Contains(string(raw), `"decision":"planner+gate"`) {
 		t.Fatalf("persisted policy lost decision: %s", raw)
 	}
 }

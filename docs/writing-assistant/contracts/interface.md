@@ -446,11 +446,18 @@ type ContextPolicy struct {
     Excluded       []ChunkRef
     AutoRag        *bool
     RetrievalQuery *string
-    Thinking       *ThinkingLevel // off | auto | on (ADR-0051 §1); nil inherits
+    Thinking       *ThinkingLevel    // off | auto | on (ADR-0051 §1); nil inherits
+    Decision       *DecisionOverride // off | planner | planner+gate (ADR-0055 §2); nil inherits
 }
 
 // ThinkingLevel ∈ off | auto | on (ADR-0051 §1).
 type ThinkingLevel string
+
+// DecisionOverride ∈ off | planner | planner+gate (ADR-0055 §2): the
+// session/per-turn override for the Laya decision layer. `off` runs no Laya
+// call; `planner` runs only the planner; `planner+gate` runs the planner and
+// the per-chunk gate.
+type DecisionOverride string
 
 // ContextSnapshot is the persisted per-turn record (GET /turns/{id}/context and
 // the `context` SSE payload). Decision is the typed DecisionRecord (ADR-0053),
@@ -878,15 +885,19 @@ type CompactionPolicy struct {
     KeepRecentTurns      int
 }
 
-// DecisionPolicy is the one global Laya decision-layer policy (ADR-0053),
-// schema-validated fail-fast, default off, never a preset field (ADR-0045).
+// DecisionPolicy is the one global Laya decision-layer policy (ADR-0053,
+// ADR-0055), schema-validated fail-fast, default `off`, never a preset field
+// (ADR-0045). `mode` grades the layer; the caps bound every Laya input
+// engine-side.
 type DecisionPolicy struct {
-    Enabled         bool
-    Model           string  // resolved by name via Fleet
-    GateThreshold   float64 // engine-applied keep τ on the gate's P(relevant)
+    Mode            DecisionMode        // off | planner | planner+gate (ADR-0055 §1)
+    Model           string              // resolved by name via Fleet
+    GateThreshold   float64             // engine-applied keep τ on the gate's P(relevant)
     MaxCandidates   int
     MaxHistoryTurns int
     BreadthTopK     DecisionBreadthTopK // {None, Few, Many}
+    MaxChunkTokens   int                // per gate passage (ADR-0051 estimator; ADR-0055 §3)
+    MaxPlannerTokens int                // planner state request+history+selection (ADR-0055 §3)
     TimeoutMs       int
 }
 
@@ -917,20 +928,28 @@ type Laya interface {
     Gate(ctx context.Context, in DecisionGateInput) DecisionGateResult
 }
 
-type DecisionPlannerInput struct { Request string; History []Message; Selection, Mode string }
-type DecisionGateInput struct { Request string; Chunks []Chunk; Threshold float64 }
+type DecisionPlannerInput struct {
+    Request string; History []Message; Selection, Mode string
+    State     string // engine-built, already-clamped planner state (ADR-0055 §3); empty = build from fields
+    Truncated bool    // the engine clamped the state to maxPlannerTokens
+}
+type DecisionGateInput struct {
+    Request string; Chunks []Chunk; Threshold float64
+    Truncated []bool // aligned with Chunks; each passage clamped to maxChunkTokens (ADR-0055 §3)
+}
 
 type DecisionPlan struct {
     Checkpoint string; Retrieve bool; Thinking ThinkingLevel; Breadth DecisionBreadth
+    Truncated bool // the engine clamped the planner state (ADR-0055 §3)
     Degraded bool; Reason DecisionDegradeReason; PromptTokens, CompletionTokens int
 }
-type DecisionChunkResult struct { ChunkKey, Path string; Score float64; Keep bool; Reason string }
+type DecisionChunkResult struct { ChunkKey, Path string; Score float64; Keep, Truncated bool; Reason string }
 type DecisionGateResult struct {
     Checkpoint string; Threshold float64; Degraded bool; Reason DecisionDegradeReason
     Chunks []DecisionChunkResult; PromptTokens, CompletionTokens int
 }
 // DecisionRecord is the persisted snapshot record; Enabled/Degraded/Reason with
-// optional Planner/Gate.
+// optional Planner/Gate. Enabled is true for any non-off mode.
 type DecisionRecord struct { Enabled, Degraded bool; Reason DecisionDegradeReason; Planner *DecisionPlan; Gate *DecisionGateResult }
 ```
 
@@ -939,7 +958,9 @@ resolve thinking → assemble. Pins/mentions/anchor bypass the gate (ADR-0049
 §11); the `rag` event is the pre-gate candidate set; the snapshot records the
 decision and the survivors. Precedence: human/policy outranks Laya. `GET
 /decision` returns the global `DecisionPolicy`; `ContextPolicy.decision`
-(`off|on`) is the session/per-turn override.
+(`off|planner|planner+gate`, ADR-0055 §2) is the session/per-turn override.
+`off` is a strict no-op; `planner` skips the gate. Every clamped Laya input is
+labeled `truncated` (ADR-0055 §3, Q1).
 
 ## 9. Document store (Go)
 

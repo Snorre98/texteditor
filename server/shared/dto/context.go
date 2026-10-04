@@ -93,12 +93,15 @@ type ChunkRef struct {
 }
 
 // DecisionOverride is the session/per-turn override for the Laya decision layer
-// (ADR-0053): off disables it (no Laya call); on enables it.
+// (ADR-0055 §2): the same three values as the global DecisionMode. off runs no
+// Laya call (zero calls, a strict no-op); planner runs only the planner;
+// planner+gate runs the planner and the per-chunk gate.
 type DecisionOverride string
 
 const (
-	DecisionOff DecisionOverride = "off"
-	DecisionOn  DecisionOverride = "on"
+	DecisionOff         DecisionOverride = "off"
+	DecisionPlanner     DecisionOverride = "planner"
+	DecisionPlannerGate DecisionOverride = "planner+gate"
 )
 
 // ContextPolicy is the context-tray decision set (ADR-0049 §7/§8): pinned and

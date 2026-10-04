@@ -98,11 +98,12 @@ type Invoker interface {
 	GetCorpus(ctx context.Context, params GetCorpusParams) (*CorpusState, error)
 	// GetDecisionPolicy invokes getDecisionPolicy operation.
 	//
-	// The global decision policy from `config/pipeline.json`: whether the Laya decision layer is enabled,
-	// the resolved model name, the gate threshold, the candidate cap, the planner history window, the
-	// breadth->topK mapping, and the timeout. The effective per-turn state also appears in a turn's
-	// context snapshot DecisionRecord; a session/per-turn override rides ContextPolicy.decision. Off by
-	// default.
+	// The global decision policy from `config/pipeline.json`: the graded `mode` (`off` | `planner` |
+	// `planner+gate`), the resolved model name, the gate threshold, the candidate cap, the planner history
+	// window, the breadth->topK mapping, the engine-side input caps (`maxChunkTokens`/`maxPlannerTokens`),
+	// and the timeout. The effective per-turn state also appears in a turn's context snapshot
+	// DecisionRecord; a session/per-turn override rides ContextPolicy.decision with the same three values.
+	// `off` by default.
 	//
 	// GET /decision
 	GetDecisionPolicy(ctx context.Context) (*DecisionPolicy, error)
@@ -1379,11 +1380,12 @@ func (c *Client) sendGetCorpus(ctx context.Context, params GetCorpusParams) (res
 
 // GetDecisionPolicy invokes getDecisionPolicy operation.
 //
-// The global decision policy from `config/pipeline.json`: whether the Laya decision layer is enabled,
-// the resolved model name, the gate threshold, the candidate cap, the planner history window, the
-// breadth->topK mapping, and the timeout. The effective per-turn state also appears in a turn's
-// context snapshot DecisionRecord; a session/per-turn override rides ContextPolicy.decision. Off by
-// default.
+// The global decision policy from `config/pipeline.json`: the graded `mode` (`off` | `planner` |
+// `planner+gate`), the resolved model name, the gate threshold, the candidate cap, the planner history
+// window, the breadth->topK mapping, the engine-side input caps (`maxChunkTokens`/`maxPlannerTokens`),
+// and the timeout. The effective per-turn state also appears in a turn's context snapshot
+// DecisionRecord; a session/per-turn override rides ContextPolicy.decision with the same three values.
+// `off` by default.
 //
 // GET /decision
 func (c *Client) GetDecisionPolicy(ctx context.Context) (*DecisionPolicy, error) {

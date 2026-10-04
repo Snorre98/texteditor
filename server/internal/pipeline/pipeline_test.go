@@ -9,8 +9,8 @@ import (
 	"texteditor/shared/dto"
 )
 
-// decValid is the shipped decision block (ADR-0053).
-const decValid = `"decision":{"enabled":false,"model":"laya","gateThreshold":0.5,"maxCandidates":24,"maxHistoryTurns":4,"breadthTopK":{"none":0,"few":3,"many":8},"timeoutMs":3000}`
+// decValid is the shipped decision block (ADR-0055).
+const decValid = `"decision":{"mode":"off","model":"laya","gateThreshold":0.5,"maxCandidates":24,"maxHistoryTurns":4,"breadthTopK":{"none":0,"few":3,"many":8},"maxChunkTokens":384,"maxPlannerTokens":1024,"timeoutMs":3000}`
 
 // baseValid is a minimal policy carrying every required field.
 const baseValid = `{"maxSteps":1,"maxHistoryTokens":0,"maxRagTokens":0,"maxMentionTokens":0,"autoRagTopK":1,` +
@@ -36,13 +36,15 @@ func TestNewLoadsPolicy(t *testing.T) {
 		SessionBudgetSoftRatio: 0.8,
 		Compaction:             dto.CompactionPolicy{Enabled: true, TriggerHistoryTokens: 24000, KeepRecentTurns: 4},
 		Decision: dto.DecisionPolicy{
-			Enabled:         false,
-			Model:           "laya",
-			GateThreshold:   0.5,
-			MaxCandidates:   24,
-			MaxHistoryTurns: 4,
-			BreadthTopK:     dto.DecisionBreadthTopK{None: 0, Few: 3, Many: 8},
-			TimeoutMs:       3000,
+			Mode:             dto.DecisionModeOff,
+			Model:            "laya",
+			GateThreshold:    0.5,
+			MaxCandidates:    24,
+			MaxHistoryTurns:  4,
+			BreadthTopK:      dto.DecisionBreadthTopK{None: 0, Few: 3, Many: 8},
+			MaxChunkTokens:   384,
+			MaxPlannerTokens: 1024,
+			TimeoutMs:        3000,
 		},
 	}
 	if got != want {
@@ -71,7 +73,11 @@ func TestParseRejectsInvalidPolicy(t *testing.T) {
 		{"soft ratio out of range", withDecision(`{"maxSteps":6,"maxHistoryTokens":1,"maxRagTokens":1,"maxMentionTokens":1,"autoRagTopK":1,"thinking":"auto","maxThinkingTokens":0,"reserveOutputTokens":0,"sessionBudgetSoftRatio":2,"compaction":{"enabled":false,"triggerHistoryTokens":0,"keepRecentTurns":0}}`)},
 		{"unknown field", withDecision(`{"maxSteps":6,"maxHistoryTokens":1,"maxRagTokens":1,"maxMentionTokens":1,"autoRagTopK":1,"thinking":"auto","maxThinkingTokens":0,"reserveOutputTokens":0,"sessionBudgetSoftRatio":0.5,"compaction":{"enabled":false,"triggerHistoryTokens":0,"keepRecentTurns":0},"extra":true}`)},
 		{"missing decision", `{"maxSteps":6,"maxHistoryTokens":1,"maxRagTokens":1,"maxMentionTokens":1,"autoRagTopK":1,"thinking":"auto","maxThinkingTokens":0,"reserveOutputTokens":0,"sessionBudgetSoftRatio":0.5,"compaction":{"enabled":false,"triggerHistoryTokens":0,"keepRecentTurns":0}}`},
-		{"bad gate threshold", `{"maxSteps":6,"maxHistoryTokens":1,"maxRagTokens":1,"maxMentionTokens":1,"autoRagTopK":1,"thinking":"auto","maxThinkingTokens":0,"reserveOutputTokens":0,"sessionBudgetSoftRatio":0.5,"compaction":{"enabled":false,"triggerHistoryTokens":0,"keepRecentTurns":0},"decision":{"enabled":false,"model":"laya","gateThreshold":2,"maxCandidates":24,"maxHistoryTurns":4,"breadthTopK":{"none":0,"few":3,"many":8},"timeoutMs":3000}}`},
+		{"bad gate threshold", `{"maxSteps":6,"maxHistoryTokens":1,"maxRagTokens":1,"maxMentionTokens":1,"autoRagTopK":1,"thinking":"auto","maxThinkingTokens":0,"reserveOutputTokens":0,"sessionBudgetSoftRatio":0.5,"compaction":{"enabled":false,"triggerHistoryTokens":0,"keepRecentTurns":0},"decision":{"mode":"off","model":"laya","gateThreshold":2,"maxCandidates":24,"maxHistoryTurns":4,"breadthTopK":{"none":0,"few":3,"many":8},"maxChunkTokens":384,"maxPlannerTokens":1024,"timeoutMs":3000}}`},
+		{"old enabled key", `{"maxSteps":6,"maxHistoryTokens":1,"maxRagTokens":1,"maxMentionTokens":1,"autoRagTopK":1,"thinking":"auto","maxThinkingTokens":0,"reserveOutputTokens":0,"sessionBudgetSoftRatio":0.5,"compaction":{"enabled":false,"triggerHistoryTokens":0,"keepRecentTurns":0},"decision":{"enabled":false,"model":"laya","gateThreshold":0.5,"maxCandidates":24,"maxHistoryTurns":4,"breadthTopK":{"none":0,"few":3,"many":8},"timeoutMs":3000}}`},
+		{"unknown mode", `{"maxSteps":6,"maxHistoryTokens":1,"maxRagTokens":1,"maxMentionTokens":1,"autoRagTopK":1,"thinking":"auto","maxThinkingTokens":0,"reserveOutputTokens":0,"sessionBudgetSoftRatio":0.5,"compaction":{"enabled":false,"triggerHistoryTokens":0,"keepRecentTurns":0},"decision":{"mode":"on","model":"laya","gateThreshold":0.5,"maxCandidates":24,"maxHistoryTurns":4,"breadthTopK":{"none":0,"few":3,"many":8},"maxChunkTokens":384,"maxPlannerTokens":1024,"timeoutMs":3000}}`},
+		{"zero chunk cap", `{"maxSteps":6,"maxHistoryTokens":1,"maxRagTokens":1,"maxMentionTokens":1,"autoRagTopK":1,"thinking":"auto","maxThinkingTokens":0,"reserveOutputTokens":0,"sessionBudgetSoftRatio":0.5,"compaction":{"enabled":false,"triggerHistoryTokens":0,"keepRecentTurns":0},"decision":{"mode":"off","model":"laya","gateThreshold":0.5,"maxCandidates":24,"maxHistoryTurns":4,"breadthTopK":{"none":0,"few":3,"many":8},"maxChunkTokens":0,"maxPlannerTokens":1024,"timeoutMs":3000}}`},
+		{"zero planner cap", `{"maxSteps":6,"maxHistoryTokens":1,"maxRagTokens":1,"maxMentionTokens":1,"autoRagTopK":1,"thinking":"auto","maxThinkingTokens":0,"reserveOutputTokens":0,"sessionBudgetSoftRatio":0.5,"compaction":{"enabled":false,"triggerHistoryTokens":0,"keepRecentTurns":0},"decision":{"mode":"off","model":"laya","gateThreshold":0.5,"maxCandidates":24,"maxHistoryTurns":4,"breadthTopK":{"none":0,"few":3,"many":8},"maxChunkTokens":384,"maxPlannerTokens":0,"timeoutMs":3000}}`},
 		{"not an object", `[]`},
 	}
 	for _, tc := range cases {

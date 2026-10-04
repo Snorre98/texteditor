@@ -1421,15 +1421,16 @@ fn session_policy_with_auto_rag(app: &AppState) -> crate::gen::ContextPolicy {
     policy
 }
 
-/// Toggle the Laya decision layer for the session (ADR-0053): global default
-/// (off) → on → off. The engine resolves precedence; the client sends a decision.
+/// Toggle the Laya decision layer for the session (ADR-0055 §2): global default
+/// (off) → planner → planner+gate → off. The engine resolves precedence; the
+/// client sends a decision.
 fn session_policy_with_decision(app: &AppState) -> crate::gen::ContextPolicy {
+    use crate::gen::ContextPolicyDecision::{Off, Planner, PlannerGate};
     let mut policy = base_policy(app);
     policy.decision = match policy.decision {
-        Some(crate::gen::ContextPolicyDecision::On) => {
-            Some(crate::gen::ContextPolicyDecision::Off)
-        }
-        _ => Some(crate::gen::ContextPolicyDecision::On),
+        Some(Planner) => Some(PlannerGate),
+        Some(PlannerGate) => Some(Off),
+        _ => Some(Planner),
     };
     policy
 }
@@ -1686,22 +1687,25 @@ mod tests {
     }
 
     #[test]
-    fn decision_toggle_cycles_global_on_off() {
+    fn decision_toggle_cycles_three_modes() {
+        use crate::gen::ContextPolicyDecision::{Off, Planner, PlannerGate};
         // Global default (absent) reads as off, so the first toggle turns it on.
         let app = AppState::default();
         let policy = session_policy_with_decision(&app);
-        assert_eq!(
-            policy.decision,
-            Some(crate::gen::ContextPolicyDecision::On)
-        );
+        assert_eq!(policy.decision, Some(Planner));
 
         let mut app = app;
         app.session_policy = Some(policy);
         let policy = session_policy_with_decision(&app);
-        assert_eq!(
-            policy.decision,
-            Some(crate::gen::ContextPolicyDecision::Off)
-        );
+        assert_eq!(policy.decision, Some(PlannerGate));
+
+        app.session_policy = Some(policy);
+        let policy = session_policy_with_decision(&app);
+        assert_eq!(policy.decision, Some(Off));
+
+        app.session_policy = Some(policy);
+        let policy = session_policy_with_decision(&app);
+        assert_eq!(policy.decision, Some(Planner));
     }
 
     #[test]

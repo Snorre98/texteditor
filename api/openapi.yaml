@@ -933,14 +933,16 @@ paths:
   /decision:
     get:
       operationId: getDecisionPolicy
-      summary: Read the engine's global decision-layer policy (ADR-0053)
+      summary: Read the engine's global decision-layer policy (ADR-0053, ADR-0055)
       description: >
-        The global decision policy from `config/pipeline.json`: whether the Laya
-        decision layer is enabled, the resolved model name, the gate threshold,
-        the candidate cap, the planner history window, the breadth->topK
-        mapping, and the timeout. The effective per-turn state also appears in a
-        turn's context snapshot DecisionRecord; a session/per-turn override
-        rides ContextPolicy.decision. Off by default.
+        The global decision policy from `config/pipeline.json`: the graded `mode`
+        (`off` | `planner` | `planner+gate`), the resolved model name, the gate
+        threshold, the candidate cap, the planner history window, the
+        breadth->topK mapping, the engine-side input caps
+        (`maxChunkTokens`/`maxPlannerTokens`), and the timeout. The effective
+        per-turn state also appears in a turn's context snapshot DecisionRecord;
+        a session/per-turn override rides ContextPolicy.decision with the same
+        three values. `off` by default.
       responses:
         '200':
           description: the global decision policy
@@ -2092,13 +2094,16 @@ components:
             a preset field (ADR-0045).
         decision:
           type: string
-          enum: ["off", "on"]
+          enum: ["off", "planner", "planner+gate"]
           description: >
-            The session/per-turn override for the Laya decision layer (ADR-0053).
+            The session/per-turn override for the Laya decision layer (ADR-0055).
             When absent the persisted session policy, else the global
-            `config/pipeline.json` default (off), applies. `off` disables the
-            layer (no Laya call); `on` enables it. Human/policy outranks Laya:
-            an explicit override wins over the model's answers, and a session
+            `config/pipeline.json` mode (off), applies. `off` runs no Laya call
+            (zero calls, a behavioral no-op vs the pre-Phase-F pipeline);
+            `planner` runs only the planner (retrieve-or-not, breadth, thinking)
+            and keeps every post-exclude candidate; `planner+gate` runs the
+            planner and the per-chunk gate. Human/policy outranks Laya: an
+            explicit override wins over the model's answers, and a session
             `autoRag: false` still disables retrieval (Laya cannot re-enable it).
 
     ContextSnapshot:
@@ -2168,14 +2173,19 @@ components:
     DecisionPolicy:
       type: object
       description: >
-        The engine's global decision-layer policy (ADR-0053), read from
-        `config/pipeline.json` and returned by GET /decision. One global policy;
-        never a preset field (ADR-0045). Off by default.
-      required: [enabled, model, gateThreshold, maxCandidates, maxHistoryTurns, breadthTopK, timeoutMs]
+        The engine's global decision-layer policy (ADR-0053, ADR-0055), read
+        from `config/pipeline.json` and returned by GET /decision. One global
+        policy; never a preset field (ADR-0045). `mode` grades the policy and
+        `off` is the default and a strict no-op (ADR-0054 §2).
+      required: [mode, model, gateThreshold, maxCandidates, maxHistoryTurns, breadthTopK, maxChunkTokens, maxPlannerTokens, timeoutMs]
       properties:
-        enabled:
-          type: boolean
-          description: Whether the Laya decision layer is enabled globally.
+        mode:
+          type: string
+          enum: ["off", "planner", "planner+gate"]
+          description: >
+            The graded enablement (ADR-0055 §1). `off` runs no Laya call;
+            `planner` runs only the planner and keeps every post-exclude
+            candidate; `planner+gate` runs the planner and the per-chunk gate.
         model:
           type: string
           description: >
@@ -2204,6 +2214,20 @@ components:
               type: integer
             many:
               type: integer
+        maxChunkTokens:
+          type: integer
+          description: >
+            The engine-side cap (ADR-0055 §3) applied to each gate passage
+            before the call; an over-cap passage is clamped deterministically
+            and the DecisionChunk is labeled `truncated` (never clamped
+            silently).
+        maxPlannerTokens:
+          type: integer
+          description: >
+            The engine-side cap (ADR-0055 §3) applied to the planner state
+            (request + history + selection) before the call; an over-cap state
+            is clamped deterministically and the DecisionPlanner is labeled
+            `truncated`.
         timeoutMs:
           type: integer
           description: The per-call deadline for a Laya request; a timeout degrades fail-open and labeled.
@@ -2252,6 +2276,12 @@ components:
           type: string
           enum: [none, few, many]
           description: The requested retrieval breadth, mapped to a topK by DecisionPolicy.breadthTopK.
+        truncated:
+          type: boolean
+          description: >
+            True when the engine clamped the planner state to
+            DecisionPolicy.maxPlannerTokens before the call (ADR-0055 §3); the
+            reasoning is never attributed to input the model did not see (Q1).
         degraded:
           type: boolean
           description: True when this call failed (the record falls back to policy defaults).
@@ -2307,6 +2337,12 @@ components:
         keep:
           type: boolean
           description: Whether the chunk entered the payload (score >= threshold, or fail-open).
+        truncated:
+          type: boolean
+          description: >
+            True when the engine clamped this passage to
+            DecisionPolicy.maxChunkTokens before the call (ADR-0055 §3); the
+            score is never attributed to a passage the engine silently cut (Q1).
         reason:
           type: string
           description: An optional label (e.g. below-threshold, low-confidence-kept).

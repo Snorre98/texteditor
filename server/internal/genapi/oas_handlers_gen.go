@@ -1530,11 +1530,12 @@ func (s *Server) handleGetCorpusRequest(args [0]string, argsEscaped bool, w http
 
 // handleGetDecisionPolicyRequest handles getDecisionPolicy operation.
 //
-// The global decision policy from `config/pipeline.json`: whether the Laya decision layer is enabled,
-// the resolved model name, the gate threshold, the candidate cap, the planner history window, the
-// breadth->topK mapping, and the timeout. The effective per-turn state also appears in a turn's
-// context snapshot DecisionRecord; a session/per-turn override rides ContextPolicy.decision. Off by
-// default.
+// The global decision policy from `config/pipeline.json`: the graded `mode` (`off` | `planner` |
+// `planner+gate`), the resolved model name, the gate threshold, the candidate cap, the planner history
+// window, the breadth->topK mapping, the engine-side input caps (`maxChunkTokens`/`maxPlannerTokens`),
+// and the timeout. The effective per-turn state also appears in a turn's context snapshot
+// DecisionRecord; a session/per-turn override rides ContextPolicy.decision with the same three values.
+// `off` by default.
 //
 // GET /decision
 func (s *Server) handleGetDecisionPolicyRequest(args [0]string, argsEscaped bool, w http.ResponseWriter, r *http.Request) {
@@ -1612,7 +1613,7 @@ func (s *Server) handleGetDecisionPolicyRequest(args [0]string, argsEscaped bool
 		mreq := middleware.Request{
 			Context:          ctx,
 			OperationName:    GetDecisionPolicyOperation,
-			OperationSummary: "Read the engine's global decision-layer policy (ADR-0053)",
+			OperationSummary: "Read the engine's global decision-layer policy (ADR-0053, ADR-0055)",
 			OperationID:      "getDecisionPolicy",
 			Body:             nil,
 			RawBody:          rawBody,

@@ -321,7 +321,9 @@ func (s ContextPolicyDecision) Validate() error {
 	switch s {
 	case "off":
 		return nil
-	case "on":
+	case "planner":
+		return nil
+	case "planner+gate":
 		return nil
 	default:
 		return errors.Errorf("invalid value: %v", s)
@@ -978,6 +980,17 @@ func (s *DecisionPolicy) Validate() error {
 
 	var failures []validate.FieldError
 	if err := func() error {
+		if err := s.Mode.Validate(); err != nil {
+			return err
+		}
+		return nil
+	}(); err != nil {
+		failures = append(failures, validate.FieldError{
+			Name:  "mode",
+			Error: err,
+		})
+	}
+	if err := func() error {
 		if err := (validate.Float{}).Validate(float64(s.GateThreshold)); err != nil {
 			return errors.Wrap(err, "float")
 		}
@@ -992,6 +1005,19 @@ func (s *DecisionPolicy) Validate() error {
 		return &validate.Error{Fields: failures}
 	}
 	return nil
+}
+
+func (s DecisionPolicyMode) Validate() error {
+	switch s {
+	case "off":
+		return nil
+	case "planner":
+		return nil
+	case "planner+gate":
+		return nil
+	default:
+		return errors.Errorf("invalid value: %v", s)
+	}
 }
 
 func (s *DecisionRecord) Validate() error {

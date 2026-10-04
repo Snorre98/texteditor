@@ -219,7 +219,11 @@ func (s *stubDecision) Plan(_ context.Context, in dto.DecisionPlannerInput) dto.
 	s.planCalls++
 	s.lastPlanIn = in
 	s.mu.Unlock()
-	return s.plan
+	p := s.plan
+	// Mirror the real client: the engine-labelled clamp rides the input and is
+	// surfaced on the result (ADR-0055 §3).
+	p.Truncated = in.Truncated
+	return p
 }
 
 func (s *stubDecision) Gate(_ context.Context, in dto.DecisionGateInput) dto.DecisionGateResult {
@@ -227,7 +231,20 @@ func (s *stubDecision) Gate(_ context.Context, in dto.DecisionGateInput) dto.Dec
 	s.gateCalls++
 	s.lastGateIn = in
 	s.mu.Unlock()
-	return s.gate
+	g := s.gate
+	// Mirror the real client: one result per input chunk, surfacing the
+	// engine's per-passage clamp label (ADR-0055 §3).
+	if len(g.Chunks) > 0 && len(in.Chunks) == len(g.Chunks) {
+		chunks := make([]dto.DecisionChunkResult, len(g.Chunks))
+		copy(chunks, g.Chunks)
+		for i := range chunks {
+			if i < len(in.Truncated) {
+				chunks[i].Truncated = in.Truncated[i]
+			}
+		}
+		g.Chunks = chunks
+	}
+	return g
 }
 
 func (s *stubDecision) counts() (int, int) {
@@ -236,8 +253,8 @@ func (s *stubDecision) counts() (int, int) {
 	return s.planCalls, s.gateCalls
 }
 
-// decisionPolicy is a decision-enabled pipeline policy for tests.
-func decisionPolicy(enabled bool) dto.PipelinePolicy {
+// decisionPolicy is a decision-layer pipeline policy for tests (ADR-0055).
+func decisionPolicy(mode dto.DecisionMode) dto.PipelinePolicy {
 	return dto.PipelinePolicy{
 		MaxSteps:         6,
 		MaxHistoryTokens: 32000,
@@ -246,13 +263,15 @@ func decisionPolicy(enabled bool) dto.PipelinePolicy {
 		AutoRagTopK:      3,
 		Thinking:         dto.ThinkingAuto,
 		Decision: dto.DecisionPolicy{
-			Enabled:         enabled,
-			Model:           "laya",
-			GateThreshold:   0.5,
-			MaxCandidates:   24,
-			MaxHistoryTurns: 4,
-			BreadthTopK:     dto.DecisionBreadthTopK{None: 0, Few: 3, Many: 8},
-			TimeoutMs:       3000,
+			Mode:             mode,
+			Model:            "laya",
+			GateThreshold:    0.5,
+			MaxCandidates:    24,
+			MaxHistoryTurns:  4,
+			BreadthTopK:      dto.DecisionBreadthTopK{None: 0, Few: 3, Many: 8},
+			MaxChunkTokens:   384,
+			MaxPlannerTokens: 1024,
+			TimeoutMs:        3000,
 		},
 	}
 }
@@ -2714,7 +2733,7 @@ func TestCancelCompletedTurnIsNotRunning(t *testing.T) {
 func TestDecisionGateRecordsAndMeters(t *testing.T) {
 	bus := &stubBus{done: make(chan struct{})}
 	deps := happyPathDeps(bus)
-	deps.Pipeline = stubPipeline{policy: decisionPolicy(true)}
+	deps.Pipeline = stubPipeline{policy: decisionPolicy(dto.DecisionModePlannerGate)}
 	svc := shardSvc(deps)
 	svc.Retriever = &stubRetriever{chunks: []dto.Chunk{
 		{BlockID: "b1", ChunkKey: "/v/a.md#0", Path: "/v/a.md", Text: "keep", Score: 0.9},
@@ -2777,7 +2796,7 @@ func TestDecisionGateRecordsAndMeters(t *testing.T) {
 func TestDecisionDegradedLabeled(t *testing.T) {
 	bus := &stubBus{done: make(chan struct{})}
 	deps := happyPathDeps(bus)
-	deps.Pipeline = stubPipeline{policy: decisionPolicy(true)}
+	deps.Pipeline = stubPipeline{policy: decisionPolicy(dto.DecisionModePlannerGate)}
 	svc := shardSvc(deps)
 	svc.Retriever = &stubRetriever{chunks: []dto.Chunk{
 		{ChunkKey: "/v/a.md#0", Path: "/v/a.md", Text: "one"},
@@ -2809,7 +2828,7 @@ func TestDecisionDegradedLabeled(t *testing.T) {
 func TestDecisionRetrieveFalseSkipsRetrieval(t *testing.T) {
 	bus := &stubBus{done: make(chan struct{})}
 	deps := happyPathDeps(bus)
-	deps.Pipeline = stubPipeline{policy: decisionPolicy(true)}
+	deps.Pipeline = stubPipeline{policy: decisionPolicy(dto.DecisionModePlannerGate)}
 	svc := shardSvc(deps)
 	ret := &stubRetriever{chunks: []dto.Chunk{{ChunkKey: "/v/a.md#0"}}}
 	svc.Retriever = ret
@@ -2833,14 +2852,21 @@ func TestDecisionRetrieveFalseSkipsRetrieval(t *testing.T) {
 	}
 }
 
-// TestDecisionDisabledRunsNoCalls: a disabled layer runs no Laya call and records
-// no decision.
-func TestDecisionDisabledRunsNoCalls(t *testing.T) {
+// TestDecisionOffBaselineNoOp proves the ADR-0054 §2 decoupling guarantee: with
+// mode=off and no Laya client at all, the turn is behaviorally the pre-Phase-F
+// pipeline — retrieval at autoRagTopK, the full pre-gate candidate set, no
+// DecisionRecord, and zero decision meter rows.
+func TestDecisionOffBaselineNoOp(t *testing.T) {
 	bus := &stubBus{done: make(chan struct{})}
 	deps := happyPathDeps(bus)
-	deps.Pipeline = stubPipeline{policy: decisionPolicy(false)}
-	dec := &stubDecision{plan: dto.DecisionPlan{Retrieve: true}}
-	deps.Decision = dec
+	deps.Pipeline = stubPipeline{policy: decisionPolicy(dto.DecisionModeOff)}
+	deps.Decision = nil // Laya absent entirely
+	svc := shardSvc(deps)
+	ret := &stubRetriever{chunks: []dto.Chunk{
+		{ChunkKey: "/v/a.md#0", Path: "/v/a.md", Text: "one"},
+		{ChunkKey: "/v/b.md#0", Path: "/v/b.md", Text: "two"},
+	}}
+	svc.Retriever = ret
 	deps.Workspaces = &routeWorkspaces{}
 
 	l := New(deps)
@@ -2848,20 +2874,202 @@ func TestDecisionDisabledRunsNoCalls(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitDone(t, bus)
-	if pc, gc := dec.counts(); pc != 0 || gc != 0 {
-		t.Fatalf("decision calls = %d/%d, want 0/0", pc, gc)
+	events := busEvents(t, bus)
+	if got := ret.queries(); len(got) != 1 || got[0] != 3 {
+		t.Fatalf("retrieval topK = %v, want one query at autoRagTopK=3", got)
 	}
-	if snap := snapshotFromEvents(t, busEvents(t, bus)); snap.Decision != nil {
+	if got := ragChunksFromEvents(t, events); len(got) != 2 {
+		t.Fatalf("rag chunks = %d, want the full pre-gate set (2)", len(got))
+	}
+	snap := snapshotFromEvents(t, events)
+	if snap.Decision != nil {
 		t.Fatalf("snapshot decision = %+v, want nil", snap.Decision)
+	}
+	if len(snap.Chunks) != 2 {
+		t.Fatalf("surviving chunks = %d, want all 2 (no gate drops)", len(snap.Chunks))
+	}
+	for _, d := range snap.Drops {
+		if d.Reason == "gate" {
+			t.Fatalf("unexpected gate drop on an off turn: %+v", snap.Drops)
+		}
+	}
+	if m := svc.Meter.(*stubMeter); m.decisions != 0 {
+		t.Fatalf("metered decision rows = %d, want 0", m.decisions)
+	}
+}
+
+// TestDecisionPlannerModeSkipsGate: `planner` runs only the planner — the gate
+// is never called, every post-exclude candidate is kept, the planner still sets
+// retrieve/breadth/thinking, and only the planner row is metered (ADR-0055 §1/§5).
+func TestDecisionPlannerModeSkipsGate(t *testing.T) {
+	bus := &stubBus{done: make(chan struct{})}
+	deps := happyPathDeps(bus)
+	deps.Pipeline = stubPipeline{policy: decisionPolicy(dto.DecisionModePlanner)}
+	svc := shardSvc(deps)
+	ret := &stubRetriever{chunks: []dto.Chunk{
+		{BlockID: "b1", ChunkKey: "/v/a.md#0", Path: "/v/a.md", Text: "keep", Score: 0.9},
+		{BlockID: "b2", ChunkKey: "/v/b.md#0", Path: "/v/b.md", Text: "drop", Score: 0.4},
+	}}
+	svc.Retriever = ret
+	dec := &stubDecision{
+		plan: dto.DecisionPlan{Checkpoint: "english", Retrieve: true, Thinking: dto.ThinkingOn, Breadth: dto.DecisionBreadthFew, PromptTokens: 11, CompletionTokens: 2},
+		gate: dto.DecisionGateResult{Threshold: 0.5, Chunks: []dto.DecisionChunkResult{{ChunkKey: "/v/b.md#0", Keep: false, Reason: "below-threshold"}}},
+	}
+	deps.Decision = dec
+	deps.Workspaces = &routeWorkspaces{}
+
+	l := New(deps)
+	if _, err := l.Run(context.Background(), dto.Task{SessionID: "s1", ModeName: "proofreader", DocumentID: "d1", UserInput: "expand"}); err != nil {
+		t.Fatal(err)
+	}
+	waitDone(t, bus)
+	events := busEvents(t, bus)
+	if pc, gc := dec.counts(); pc != 1 || gc != 0 {
+		t.Fatalf("decision calls = %d/%d, want 1/0 (planner only)", pc, gc)
+	}
+	if m := svc.Meter.(*stubMeter); m.decisions != 1 {
+		t.Fatalf("metered decision rows = %d, want 1 (planner)", m.decisions)
+	}
+	snap := snapshotFromEvents(t, events)
+	if snap.Decision == nil || snap.Decision.Planner == nil {
+		t.Fatalf("decision record = %+v", snap.Decision)
+	}
+	if !snap.Decision.Planner.Retrieve || snap.Decision.Planner.Thinking != dto.ThinkingOn {
+		t.Fatalf("planner = %+v", snap.Decision.Planner)
+	}
+	if snap.Decision.Gate != nil {
+		t.Fatalf("planner mode must not record a gate: %+v", snap.Decision.Gate)
+	}
+	if len(snap.Chunks) != 2 {
+		t.Fatalf("planner mode must keep every candidate: %+v", snap.Chunks)
+	}
+	for _, d := range snap.Drops {
+		if d.Reason == "gate" {
+			t.Fatalf("unexpected gate drop in planner mode: %+v", snap.Drops)
+		}
+	}
+}
+
+// TestDecisionTruncationLabeled: over-long planner state and gate passages are
+// clamped engine-side deterministically and labeled `truncated` (ADR-0055 §3,
+// Q1 — never silent).
+func TestDecisionTruncationLabeled(t *testing.T) {
+	bus := &stubBus{done: make(chan struct{})}
+	deps := happyPathDeps(bus)
+	policy := decisionPolicy(dto.DecisionModePlannerGate)
+	policy.Decision.MaxPlannerTokens = 4 // 16 bytes
+	policy.Decision.MaxChunkTokens = 2   // 8 bytes
+	deps.Pipeline = stubPipeline{policy: policy}
+	svc := shardSvc(deps)
+	longPassage := "this passage is definitely longer than eight bytes"
+	svc.Retriever = &stubRetriever{chunks: []dto.Chunk{
+		{ChunkKey: "/v/a.md#0", Path: "/v/a.md", Text: longPassage},
+	}}
+	dec := &stubDecision{
+		plan: dto.DecisionPlan{Retrieve: true, Thinking: dto.ThinkingOff, Breadth: dto.DecisionBreadthFew, PromptTokens: 1},
+		gate: dto.DecisionGateResult{Threshold: 0.5, PromptTokens: 1, Chunks: []dto.DecisionChunkResult{
+			{ChunkKey: "/v/a.md#0", Score: 0.9, Keep: true},
+		}},
+	}
+	deps.Decision = dec
+	deps.Workspaces = &routeWorkspaces{}
+
+	l := New(deps)
+	if _, err := l.Run(context.Background(), dto.Task{SessionID: "s1", ModeName: "proofreader", DocumentID: "d1", UserInput: "a very long writing request that exceeds the planner cap"}); err != nil {
+		t.Fatal(err)
+	}
+	waitDone(t, bus)
+
+	dec.mu.Lock()
+	planIn := dec.lastPlanIn
+	gateIn := dec.lastGateIn
+	dec.mu.Unlock()
+	if !planIn.Truncated {
+		t.Fatalf("planner input not labeled truncated: %+v", planIn)
+	}
+	if len(planIn.State) > policy.Decision.MaxPlannerTokens*4 {
+		t.Fatalf("planner state not clamped: %d bytes", len(planIn.State))
+	}
+	if !gateIn.Truncated[0] {
+		t.Fatalf("gate passage not labeled truncated: %+v", gateIn.Truncated)
+	}
+	if len(gateIn.Chunks[0].Text) > policy.Decision.MaxChunkTokens*4 {
+		t.Fatalf("gate passage not clamped: %q", gateIn.Chunks[0].Text)
+	}
+	snap := snapshotFromEvents(t, busEvents(t, bus))
+	if snap.Decision == nil || snap.Decision.Planner == nil || !snap.Decision.Planner.Truncated {
+		t.Fatalf("planner record not labeled truncated: %+v", snap.Decision)
+	}
+	if snap.Decision.Gate == nil || len(snap.Decision.Gate.Chunks) != 1 || !snap.Decision.Gate.Chunks[0].Truncated {
+		t.Fatalf("gate record not labeled truncated: %+v", snap.Decision.Gate)
+	}
+	// The displayed/retrieved chunk text is unchanged (clamping is on the
+	// decision-input copy only).
+	if snap.Chunks[0].Text != longPassage {
+		t.Fatalf("snapshot chunk text mutated by the decision clamp: %q", snap.Chunks[0].Text)
+	}
+}
+
+// TestDecisionOverridePrecedence: the effective mode is per-turn > session >
+// global, and `off` at any layer yields zero Laya calls (ADR-0055 §2).
+func TestDecisionOverridePrecedence(t *testing.T) {
+	// Global planner+gate, per-turn planner → the gate never runs.
+	bus := &stubBus{done: make(chan struct{})}
+	deps := happyPathDeps(bus)
+	deps.Pipeline = stubPipeline{policy: decisionPolicy(dto.DecisionModePlannerGate)}
+	svc := shardSvc(deps)
+	svc.Retriever = &stubRetriever{chunks: []dto.Chunk{{ChunkKey: "/v/a.md#0", Path: "/v/a.md", Text: "x"}}}
+	dec := &stubDecision{plan: dto.DecisionPlan{Retrieve: true, Breadth: dto.DecisionBreadthFew}}
+	deps.Decision = dec
+	deps.Workspaces = &routeWorkspaces{}
+
+	planner := dto.DecisionPlanner
+	l := New(deps)
+	if _, err := l.Run(context.Background(), dto.Task{
+		SessionID: "s1", ModeName: "proofreader", DocumentID: "d1", UserInput: "x",
+		Context: &dto.ContextPolicy{Decision: &planner},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	waitDone(t, bus)
+	if pc, gc := dec.counts(); pc != 1 || gc != 0 {
+		t.Fatalf("per-turn planner override = %d/%d calls, want 1/0", pc, gc)
+	}
+
+	// Global off, per-turn planner+gate → the layer runs anyway (override wins
+	// over the global default).
+	bus2 := &stubBus{done: make(chan struct{})}
+	deps2 := happyPathDeps(bus2)
+	deps2.Pipeline = stubPipeline{policy: decisionPolicy(dto.DecisionModeOff)}
+	svc2 := shardSvc(deps2)
+	svc2.Retriever = &stubRetriever{chunks: []dto.Chunk{{ChunkKey: "/v/a.md#0", Path: "/v/a.md", Text: "x"}}}
+	dec2 := &stubDecision{
+		plan: dto.DecisionPlan{Retrieve: true, Breadth: dto.DecisionBreadthFew},
+		gate: dto.DecisionGateResult{Threshold: 0.5, Chunks: []dto.DecisionChunkResult{{ChunkKey: "/v/a.md#0", Keep: true}}},
+	}
+	deps2.Decision = dec2
+	deps2.Workspaces = &routeWorkspaces{}
+	plannerGate := dto.DecisionPlannerGate
+	l2 := New(deps2)
+	if _, err := l2.Run(context.Background(), dto.Task{
+		SessionID: "s1", ModeName: "proofreader", DocumentID: "d1", UserInput: "x",
+		Context: &dto.ContextPolicy{Decision: &plannerGate},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	waitDone(t, bus2)
+	if pc, gc := dec2.counts(); pc != 1 || gc != 1 {
+		t.Fatalf("per-turn planner+gate override over global off = %d/%d calls, want 1/1", pc, gc)
 	}
 }
 
 // TestDecisionOverrideOffDisables: a per-turn ContextPolicy.decision=off runs no
-// Laya call even when the global policy is on (human/policy outranks Laya).
+// Laya call even when the global policy enables the layer (human/policy outranks
+// Laya).
 func TestDecisionOverrideOffDisables(t *testing.T) {
 	bus := &stubBus{done: make(chan struct{})}
 	deps := happyPathDeps(bus)
-	deps.Pipeline = stubPipeline{policy: decisionPolicy(true)}
+	deps.Pipeline = stubPipeline{policy: decisionPolicy(dto.DecisionModePlannerGate)}
 	dec := &stubDecision{plan: dto.DecisionPlan{Retrieve: true}}
 	deps.Decision = dec
 	deps.Workspaces = &routeWorkspaces{}
@@ -2885,7 +3093,7 @@ func TestDecisionOverrideOffDisables(t *testing.T) {
 func TestDecisionPinsBypassGate(t *testing.T) {
 	bus := &stubBus{done: make(chan struct{})}
 	deps := happyPathDeps(bus)
-	deps.Pipeline = stubPipeline{policy: decisionPolicy(true)}
+	deps.Pipeline = stubPipeline{policy: decisionPolicy(dto.DecisionModePlannerGate)}
 	svc := shardSvc(deps)
 	svc.Retriever = &stubRetriever{
 		chunks:    []dto.Chunk{{ChunkKey: "/v/auto.md#0", Path: "/v/auto.md", Text: "auto"}},

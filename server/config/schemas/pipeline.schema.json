@@ -77,13 +77,14 @@
     },
     "decision": {
       "type": "object",
-      "description": "The one global Laya decision-layer policy (ADR-0053). Off by default; never per-preset.",
-      "required": ["enabled", "model", "gateThreshold", "maxCandidates", "maxHistoryTurns", "breadthTopK", "timeoutMs"],
+      "description": "The one global Laya decision-layer policy (ADR-0053, ADR-0055). Mode `off` by default; never per-preset.",
+      "required": ["mode", "model", "gateThreshold", "maxCandidates", "maxHistoryTurns", "breadthTopK", "maxChunkTokens", "maxPlannerTokens", "timeoutMs"],
       "additionalProperties": false,
       "properties": {
-        "enabled": {
-          "type": "boolean",
-          "description": "Whether the Laya decision layer is enabled globally (a session/per-turn ContextPolicy.decision may override)."
+        "mode": {
+          "type": "string",
+          "enum": ["off", "planner", "planner+gate"],
+          "description": "Graded enablement (ADR-0055 §1): off = no Laya call; planner = planner only, every post-exclude candidate kept; planner+gate = planner + per-chunk gate. A session/per-turn ContextPolicy.decision may override with the same values."
         },
         "model": {
           "type": "string",
@@ -116,6 +117,16 @@
             "few": { "type": "integer", "minimum": 0 },
             "many": { "type": "integer", "minimum": 0 }
           }
+        },
+        "maxChunkTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Engine-side cap (ADR-0055 §3) on each gate passage; over-cap passages are clamped deterministically and labeled `truncated` (never silent)."
+        },
+        "maxPlannerTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Engine-side cap (ADR-0055 §3) on the planner state (request + history + selection); over-cap states are clamped deterministically and labeled `truncated`."
         },
         "timeoutMs": {
           "type": "integer",

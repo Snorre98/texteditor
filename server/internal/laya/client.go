@@ -86,7 +86,7 @@ func (c *client) Plan(ctx context.Context, in dto.DecisionPlannerInput) dto.Deci
 	}
 
 	req := systemOneRequest{
-		State:     plannerState(in),
+		State:     PlannerState(in),
 		Questions: plannerQuestions(),
 	}
 	var resp systemOneResponse
@@ -110,6 +110,7 @@ func (c *client) Plan(ctx context.Context, in dto.DecisionPlannerInput) dto.Deci
 		Retrieve:         retrieve.Noul >= plannerRetrieveThreshold,
 		Thinking:         parseThinking(thinking.Choice),
 		Breadth:          parseBreadth(breadth.Choice),
+		Truncated:        in.Truncated,
 		PromptTokens:     resp.Usage.InputTokens,
 		CompletionTokens: resp.Usage.OutputTokens,
 	}
@@ -177,11 +178,12 @@ func (c *client) Gate(ctx context.Context, in dto.DecisionGateInput) dto.Decisio
 			chunkReason = "low-confidence-kept"
 		}
 		res.Chunks = append(res.Chunks, dto.DecisionChunkResult{
-			ChunkKey: in.Chunks[i].ChunkKey,
-			Path:     in.Chunks[i].Path,
-			Score:    score,
-			Keep:     keep,
-			Reason:   chunkReason,
+			ChunkKey:  in.Chunks[i].ChunkKey,
+			Path:      in.Chunks[i].Path,
+			Score:     score,
+			Keep:      keep,
+			Truncated: i < len(in.Truncated) && in.Truncated[i],
+			Reason:    chunkReason,
 		})
 	}
 	return res
@@ -242,7 +244,15 @@ func classify(err error) dto.DecisionDegradeReason {
 
 // ---------- prompt construction ----------
 
-func plannerState(in dto.DecisionPlannerInput) string {
+// PlannerState builds the planner call's state string (ADR-0053 §3) from the
+// request, preset, selected passage, and bounded history. Exported so the engine
+// can build and deterministically clamp it to maxPlannerTokens before the call
+// (ADR-0055 §3); when in.State is already set (the engine's clamped state) it is
+// returned verbatim.
+func PlannerState(in dto.DecisionPlannerInput) string {
+	if in.State != "" {
+		return in.State
+	}
 	var b strings.Builder
 	b.WriteString("Writing request:\n")
 	b.WriteString(in.Request)

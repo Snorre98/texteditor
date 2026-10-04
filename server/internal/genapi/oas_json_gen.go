@@ -2176,8 +2176,10 @@ func (s *ContextPolicyDecision) Decode(d *jx.Decoder) error {
 	switch ContextPolicyDecision(v) {
 	case ContextPolicyDecisionOff:
 		*s = ContextPolicyDecisionOff
-	case ContextPolicyDecisionOn:
-		*s = ContextPolicyDecisionOn
+	case ContextPolicyDecisionPlanner:
+		*s = ContextPolicyDecisionPlanner
+	case ContextPolicyDecisionPlannerGate:
+		*s = ContextPolicyDecisionPlannerGate
 	default:
 		*s = ContextPolicyDecision(v)
 	}
@@ -3835,6 +3837,12 @@ func (s *DecisionChunk) encodeFields(e *jx.Encoder) {
 		e.Bool(s.Keep)
 	}
 	{
+		if s.Truncated.Set {
+			e.FieldStart("truncated")
+			s.Truncated.Encode(e)
+		}
+	}
+	{
 		if s.Reason.Set {
 			e.FieldStart("reason")
 			s.Reason.Encode(e)
@@ -3842,12 +3850,13 @@ func (s *DecisionChunk) encodeFields(e *jx.Encoder) {
 	}
 }
 
-var jsonFieldsNameOfDecisionChunk = [5]string{
+var jsonFieldsNameOfDecisionChunk = [6]string{
 	0: "chunkKey",
 	1: "path",
 	2: "score",
 	3: "keep",
-	4: "reason",
+	4: "truncated",
+	5: "reason",
 }
 
 // Decode decodes DecisionChunk from json.
@@ -3902,6 +3911,16 @@ func (s *DecisionChunk) Decode(d *jx.Decoder) error {
 				return nil
 			}(); err != nil {
 				return errors.Wrap(err, "decode field \"keep\"")
+			}
+		case "truncated":
+			if err := func() error {
+				s.Truncated.Reset()
+				if err := s.Truncated.Decode(d); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"truncated\"")
 			}
 		case "reason":
 			if err := func() error {
@@ -4223,6 +4242,12 @@ func (s *DecisionPlanner) encodeFields(e *jx.Encoder) {
 		}
 	}
 	{
+		if s.Truncated.Set {
+			e.FieldStart("truncated")
+			s.Truncated.Encode(e)
+		}
+	}
+	{
 		if s.Degraded.Set {
 			e.FieldStart("degraded")
 			s.Degraded.Encode(e)
@@ -4248,15 +4273,16 @@ func (s *DecisionPlanner) encodeFields(e *jx.Encoder) {
 	}
 }
 
-var jsonFieldsNameOfDecisionPlanner = [8]string{
+var jsonFieldsNameOfDecisionPlanner = [9]string{
 	0: "checkpoint",
 	1: "retrieve",
 	2: "thinking",
 	3: "breadth",
-	4: "degraded",
-	5: "reason",
-	6: "promptTokens",
-	7: "completionTokens",
+	4: "truncated",
+	5: "degraded",
+	6: "reason",
+	7: "promptTokens",
+	8: "completionTokens",
 }
 
 // Decode decodes DecisionPlanner from json.
@@ -4306,6 +4332,16 @@ func (s *DecisionPlanner) Decode(d *jx.Decoder) error {
 				return nil
 			}(); err != nil {
 				return errors.Wrap(err, "decode field \"breadth\"")
+			}
+		case "truncated":
+			if err := func() error {
+				s.Truncated.Reset()
+				if err := s.Truncated.Decode(d); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"truncated\"")
 			}
 		case "degraded":
 			if err := func() error {
@@ -4509,8 +4545,8 @@ func (s *DecisionPolicy) Encode(e *jx.Encoder) {
 // encodeFields encodes fields.
 func (s *DecisionPolicy) encodeFields(e *jx.Encoder) {
 	{
-		e.FieldStart("enabled")
-		e.Bool(s.Enabled)
+		e.FieldStart("mode")
+		s.Mode.Encode(e)
 	}
 	{
 		e.FieldStart("model")
@@ -4533,19 +4569,29 @@ func (s *DecisionPolicy) encodeFields(e *jx.Encoder) {
 		s.BreadthTopK.Encode(e)
 	}
 	{
+		e.FieldStart("maxChunkTokens")
+		e.Int(s.MaxChunkTokens)
+	}
+	{
+		e.FieldStart("maxPlannerTokens")
+		e.Int(s.MaxPlannerTokens)
+	}
+	{
 		e.FieldStart("timeoutMs")
 		e.Int(s.TimeoutMs)
 	}
 }
 
-var jsonFieldsNameOfDecisionPolicy = [7]string{
-	0: "enabled",
+var jsonFieldsNameOfDecisionPolicy = [9]string{
+	0: "mode",
 	1: "model",
 	2: "gateThreshold",
 	3: "maxCandidates",
 	4: "maxHistoryTurns",
 	5: "breadthTopK",
-	6: "timeoutMs",
+	6: "maxChunkTokens",
+	7: "maxPlannerTokens",
+	8: "timeoutMs",
 }
 
 // Decode decodes DecisionPolicy from json.
@@ -4553,21 +4599,19 @@ func (s *DecisionPolicy) Decode(d *jx.Decoder) error {
 	if s == nil {
 		return errors.New("invalid: unable to decode DecisionPolicy to nil")
 	}
-	var requiredBitSet [1]uint8
+	var requiredBitSet [2]uint8
 
 	if err := d.ObjBytes(func(d *jx.Decoder, k []byte) error {
 		switch string(k) {
-		case "enabled":
+		case "mode":
 			requiredBitSet[0] |= 1 << 0
 			if err := func() error {
-				v, err := d.Bool()
-				s.Enabled = bool(v)
-				if err != nil {
+				if err := s.Mode.Decode(d); err != nil {
 					return err
 				}
 				return nil
 			}(); err != nil {
-				return errors.Wrap(err, "decode field \"enabled\"")
+				return errors.Wrap(err, "decode field \"mode\"")
 			}
 		case "model":
 			requiredBitSet[0] |= 1 << 1
@@ -4627,8 +4671,32 @@ func (s *DecisionPolicy) Decode(d *jx.Decoder) error {
 			}(); err != nil {
 				return errors.Wrap(err, "decode field \"breadthTopK\"")
 			}
-		case "timeoutMs":
+		case "maxChunkTokens":
 			requiredBitSet[0] |= 1 << 6
+			if err := func() error {
+				v, err := d.Int()
+				s.MaxChunkTokens = int(v)
+				if err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"maxChunkTokens\"")
+			}
+		case "maxPlannerTokens":
+			requiredBitSet[0] |= 1 << 7
+			if err := func() error {
+				v, err := d.Int()
+				s.MaxPlannerTokens = int(v)
+				if err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"maxPlannerTokens\"")
+			}
+		case "timeoutMs":
+			requiredBitSet[1] |= 1 << 0
 			if err := func() error {
 				v, err := d.Int()
 				s.TimeoutMs = int(v)
@@ -4648,8 +4716,9 @@ func (s *DecisionPolicy) Decode(d *jx.Decoder) error {
 	}
 	// Validate required fields.
 	var failures []validate.FieldError
-	for i, mask := range [1]uint8{
-		0b01111111,
+	for i, mask := range [2]uint8{
+		0b11111111,
+		0b00000001,
 	} {
 		if result := (requiredBitSet[i] & mask) ^ mask; result != 0 {
 			// Mask only required fields and check equality to mask using XOR.
@@ -4821,6 +4890,48 @@ func (s *DecisionPolicyBreadthTopK) MarshalJSON() ([]byte, error) {
 
 // UnmarshalJSON implements stdjson.Unmarshaler.
 func (s *DecisionPolicyBreadthTopK) UnmarshalJSON(data []byte) error {
+	d := jx.DecodeBytes(data)
+	return s.Decode(d)
+}
+
+// Encode encodes DecisionPolicyMode as json.
+func (s DecisionPolicyMode) Encode(e *jx.Encoder) {
+	e.Str(string(s))
+}
+
+// Decode decodes DecisionPolicyMode from json.
+func (s *DecisionPolicyMode) Decode(d *jx.Decoder) error {
+	if s == nil {
+		return errors.New("invalid: unable to decode DecisionPolicyMode to nil")
+	}
+	v, err := d.StrBytes()
+	if err != nil {
+		return err
+	}
+	// Try to use constant string.
+	switch DecisionPolicyMode(v) {
+	case DecisionPolicyModeOff:
+		*s = DecisionPolicyModeOff
+	case DecisionPolicyModePlanner:
+		*s = DecisionPolicyModePlanner
+	case DecisionPolicyModePlannerGate:
+		*s = DecisionPolicyModePlannerGate
+	default:
+		*s = DecisionPolicyMode(v)
+	}
+
+	return nil
+}
+
+// MarshalJSON implements stdjson.Marshaler.
+func (s DecisionPolicyMode) MarshalJSON() ([]byte, error) {
+	e := jx.Encoder{}
+	s.Encode(&e)
+	return e.Bytes(), nil
+}
+
+// UnmarshalJSON implements stdjson.Unmarshaler.
+func (s *DecisionPolicyMode) UnmarshalJSON(data []byte) error {
 	d := jx.DecodeBytes(data)
 	return s.Decode(d)
 }

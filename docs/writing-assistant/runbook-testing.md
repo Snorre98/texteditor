@@ -145,13 +145,13 @@ It asserts, in order:
 
 1. `GET /decision` returns the global policy block.
 2. A temp workspace → corpus → index.
-3. A turn with a per-turn `ContextPolicy.decision=on` emits `rag` + `context`.
+3. A turn with a per-turn `ContextPolicy.decision=planner+gate` emits `rag` + `context`.
 4. `GET /turns/{id}/context` carries `decision.planner` (retrieve/thinking/breadth/checkpoint),
    `decision.gate.chunks[]` with scores, survivors (`chunks`) equal to the kept
    candidates, a labeled `ContextDrop{component:rag,reason:gate}` per drop, and a
    `rag` event that is **pre-gate** (≥ survivors).
 5. `GET /sessions/{id}/meter` has a `decision` component row.
-6. A session `PUT /sessions/{id}/context {"decision":"on"}` gates the next turn
+6. A session `PUT /sessions/{id}/context {"decision":"planner+gate"}` gates the next turn
    without a per-turn override.
 7. A pinned chunk survives the gate and is labeled `humanOverride`.
 8. `SMOKE_LAYADOWN=1` stops `laya`, reruns, and asserts `decision.degraded=true`
@@ -175,7 +175,7 @@ Checklist:
 
 1. workspace opens; Ctrl+W / Ctrl+S browse and list sessions
 2. Ctrl+K corpus tree: `s` scope, `i` index/rebuild (watch job progress), `e` evict; on-disk markdown untouched
-3. Ctrl+T tray: pin, exclude, edit the retrieval query, toggle auto-RAG, **`d` toggles the decision layer**; confirm the inspector shows `pinned`/`humanOverride`/drops
+3. Ctrl+T tray: pin, exclude, edit the retrieval query, toggle auto-RAG, **`d` cycles the decision layer** (off → planner → planner+gate); confirm the inspector shows `pinned`/`humanOverride`/drops
 4. Ctrl+I inspector: meter, context, thinking/budget, and the **decision section** (planner, gate kept/dropped + scores + checkpoint, `degraded` label)
 5. Ctrl+R reader renders the engine's markdown (read-only)
 6. `@` attaches a mention; run a turn; Ctrl+X cancels with a labeled `done {cancelled:true}`

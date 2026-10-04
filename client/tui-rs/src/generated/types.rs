@@ -1110,15 +1110,13 @@ pub struct WordEdit {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub insertions: Option<Vec<String>>,
 }
-/**The engine's global decision-layer policy (ADR-0053), read from `config/pipeline.json` and returned by GET /decision. One global policy; never a preset field (ADR-0045). Off by default.
+/**The engine's global decision-layer policy (ADR-0053, ADR-0055), read from `config/pipeline.json` and returned by GET /decision. One global policy; never a preset field (ADR-0045). `mode` grades the policy and `off` is the default and a strict no-op (ADR-0054 §2).
 */
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct DecisionPolicy {
     ///Maps the planner's `breadth` choice to the retrieval topK.
     #[serde(rename = "breadthTopK")]
     pub breadth_top_k: DecisionPolicyBreadthTopK,
-    ///Whether the Laya decision layer is enabled globally.
-    pub enabled: bool,
     /**The engine-applied keep threshold τ on the gate's per-chunk P(relevant) `noul` answer. Chunks at or above are kept.
 */
     #[serde(rename = "gateThreshold")]
@@ -1126,15 +1124,57 @@ pub struct DecisionPolicy {
     ///The maximum number of candidate chunks sent to the gate (bounded by Laya's batch cap).
     #[serde(rename = "maxCandidates")]
     pub max_candidates: i64,
+    /**The engine-side cap (ADR-0055 §3) applied to each gate passage before the call; an over-cap passage is clamped deterministically and the DecisionChunk is labeled `truncated` (never clamped silently).
+*/
+    #[serde(rename = "maxChunkTokens")]
+    pub max_chunk_tokens: i64,
     ///The number of recent history turns the planner sees.
     #[serde(rename = "maxHistoryTurns")]
     pub max_history_turns: i64,
+    /**The engine-side cap (ADR-0055 §3) applied to the planner state (request + history + selection) before the call; an over-cap state is clamped deterministically and the DecisionPlanner is labeled `truncated`.
+*/
+    #[serde(rename = "maxPlannerTokens")]
+    pub max_planner_tokens: i64,
+    /**The graded enablement (ADR-0055 §1). `off` runs no Laya call; `planner` runs only the planner and keeps every post-exclude candidate; `planner+gate` runs the planner and the per-chunk gate.
+*/
+    pub mode: DecisionPolicyMode,
     /**The Laya service resolved by name via Fleet (the nomic-embed / needle-router pattern). Laya's own Router selects the checkpoint per request by script/language.
 */
     pub model: String,
     ///The per-call deadline for a Laya request; a timeout degrades fail-open and labeled.
     #[serde(rename = "timeoutMs")]
     pub timeout_ms: i64,
+}
+/**The graded enablement (ADR-0055 §1). `off` runs no Laya call; `planner` runs only the planner and keeps every post-exclude candidate; `planner+gate` runs the planner and the per-chunk gate.
+*/
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, Default)]
+pub enum DecisionPolicyMode {
+    #[default]
+    #[serde(rename = "off")]
+    Off,
+    #[serde(rename = "planner")]
+    Planner,
+    #[serde(rename = "planner+gate")]
+    PlannerGate,
+}
+impl DecisionPolicyMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Planner => "planner",
+            Self::PlannerGate => "planner+gate",
+        }
+    }
+}
+impl ::std::fmt::Display for DecisionPolicyMode {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+impl AsRef<str> for DecisionPolicyMode {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
 }
 ///Maps the planner's `breadth` choice to the retrieval topK.
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -1295,7 +1335,7 @@ pub struct ContextPolicy {
 */
     #[serde(rename = "autoRag", skip_serializing_if = "Option::is_none")]
     pub auto_rag: Option<bool>,
-    /**The session/per-turn override for the Laya decision layer (ADR-0053). When absent the persisted session policy, else the global `config/pipeline.json` default (off), applies. `off` disables the layer (no Laya call); `on` enables it. Human/policy outranks Laya: an explicit override wins over the model's answers, and a session `autoRag: false` still disables retrieval (Laya cannot re-enable it).
+    /**The session/per-turn override for the Laya decision layer (ADR-0055). When absent the persisted session policy, else the global `config/pipeline.json` mode (off), applies. `off` runs no Laya call (zero calls, a behavioral no-op vs the pre-Phase-F pipeline); `planner` runs only the planner (retrieve-or-not, breadth, thinking) and keeps every post-exclude candidate; `planner+gate` runs the planner and the per-chunk gate. Human/policy outranks Laya: an explicit override wins over the model's answers, and a session `autoRag: false` still disables retrieval (Laya cannot re-enable it).
 */
     #[serde(skip_serializing_if = "Option::is_none")]
     pub decision: Option<ContextPolicyDecision>,
@@ -1347,21 +1387,24 @@ impl AsRef<str> for ContextPolicyThinking {
         self.as_str()
     }
 }
-/**The session/per-turn override for the Laya decision layer (ADR-0053). When absent the persisted session policy, else the global `config/pipeline.json` default (off), applies. `off` disables the layer (no Laya call); `on` enables it. Human/policy outranks Laya: an explicit override wins over the model's answers, and a session `autoRag: false` still disables retrieval (Laya cannot re-enable it).
+/**The session/per-turn override for the Laya decision layer (ADR-0055). When absent the persisted session policy, else the global `config/pipeline.json` mode (off), applies. `off` runs no Laya call (zero calls, a behavioral no-op vs the pre-Phase-F pipeline); `planner` runs only the planner (retrieve-or-not, breadth, thinking) and keeps every post-exclude candidate; `planner+gate` runs the planner and the per-chunk gate. Human/policy outranks Laya: an explicit override wins over the model's answers, and a session `autoRag: false` still disables retrieval (Laya cannot re-enable it).
 */
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, Default)]
 pub enum ContextPolicyDecision {
     #[default]
     #[serde(rename = "off")]
     Off,
-    #[serde(rename = "on")]
-    On,
+    #[serde(rename = "planner")]
+    Planner,
+    #[serde(rename = "planner+gate")]
+    PlannerGate,
 }
 impl ContextPolicyDecision {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Off => "off",
-            Self::On => "on",
+            Self::Planner => "planner",
+            Self::PlannerGate => "planner+gate",
         }
     }
 }
@@ -1700,6 +1743,10 @@ pub struct DecisionPlanner {
     ///The thinking level Laya selected (overridden by an explicit ContextPolicy.thinking).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thinking: Option<DecisionPlannerThinking>,
+    /**True when the engine clamped the planner state to DecisionPolicy.maxPlannerTokens before the call (ADR-0055 §3); the reasoning is never attributed to input the model did not see (Q1).
+*/
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub truncated: Option<bool>,
 }
 ///The thinking level Laya selected (overridden by an explicit ContextPolicy.thinking).
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, Default)]
@@ -1864,6 +1911,10 @@ pub struct DecisionChunk {
     ///The gate's P(relevant) for this chunk.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub score: Option<f64>,
+    /**True when the engine clamped this passage to DecisionPolicy.maxChunkTokens before the call (ADR-0055 §3); the score is never attributed to a passage the engine silently cut (Q1).
+*/
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub truncated: Option<bool>,
 }
 /**One assembled message's component and provenance. `tool`/`thinking` are components but not messages, so they appear in the budget accounting.
 */

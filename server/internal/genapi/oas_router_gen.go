@@ -1628,7 +1628,7 @@ func (s *Server) FindPath(method string, u *url.URL) (r Route, _ bool) {
 						switch method {
 						case "GET":
 							r.name = GetDecisionPolicyOperation
-							r.summary = "Read the engine's global decision-layer policy (ADR-0053)"
+							r.summary = "Read the engine's global decision-layer policy (ADR-0053, ADR-0055)"
 							r.operationID = "getDecisionPolicy"
 							r.operationGroup = ""
 							r.pathPattern = "/decision"

@@ -1044,11 +1044,12 @@ type ContextPolicy struct {
 	// thinking-off and escalates once after a structured failure; `on` always thinks. Never a preset field
 	// (ADR-0045).
 	Thinking OptContextPolicyThinking `json:"thinking"`
-	// The session/per-turn override for the Laya decision layer (ADR-0053). When absent the persisted
-	// session policy, else the global `config/pipeline.json` default (off), applies. `off` disables the
-	// layer (no Laya call); `on` enables it. Human/policy outranks Laya: an explicit override wins over
-	// the model's answers, and a session `autoRag: false` still disables retrieval (Laya cannot re-enable
-	// it).
+	// The session/per-turn override for the Laya decision layer (ADR-0055). When absent the persisted
+	// session policy, else the global `config/pipeline.json` mode (off), applies. `off` runs no Laya call
+	// (zero calls, a behavioral no-op vs the pre-Phase-F pipeline); `planner` runs only the planner
+	// (retrieve-or-not, breadth, thinking) and keeps every post-exclude candidate; `planner+gate` runs the
+	// planner and the per-chunk gate. Human/policy outranks Laya: an explicit override wins over the
+	// model's answers, and a session `autoRag: false` still disables retrieval (Laya cannot re-enable it).
 	Decision OptContextPolicyDecision `json:"decision"`
 }
 
@@ -1112,23 +1113,26 @@ func (s *ContextPolicy) SetDecision(val OptContextPolicyDecision) {
 	s.Decision = val
 }
 
-// The session/per-turn override for the Laya decision layer (ADR-0053). When absent the persisted
-// session policy, else the global `config/pipeline.json` default (off), applies. `off` disables the
-// layer (no Laya call); `on` enables it. Human/policy outranks Laya: an explicit override wins over
-// the model's answers, and a session `autoRag: false` still disables retrieval (Laya cannot re-enable
-// it).
+// The session/per-turn override for the Laya decision layer (ADR-0055). When absent the persisted
+// session policy, else the global `config/pipeline.json` mode (off), applies. `off` runs no Laya call
+// (zero calls, a behavioral no-op vs the pre-Phase-F pipeline); `planner` runs only the planner
+// (retrieve-or-not, breadth, thinking) and keeps every post-exclude candidate; `planner+gate` runs the
+// planner and the per-chunk gate. Human/policy outranks Laya: an explicit override wins over the
+// model's answers, and a session `autoRag: false` still disables retrieval (Laya cannot re-enable it).
 type ContextPolicyDecision string
 
 const (
-	ContextPolicyDecisionOff ContextPolicyDecision = "off"
-	ContextPolicyDecisionOn  ContextPolicyDecision = "on"
+	ContextPolicyDecisionOff         ContextPolicyDecision = "off"
+	ContextPolicyDecisionPlanner     ContextPolicyDecision = "planner"
+	ContextPolicyDecisionPlannerGate ContextPolicyDecision = "planner+gate"
 )
 
 // AllValues returns all ContextPolicyDecision values.
 func (ContextPolicyDecision) AllValues() []ContextPolicyDecision {
 	return []ContextPolicyDecision{
 		ContextPolicyDecisionOff,
-		ContextPolicyDecisionOn,
+		ContextPolicyDecisionPlanner,
+		ContextPolicyDecisionPlannerGate,
 	}
 }
 
@@ -1137,7 +1141,9 @@ func (s ContextPolicyDecision) MarshalText() ([]byte, error) {
 	switch s {
 	case ContextPolicyDecisionOff:
 		return []byte(s), nil
-	case ContextPolicyDecisionOn:
+	case ContextPolicyDecisionPlanner:
+		return []byte(s), nil
+	case ContextPolicyDecisionPlannerGate:
 		return []byte(s), nil
 	default:
 		return nil, errors.Errorf("invalid value: %q", s)
@@ -1150,8 +1156,11 @@ func (s *ContextPolicyDecision) UnmarshalText(data []byte) error {
 	case ContextPolicyDecisionOff:
 		*s = ContextPolicyDecisionOff
 		return nil
-	case ContextPolicyDecisionOn:
-		*s = ContextPolicyDecisionOn
+	case ContextPolicyDecisionPlanner:
+		*s = ContextPolicyDecisionPlanner
+		return nil
+	case ContextPolicyDecisionPlannerGate:
+		*s = ContextPolicyDecisionPlannerGate
 		return nil
 	default:
 		return errors.Errorf("invalid value: %q", data)
@@ -1948,6 +1957,9 @@ type DecisionChunk struct {
 	Score OptFloat64 `json:"score"`
 	// Whether the chunk entered the payload (score >= threshold, or fail-open).
 	Keep bool `json:"keep"`
+	// True when the engine clamped this passage to DecisionPolicy.maxChunkTokens before the call (ADR-0055
+	// §3); the score is never attributed to a passage the engine silently cut (Q1).
+	Truncated OptBool `json:"truncated"`
 	// An optional label (e.g. below-threshold, low-confidence-kept).
 	Reason OptString `json:"reason"`
 }
@@ -1970,6 +1982,11 @@ func (s *DecisionChunk) GetScore() OptFloat64 {
 // GetKeep returns the value of Keep.
 func (s *DecisionChunk) GetKeep() bool {
 	return s.Keep
+}
+
+// GetTruncated returns the value of Truncated.
+func (s *DecisionChunk) GetTruncated() OptBool {
+	return s.Truncated
 }
 
 // GetReason returns the value of Reason.
@@ -1995,6 +2012,11 @@ func (s *DecisionChunk) SetScore(val OptFloat64) {
 // SetKeep sets the value of Keep.
 func (s *DecisionChunk) SetKeep(val bool) {
 	s.Keep = val
+}
+
+// SetTruncated sets the value of Truncated.
+func (s *DecisionChunk) SetTruncated(val OptBool) {
+	s.Truncated = val
 }
 
 // SetReason sets the value of Reason.
@@ -2155,6 +2177,9 @@ type DecisionPlanner struct {
 	Thinking OptDecisionPlannerThinking `json:"thinking"`
 	// The requested retrieval breadth, mapped to a topK by DecisionPolicy.breadthTopK.
 	Breadth OptDecisionPlannerBreadth `json:"breadth"`
+	// True when the engine clamped the planner state to DecisionPolicy.maxPlannerTokens before the call
+	// (ADR-0055 §3); the reasoning is never attributed to input the model did not see (Q1).
+	Truncated OptBool `json:"truncated"`
 	// True when this call failed (the record falls back to policy defaults).
 	Degraded         OptBool                  `json:"degraded"`
 	Reason           OptDecisionPlannerReason `json:"reason"`
@@ -2180,6 +2205,11 @@ func (s *DecisionPlanner) GetThinking() OptDecisionPlannerThinking {
 // GetBreadth returns the value of Breadth.
 func (s *DecisionPlanner) GetBreadth() OptDecisionPlannerBreadth {
 	return s.Breadth
+}
+
+// GetTruncated returns the value of Truncated.
+func (s *DecisionPlanner) GetTruncated() OptBool {
+	return s.Truncated
 }
 
 // GetDegraded returns the value of Degraded.
@@ -2220,6 +2250,11 @@ func (s *DecisionPlanner) SetThinking(val OptDecisionPlannerThinking) {
 // SetBreadth sets the value of Breadth.
 func (s *DecisionPlanner) SetBreadth(val OptDecisionPlannerBreadth) {
 	s.Breadth = val
+}
+
+// SetTruncated sets the value of Truncated.
+func (s *DecisionPlanner) SetTruncated(val OptBool) {
+	s.Truncated = val
 }
 
 // SetDegraded sets the value of Degraded.
@@ -2395,12 +2430,14 @@ func (s *DecisionPlannerThinking) UnmarshalText(data []byte) error {
 	}
 }
 
-// The engine's global decision-layer policy (ADR-0053), read from `config/pipeline.json` and returned
-// by GET /decision. One global policy; never a preset field (ADR-0045). Off by default.
+// The engine's global decision-layer policy (ADR-0053, ADR-0055), read from `config/pipeline.json` and
+// returned by GET /decision. One global policy; never a preset field (ADR-0045). `mode` grades the
+// policy and `off` is the default and a strict no-op (ADR-0054 §2).
 // Ref: #/components/schemas/DecisionPolicy
 type DecisionPolicy struct {
-	// Whether the Laya decision layer is enabled globally.
-	Enabled bool `json:"enabled"`
+	// The graded enablement (ADR-0055 §1). `off` runs no Laya call; `planner` runs only the planner and
+	// keeps every post-exclude candidate; `planner+gate` runs the planner and the per-chunk gate.
+	Mode DecisionPolicyMode `json:"mode"`
 	// The Laya service resolved by name via Fleet (the nomic-embed / needle-router pattern). Laya's own
 	// Router selects the checkpoint per request by script/language.
 	Model string `json:"model"`
@@ -2413,13 +2450,20 @@ type DecisionPolicy struct {
 	MaxHistoryTurns int `json:"maxHistoryTurns"`
 	// Maps the planner's `breadth` choice to the retrieval topK.
 	BreadthTopK DecisionPolicyBreadthTopK `json:"breadthTopK"`
+	// The engine-side cap (ADR-0055 §3) applied to each gate passage before the call; an over-cap passage
+	// is clamped deterministically and the DecisionChunk is labeled `truncated` (never clamped silently).
+	MaxChunkTokens int `json:"maxChunkTokens"`
+	// The engine-side cap (ADR-0055 §3) applied to the planner state (request + history + selection)
+	// before the call; an over-cap state is clamped deterministically and the DecisionPlanner is labeled
+	// `truncated`.
+	MaxPlannerTokens int `json:"maxPlannerTokens"`
 	// The per-call deadline for a Laya request; a timeout degrades fail-open and labeled.
 	TimeoutMs int `json:"timeoutMs"`
 }
 
-// GetEnabled returns the value of Enabled.
-func (s *DecisionPolicy) GetEnabled() bool {
-	return s.Enabled
+// GetMode returns the value of Mode.
+func (s *DecisionPolicy) GetMode() DecisionPolicyMode {
+	return s.Mode
 }
 
 // GetModel returns the value of Model.
@@ -2447,14 +2491,24 @@ func (s *DecisionPolicy) GetBreadthTopK() DecisionPolicyBreadthTopK {
 	return s.BreadthTopK
 }
 
+// GetMaxChunkTokens returns the value of MaxChunkTokens.
+func (s *DecisionPolicy) GetMaxChunkTokens() int {
+	return s.MaxChunkTokens
+}
+
+// GetMaxPlannerTokens returns the value of MaxPlannerTokens.
+func (s *DecisionPolicy) GetMaxPlannerTokens() int {
+	return s.MaxPlannerTokens
+}
+
 // GetTimeoutMs returns the value of TimeoutMs.
 func (s *DecisionPolicy) GetTimeoutMs() int {
 	return s.TimeoutMs
 }
 
-// SetEnabled sets the value of Enabled.
-func (s *DecisionPolicy) SetEnabled(val bool) {
-	s.Enabled = val
+// SetMode sets the value of Mode.
+func (s *DecisionPolicy) SetMode(val DecisionPolicyMode) {
+	s.Mode = val
 }
 
 // SetModel sets the value of Model.
@@ -2480,6 +2534,16 @@ func (s *DecisionPolicy) SetMaxHistoryTurns(val int) {
 // SetBreadthTopK sets the value of BreadthTopK.
 func (s *DecisionPolicy) SetBreadthTopK(val DecisionPolicyBreadthTopK) {
 	s.BreadthTopK = val
+}
+
+// SetMaxChunkTokens sets the value of MaxChunkTokens.
+func (s *DecisionPolicy) SetMaxChunkTokens(val int) {
+	s.MaxChunkTokens = val
+}
+
+// SetMaxPlannerTokens sets the value of MaxPlannerTokens.
+func (s *DecisionPolicy) SetMaxPlannerTokens(val int) {
+	s.MaxPlannerTokens = val
 }
 
 // SetTimeoutMs sets the value of TimeoutMs.
@@ -2522,6 +2586,56 @@ func (s *DecisionPolicyBreadthTopK) SetFew(val int) {
 // SetMany sets the value of Many.
 func (s *DecisionPolicyBreadthTopK) SetMany(val int) {
 	s.Many = val
+}
+
+// The graded enablement (ADR-0055 §1). `off` runs no Laya call; `planner` runs only the planner and
+// keeps every post-exclude candidate; `planner+gate` runs the planner and the per-chunk gate.
+type DecisionPolicyMode string
+
+const (
+	DecisionPolicyModeOff         DecisionPolicyMode = "off"
+	DecisionPolicyModePlanner     DecisionPolicyMode = "planner"
+	DecisionPolicyModePlannerGate DecisionPolicyMode = "planner+gate"
+)
+
+// AllValues returns all DecisionPolicyMode values.
+func (DecisionPolicyMode) AllValues() []DecisionPolicyMode {
+	return []DecisionPolicyMode{
+		DecisionPolicyModeOff,
+		DecisionPolicyModePlanner,
+		DecisionPolicyModePlannerGate,
+	}
+}
+
+// MarshalText implements encoding.TextMarshaler.
+func (s DecisionPolicyMode) MarshalText() ([]byte, error) {
+	switch s {
+	case DecisionPolicyModeOff:
+		return []byte(s), nil
+	case DecisionPolicyModePlanner:
+		return []byte(s), nil
+	case DecisionPolicyModePlannerGate:
+		return []byte(s), nil
+	default:
+		return nil, errors.Errorf("invalid value: %q", s)
+	}
+}
+
+// UnmarshalText implements encoding.TextUnmarshaler.
+func (s *DecisionPolicyMode) UnmarshalText(data []byte) error {
+	switch DecisionPolicyMode(data) {
+	case DecisionPolicyModeOff:
+		*s = DecisionPolicyModeOff
+		return nil
+	case DecisionPolicyModePlanner:
+		*s = DecisionPolicyModePlanner
+		return nil
+	case DecisionPolicyModePlannerGate:
+		*s = DecisionPolicyModePlannerGate
+		return nil
+	default:
+		return errors.Errorf("invalid value: %q", data)
+	}
 }
 
 // The engine-owned record of the Laya decision layer for one turn (ADR-0053). Present in the context

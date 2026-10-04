@@ -105,7 +105,7 @@ func (h *handler) GetHealth(ctx context.Context) (*genapi.Health, error) {
 func (h *handler) GetDecisionPolicy(ctx context.Context) (*genapi.DecisionPolicy, error) {
 	p := h.d.Pipeline.Policy().Decision
 	return &genapi.DecisionPolicy{
-		Enabled:         p.Enabled,
+		Mode:            genapi.DecisionPolicyMode(p.Mode),
 		Model:           p.Model,
 		GateThreshold:   p.GateThreshold,
 		MaxCandidates:   p.MaxCandidates,
@@ -115,7 +115,9 @@ func (h *handler) GetDecisionPolicy(ctx context.Context) (*genapi.DecisionPolicy
 			Few:  p.BreadthTopK.Few,
 			Many: p.BreadthTopK.Many,
 		},
-		TimeoutMs: p.TimeoutMs,
+		MaxChunkTokens:   p.MaxChunkTokens,
+		MaxPlannerTokens: p.MaxPlannerTokens,
+		TimeoutMs:        p.TimeoutMs,
 	}, nil
 }
 

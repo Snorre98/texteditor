@@ -397,7 +397,7 @@ startup). One policy for every preset.
 | `reserveOutputTokens` | integer ≥ 0 | yes | window-gate output reserve (§6) |
 | `sessionBudgetSoftRatio` | number 0–1 | yes | soft session-budget threshold ratio (§7) |
 | `compaction` | object | yes | `{enabled, triggerHistoryTokens, keepRecentTurns}` (§8) |
-| `decision` | object | yes | `{enabled, model, gateThreshold, maxCandidates, maxHistoryTurns, breadthTopK{none,few,many}, timeoutMs}` — global Laya policy, default off (ADR-0053) |
+| `decision` | object | yes | `{mode: off\|planner\|planner+gate, model, gateThreshold, maxCandidates, maxHistoryTurns, breadthTopK{none,few,many}, maxChunkTokens, maxPlannerTokens, timeoutMs}` — global Laya policy, default `off` (ADR-0053, ADR-0055) |
 
 Startup validation failures (typed errors): `mode-refs-unknown-model`,
 `mode-unreachable-no-tag`, `tool-has-no-handler`, `schema-invalid` (ADR-0019),
