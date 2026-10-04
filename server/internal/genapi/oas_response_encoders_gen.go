@@ -23,6 +23,42 @@ func encodeApplyEditResponse(response *Revision, w http.ResponseWriter, span tra
 	return nil
 }
 
+func encodeCancelTurnResponse(response CancelTurnRes, w http.ResponseWriter, span trace.Span) error {
+	switch response := response.(type) {
+	case *CancelTurnNoContent:
+		w.WriteHeader(204)
+
+		return nil
+
+	case *NotFound:
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(404)
+
+		e := new(jx.Encoder)
+		response.Encode(e)
+		if _, err := e.WriteTo(w); err != nil {
+			return errors.Wrap(err, "write")
+		}
+
+		return nil
+
+	case *TurnNotRunning:
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(409)
+
+		e := new(jx.Encoder)
+		response.Encode(e)
+		if _, err := e.WriteTo(w); err != nil {
+			return errors.Wrap(err, "write")
+		}
+
+		return nil
+
+	default:
+		return errors.Errorf("unexpected response type: %T", response)
+	}
+}
+
 func encodeCommitDocumentResponse(response CommitDocumentRes, w http.ResponseWriter, span trace.Span) error {
 	switch response := response.(type) {
 	case *Revision:
@@ -503,6 +539,37 @@ func encodePutCorpusResponse(response PutCorpusRes, w http.ResponseWriter, span 
 }
 
 func encodePutSessionContextResponse(response PutSessionContextRes, w http.ResponseWriter, span trace.Span) error {
+	switch response := response.(type) {
+	case *Session:
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(200)
+
+		e := new(jx.Encoder)
+		response.Encode(e)
+		if _, err := e.WriteTo(w); err != nil {
+			return errors.Wrap(err, "write")
+		}
+
+		return nil
+
+	case *NotFound:
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(404)
+
+		e := new(jx.Encoder)
+		response.Encode(e)
+		if _, err := e.WriteTo(w); err != nil {
+			return errors.Wrap(err, "write")
+		}
+
+		return nil
+
+	default:
+		return errors.Errorf("unexpected response type: %T", response)
+	}
+}
+
+func encodeRenameSessionResponse(response RenameSessionRes, w http.ResponseWriter, span trace.Span) error {
 	switch response := response.(type) {
 	case *Session:
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")

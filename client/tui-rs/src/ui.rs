@@ -3,9 +3,10 @@
 //!
 //! The loop renders from the render-only [`AppState`] snapshot and never computes
 //! domain values (ADR-0013 §3). Bracketed paste is enabled so multi-line pastes
-//! insert verbatim — required by `/locate` in E2.
+//! insert verbatim — required by `/locate` (ADR-0048).
 
 use std::io::{self, Stdout};
+use std::path::Path;
 use std::time::Duration;
 
 use crossterm::event::{
@@ -19,11 +20,11 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph, Tabs, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph, Tabs, Wrap};
 use ratatui::{Frame, Terminal};
 
 use crate::bridge::{Bridge, Command};
-use crate::state::{AppState, ConnectionState, Role};
+use crate::state::{AppState, ConnectionState, Overlay, Role};
 
 type Tui = Terminal<CrosstermBackend<Stdout>>;
 
@@ -92,6 +93,47 @@ fn handle_key(
     follow: &mut bool,
 ) {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+
+    // Session-title editing owns the keyboard while active.
+    if app.rename.is_some() {
+        match key.code {
+            KeyCode::Enter => {
+                if let Some((session_id, _)) = selected_session(app) {
+                    let title = app.rename.take().unwrap_or_default();
+                    bridge.send(Command::RenameSession { session_id, title });
+                } else {
+                    app.rename = None;
+                }
+            }
+            KeyCode::Esc => app.rename = None,
+            KeyCode::Backspace => {
+                if let Some(buf) = app.rename.as_mut() {
+                    buf.pop();
+                }
+            }
+            KeyCode::Char(ch) if !ctrl => {
+                if let Some(buf) = app.rename.as_mut() {
+                    buf.push(ch);
+                }
+            }
+            _ => {}
+        }
+        return;
+    }
+
+    // Modal overlays own the keyboard while open.
+    match app.overlay {
+        Overlay::Directory => {
+            handle_directory_key(key, app, bridge);
+            return;
+        }
+        Overlay::Sessions => {
+            handle_sessions_key(key, app, bridge);
+            return;
+        }
+        Overlay::None => {}
+    }
+
     match key.code {
         KeyCode::Char('c') if ctrl => app.should_quit = true,
         KeyCode::Esc => app.should_quit = true,
@@ -112,6 +154,21 @@ fn handle_key(
                     });
                 }
             }
+        }
+        KeyCode::Char('x') if ctrl => {
+            if app.turn_active {
+                if let Some(turn_id) = app.turn_id.clone() {
+                    bridge.send(Command::Cancel { turn_id });
+                } else {
+                    app.error = Some("cancel: turn id not yet known".to_string());
+                }
+            }
+        }
+        KeyCode::Char('w') if ctrl => open_directory_picker(app, bridge),
+        KeyCode::Char('s') if ctrl => {
+            bridge.send(Command::ListSessions);
+            app.overlay = Overlay::Sessions;
+            app.picker_index = 0;
         }
         KeyCode::Enter => {
             if !app.turn_active {
@@ -151,6 +208,112 @@ fn handle_key(
     }
 }
 
+/// Open the directory picker at the workspace root (or the document parent).
+fn open_directory_picker(app: &mut AppState, bridge: &Bridge) {
+    let start = app.workspace.as_ref().map(|w| w.root.clone()).or_else(|| {
+        app.document_path
+            .as_deref()
+            .and_then(|p| Path::new(p).parent())
+            .map(|p| p.to_string_lossy().into_owned())
+    });
+    let Some(path) = start else {
+        app.error = Some("no workspace or document to browse".to_string());
+        return;
+    };
+    bridge.send(Command::ListDirectory { path });
+    app.overlay = Overlay::Directory;
+    app.picker_index = 0;
+}
+
+/// Directory-picker keys: navigate, go up, open a file, or close.
+fn handle_directory_key(key: KeyEvent, app: &mut AppState, bridge: &Bridge) {
+    let entry_count = app
+        .directory
+        .as_ref()
+        .map(|d| d.entries.len() + 1) // +1 for the virtual ".."
+        .unwrap_or(1);
+    match key.code {
+        KeyCode::Esc => app.overlay = Overlay::None,
+        KeyCode::Up => app.picker_index = app.picker_index.saturating_sub(1),
+        KeyCode::Down => {
+            if app.picker_index + 1 < entry_count {
+                app.picker_index += 1;
+            }
+        }
+        KeyCode::Backspace => go_up_directory(app, bridge),
+        KeyCode::Enter => {
+            if app.picker_index == 0 {
+                go_up_directory(app, bridge);
+                return;
+            }
+            let Some(listing) = app.directory.as_ref() else {
+                return;
+            };
+            let Some(entry) = listing.entries.get(app.picker_index - 1).cloned() else {
+                return;
+            };
+            if entry.is_dir {
+                bridge.send(Command::ListDirectory { path: entry.path });
+                app.picker_index = 0;
+            } else {
+                bridge.send(Command::OpenDocument { path: entry.path });
+                app.overlay = Overlay::None;
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Move the picker to the listing's parent directory.
+fn go_up_directory(app: &mut AppState, bridge: &Bridge) {
+    let Some(listing) = app.directory.as_ref() else {
+        return;
+    };
+    let Some(parent) = Path::new(&listing.path).parent() else {
+        return;
+    };
+    bridge.send(Command::ListDirectory {
+        path: parent.to_string_lossy().into_owned(),
+    });
+    app.picker_index = 0;
+}
+
+/// The selected session in the list overlay (id, title).
+fn selected_session(app: &AppState) -> Option<(String, Option<String>)> {
+    app.sessions
+        .get(app.picker_index)
+        .map(|s| (s.id.clone(), s.title.clone()))
+}
+
+/// Session-list keys: resume, create, rename, or close.
+fn handle_sessions_key(key: KeyEvent, app: &mut AppState, bridge: &Bridge) {
+    match key.code {
+        KeyCode::Esc => app.overlay = Overlay::None,
+        KeyCode::Up => app.picker_index = app.picker_index.saturating_sub(1),
+        KeyCode::Down => {
+            if app.picker_index + 1 < app.sessions.len() {
+                app.picker_index += 1;
+            }
+        }
+        KeyCode::Char('n') => {
+            bridge.send(Command::NewSession);
+            app.overlay = Overlay::None;
+        }
+        KeyCode::Char('r') => {
+            if let Some((_, title)) = selected_session(app) {
+                app.rename = Some(title.unwrap_or_default());
+            }
+        }
+        KeyCode::Enter => {
+            if let Some(session) = app.sessions.get(app.picker_index).cloned() {
+                bridge.send(Command::OpenSession { session });
+                app.overlay = Overlay::None;
+            }
+        }
+        _ => {}
+    }
+}
+
 fn cycle_mode(app: &mut AppState, delta: isize) {
     let count = app.modes.len();
     if count == 0 {
@@ -172,7 +335,7 @@ fn render(frame: &mut Frame, app: &AppState, desired_scroll: u16) -> u16 {
         constraints.push(Constraint::Length(8));
     }
     constraints.push(Constraint::Length(3));
-    constraints.push(Constraint::Length(1));
+    constraints.push(Constraint::Length(2));
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints(constraints)
@@ -187,6 +350,15 @@ fn render(frame: &mut Frame, app: &AppState, desired_scroll: u16) -> u16 {
     }
     render_input(frame, chunks[input_index], app);
     render_status(frame, chunks[status_index], app);
+
+    match app.overlay {
+        Overlay::Directory => render_directory_overlay(frame, area, app),
+        Overlay::Sessions => render_sessions_overlay(frame, area, app),
+        Overlay::None => {}
+    }
+    if app.rename.is_some() {
+        render_rename_overlay(frame, area, app);
+    }
     max_scroll
 }
 
@@ -201,9 +373,13 @@ fn render_tabs(frame: &mut Frame, area: Rect, app: &AppState) {
     } else {
         titles
     };
+    let title = match &app.workspace {
+        Some(ws) => format!("Presets · {} ({})", ws.name, ws.root),
+        None => "Presets".to_string(),
+    };
     let tabs = Tabs::new(titles)
         .select(app.active_mode_index())
-        .block(Block::default().borders(Borders::ALL).title("Presets"))
+        .block(Block::default().borders(Borders::ALL).title(title))
         .highlight_style(
             Style::default()
                 .fg(Color::Black)
@@ -227,6 +403,12 @@ fn render_chat(frame: &mut Frame, area: Rect, app: &AppState, desired_scroll: u1
         if !stream.is_empty() {
             push_prefixed(&mut lines, "ai  › ", stream);
         }
+    }
+    if !app.thinking.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "thinking…",
+            Style::default().fg(Color::Magenta),
+        )));
     }
     if lines.is_empty() {
         lines.push(Line::from(
@@ -307,7 +489,7 @@ fn render_input(frame: &mut Frame, area: Rect, app: &AppState) {
     let paragraph = Paragraph::new(app.input.as_str()).block(
         Block::default()
             .borders(Borders::ALL)
-            .title("Message (Enter send · Ctrl+C quit)"),
+            .title("Message (Enter send · Ctrl+X cancel · Ctrl+W files · Ctrl+S sessions)"),
     );
     frame.render_widget(paragraph, area);
     let cursor_x = area.x + 1 + app.input.chars().count().min(u16::MAX as usize) as u16;
@@ -338,6 +520,11 @@ fn render_status(frame: &mut Frame, area: Rect, app: &AppState) {
             ));
         }
     }
+    if let Some(session_id) = &app.session_id {
+        let title = app.session_title.as_deref().unwrap_or("untitled");
+        spans.push(Span::raw(format!("│ session {title} ")));
+        let _ = session_id;
+    }
     if let Some(model) = &app.status.used_model {
         let degraded = if app.status.degraded {
             " (degraded)"
@@ -345,6 +532,18 @@ fn render_status(frame: &mut Frame, area: Rect, app: &AppState) {
             ""
         };
         spans.push(Span::raw(format!("│ model {model}{degraded} ")));
+    }
+    if app.turn_active {
+        spans.push(Span::styled(
+            "│ generating… ",
+            Style::default().fg(Color::Cyan),
+        ));
+    }
+    if app.cancelled {
+        spans.push(Span::styled(
+            "│ cancelled ",
+            Style::default().fg(Color::Yellow),
+        ));
     }
     if let Some(path) = &app.status.target_path {
         spans.push(Span::raw(format!("│ {path} ")));
@@ -361,6 +560,96 @@ fn render_status(frame: &mut Frame, area: Rect, app: &AppState) {
         ));
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+fn render_directory_overlay(frame: &mut Frame, area: Rect, app: &AppState) {
+    let popup = centered_rect(70, 70, area);
+    frame.render_widget(Clear, popup);
+    let mut lines: Vec<Line> = Vec::new();
+    let path = app
+        .directory
+        .as_ref()
+        .map(|d| d.path.clone())
+        .unwrap_or_default();
+    let cursor = |selected: bool| if selected { "› " } else { "  " };
+    lines.push(Line::from(format!("{}..", cursor(app.picker_index == 0))));
+    if let Some(listing) = &app.directory {
+        for (i, entry) in listing.entries.iter().enumerate() {
+            let suffix = if entry.is_dir { "/" } else { "" };
+            lines.push(Line::from(format!(
+                "{}{}{}",
+                cursor(app.picker_index == i + 1),
+                entry.name,
+                suffix
+            )));
+        }
+    }
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(format!("Open file · {path}"));
+    let visible = popup.height.saturating_sub(2) as usize;
+    let offset = app.picker_index.saturating_sub(visible.saturating_sub(1));
+    let paragraph = Paragraph::new(lines)
+        .block(block)
+        .wrap(Wrap { trim: true })
+        .scroll((offset as u16, 0));
+    frame.render_widget(paragraph, popup);
+}
+
+fn render_sessions_overlay(frame: &mut Frame, area: Rect, app: &AppState) {
+    let popup = centered_rect(60, 60, area);
+    frame.render_widget(Clear, popup);
+    let mut lines: Vec<Line> = Vec::new();
+    for (i, session) in app.sessions.iter().enumerate() {
+        let title = session.title.as_deref().unwrap_or("untitled");
+        let doc = session.document_id.as_str();
+        let cursor = if app.picker_index == i { "› " } else { "  " };
+        lines.push(Line::from(format!("{cursor}{title}  ·  {doc}")));
+    }
+    if lines.is_empty() {
+        lines.push(Line::from("(no sessions)"));
+    }
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title("Sessions · Enter resume · n new · r rename · Esc close");
+    let visible = popup.height.saturating_sub(2) as usize;
+    let offset = app.picker_index.saturating_sub(visible.saturating_sub(1));
+    let paragraph = Paragraph::new(lines)
+        .block(block)
+        .wrap(Wrap { trim: true })
+        .scroll((offset as u16, 0));
+    frame.render_widget(paragraph, popup);
+}
+
+fn render_rename_overlay(frame: &mut Frame, area: Rect, app: &AppState) {
+    let popup = centered_rect(50, 15, area);
+    frame.render_widget(Clear, popup);
+    let text = app.rename.clone().unwrap_or_default();
+    let paragraph = Paragraph::new(text).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title("Rename · Enter save · Esc cancel"),
+    );
+    frame.render_widget(paragraph, popup);
+}
+
+fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
+    let vertical = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage((100 - percent_y) / 2),
+            Constraint::Percentage(percent_y),
+            Constraint::Percentage((100 - percent_y) / 2),
+        ])
+        .split(area);
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage((100 - percent_x) / 2),
+            Constraint::Percentage(percent_x),
+            Constraint::Percentage((100 - percent_x) / 2),
+        ])
+        .split(vertical[1])[1]
 }
 
 fn push_prefixed(lines: &mut Vec<Line<'static>>, prefix: &'static str, text: &str) {

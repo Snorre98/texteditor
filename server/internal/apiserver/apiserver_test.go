@@ -139,9 +139,10 @@ func (stubSessions) ListByDocument(string) ([]dto.Session, error) {
 func (stubSessions) ListByWorkspace() ([]dto.Session, error) {
 	return []dto.Session{{ID: "s1", DocumentID: "d1", ModeType: "proofreader"}}, nil
 }
-func (stubSessions) Create(string, *string, string) (dto.Session, error) {
+func (stubSessions) Create(string, *string, string, string) (dto.Session, error) {
 	return dto.Session{ID: "s1", DocumentID: "d1"}, nil
 }
+func (stubSessions) Rename(string, string) error        { return nil }
 func (stubSessions) Resume(string) (dto.Session, error) { return dto.Session{}, nil }
 func (stubSessions) Append(string, dto.Message) error   { return nil }
 func (stubSessions) History(string) ([]dto.Message, error) {
@@ -314,6 +315,9 @@ func (s *stubLoopEmitter) Run(ctx context.Context, task dto.Task) (string, error
 
 // ResolveLocate satisfies loop.Interface; these stubs never open a picker.
 func (*stubLoopEmitter) ResolveLocate(string, dto.LocateChoice) error { return nil }
+
+// Cancel satisfies loop.Interface; these stubs never cancel.
+func (*stubLoopEmitter) Cancel(string) error { return nil }
 
 func TestHealth(t *testing.T) {
 	srv, _ := newTestServer(t)
@@ -636,6 +640,9 @@ func (c *captureLoop) Run(_ context.Context, task dto.Task) (string, error) {
 // ResolveLocate satisfies loop.Interface.
 func (c *captureLoop) ResolveLocate(string, dto.LocateChoice) error { return nil }
 
+// Cancel satisfies loop.Interface.
+func (c *captureLoop) Cancel(string) error { return nil }
+
 func TestStartTurnDecodesMentions(t *testing.T) {
 	bus := &fakeBus{}
 	loop := &captureLoop{bus: bus}
@@ -807,6 +814,9 @@ func (s *stagingLoop) setErr(err error) {
 
 // ResolveLocate satisfies loop.Interface.
 func (s *stagingLoop) ResolveLocate(string, dto.LocateChoice) error { return nil }
+
+// Cancel satisfies loop.Interface.
+func (s *stagingLoop) Cancel(string) error { return nil }
 
 func (s *stagingLoop) runErr() error {
 	s.mu.Lock()
@@ -1194,6 +1204,9 @@ func (s *snapshotLoop) Run(_ context.Context, task dto.Task) (string, error) {
 // ResolveLocate satisfies loop.Interface.
 func (s *snapshotLoop) ResolveLocate(string, dto.LocateChoice) error { return nil }
 
+// Cancel satisfies loop.Interface.
+func (s *snapshotLoop) Cancel(string) error { return nil }
+
 // TestContextSnapshotE2EMatchesEvent covers context-inspector "A completed turn
 // persists a context snapshot": the snapshot persisted through the real session
 // store is returned by GET /turns/{id}/context and is the same data the loop
@@ -1280,6 +1293,9 @@ func (c *captureContextLoop) Run(_ context.Context, task dto.Task) (string, erro
 
 // ResolveLocate satisfies loop.Interface.
 func (c *captureContextLoop) ResolveLocate(string, dto.LocateChoice) error { return nil }
+
+// Cancel satisfies loop.Interface.
+func (c *captureContextLoop) Cancel(string) error { return nil }
 
 func TestStartTurnDecodesContext(t *testing.T) {
 	bus := &fakeBus{}
@@ -1474,6 +1490,8 @@ func (l *locateLoop) ResolveLocate(_ string, c dto.LocateChoice) error {
 	return l.err
 }
 
+func (*locateLoop) Cancel(string) error { return nil }
+
 func (l *locateLoop) recorded() []dto.LocateChoice {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -1560,5 +1578,223 @@ func TestResolveLocateNoPending409(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "no-pending-locate") {
 		t.Fatalf("409 body = %s", rec.Body.String())
+	}
+}
+
+// --------------------- session title route (E2) ---------------------
+
+// renameSessions records titles set via Create/Rename and returns them on Resume.
+type renameSessions struct {
+	stubSessions
+	mu     sync.Mutex
+	titles map[string]string
+}
+
+func (r *renameSessions) Create(_ string, _ *string, _ string, title string) (dto.Session, error) {
+	return dto.Session{ID: "s1", DocumentID: "d1", Title: title}, nil
+}
+
+func (r *renameSessions) Rename(id, title string) error {
+	if id == "missing" {
+		return session.ErrNotFound
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.titles == nil {
+		r.titles = map[string]string{}
+	}
+	r.titles[id] = title
+	return nil
+}
+
+func (r *renameSessions) Resume(id string) (dto.Session, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return dto.Session{ID: id, DocumentID: "d1", Title: r.titles[id]}, nil
+}
+
+func TestCreateSessionCarriesTitle(t *testing.T) {
+	bus := &fakeBus{}
+	rs := &renameSessions{}
+	srv, err := New(Deps{
+		Fleet:      stubFleet{},
+		Modes:      stubModes{},
+		Tools:      stubTools{},
+		Doc:        stubDoc{},
+		Filesystem: &stubFilesystem{},
+		Workspaces: stubWorkspaces{},
+		Shards:     stubShards{svc: &shard.Services{Sessions: rs}},
+		Loop:       &stubLoopEmitter{bus: bus},
+	}, bus)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/sessions", strings.NewReader(`{"documentId":"d1","title":"Thesis outline"}`))
+	req.Header.Set("Content-Type", "application/json")
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("create session = %d body %s", rec.Code, rec.Body.String())
+	}
+	var got genapi.Session
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Title.Or("") != "Thesis outline" {
+		t.Fatalf("title = %q, want Thesis outline", got.Title.Or(""))
+	}
+}
+
+func TestRenameSessionRoute200AndUnknown404(t *testing.T) {
+	bus := &fakeBus{}
+	rs := &renameSessions{}
+	srv, err := New(Deps{
+		Fleet:      stubFleet{},
+		Modes:      stubModes{},
+		Tools:      stubTools{},
+		Doc:        stubDoc{},
+		Filesystem: &stubFilesystem{},
+		Workspaces: stubWorkspaces{},
+		Shards:     stubShards{svc: &shard.Services{Sessions: rs}},
+		Loop:       &stubLoopEmitter{bus: bus},
+	}, bus)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPut, "/sessions/s1", strings.NewReader(`{"title":"Chapter 3"}`))
+	req.Header.Set("Content-Type", "application/json")
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("rename = %d body %s", rec.Code, rec.Body.String())
+	}
+	var got genapi.Session
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Title.Or("") != "Chapter 3" {
+		t.Fatalf("renamed title = %q, want Chapter 3", got.Title.Or(""))
+	}
+
+	// An unknown session (routing miss) is the typed 404.
+	srv404, err := New(Deps{
+		Fleet:      stubFleet{},
+		Modes:      stubModes{},
+		Tools:      stubTools{},
+		Doc:        stubDoc{},
+		Filesystem: &stubFilesystem{},
+		Workspaces: emptyWorkspaces{},
+		Shards:     stubShards{svc: &shard.Services{Sessions: rs}},
+		Loop:       &stubLoopEmitter{bus: bus},
+	}, bus)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPut, "/sessions/nope", strings.NewReader(`{"title":"x"}`))
+	req.Header.Set("Content-Type", "application/json")
+	srv404.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("unknown session rename = %d, want 404", rec.Code)
+	}
+}
+
+// --------------------- cancel route (E2) ---------------------
+
+// cancelLoop lets a test control the Cancel return value.
+type cancelLoop struct{ err error }
+
+func (*cancelLoop) Run(context.Context, dto.Task) (string, error) { return "t1", nil }
+func (*cancelLoop) ResolveLocate(string, dto.LocateChoice) error  { return nil }
+func (c *cancelLoop) Cancel(string) error                         { return c.err }
+
+func TestCancelTurnRoute204(t *testing.T) {
+	bus := &fakeBus{}
+	srv, err := New(Deps{
+		Fleet:      stubFleet{},
+		Modes:      stubModes{},
+		Tools:      stubTools{},
+		Doc:        stubDoc{},
+		Filesystem: &stubFilesystem{},
+		Workspaces: stubWorkspaces{},
+		Shards:     stubShards{svc: &shard.Services{Sessions: stubSessions{}}},
+		Loop:       &cancelLoop{},
+	}, bus)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/turns/t1/cancel", nil)
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("cancel = %d body %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestCancelTurnUnknown404(t *testing.T) {
+	bus := &fakeBus{}
+	srv, err := New(Deps{
+		Fleet:      stubFleet{},
+		Modes:      stubModes{},
+		Tools:      stubTools{},
+		Doc:        stubDoc{},
+		Filesystem: &stubFilesystem{},
+		Workspaces: emptyWorkspaces{},
+		Shards:     stubShards{svc: &shard.Services{Sessions: stubSessions{}}},
+		Loop:       &cancelLoop{},
+	}, bus)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/turns/nope/cancel", nil)
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("unknown turn cancel = %d body %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "not-found") || !strings.Contains(rec.Body.String(), "turn") {
+		t.Fatalf("404 body = %s", rec.Body.String())
+	}
+}
+
+func TestCancelTurnNotRunning409(t *testing.T) {
+	bus := &fakeBus{}
+	srv, err := New(Deps{
+		Fleet:      stubFleet{},
+		Modes:      stubModes{},
+		Tools:      stubTools{},
+		Doc:        stubDoc{},
+		Filesystem: &stubFilesystem{},
+		Workspaces: stubWorkspaces{},
+		Shards:     stubShards{svc: &shard.Services{Sessions: stubSessions{}}},
+		Loop:       &cancelLoop{err: loop.ErrTurnNotRunning},
+	}, bus)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/turns/t1/cancel", nil)
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("not-running cancel = %d body %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "turn-not-running") {
+		t.Fatalf("409 body = %s", rec.Body.String())
+	}
+}
+
+func TestStartTurnEmitsTurnEventFirst(t *testing.T) {
+	srv, _ := newTestServer(t)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/turn", strings.NewReader(
+		`{"sessionId":"s1","modeName":"proofreader","documentId":"d1","userInput":"hi"}`))
+	req.Header.Set("Content-Type", "application/json")
+	srv.ServeHTTP(rec, req)
+	body := rec.Body.String()
+	if !strings.HasPrefix(body, "event: turn\n") {
+		t.Fatalf("first SSE event is not `turn`: %q", body)
+	}
+	if !strings.Contains(body, `"turnId":"t1"`) || !strings.Contains(body, `"sessionId":"s1"`) {
+		t.Fatalf("turn event payload = %q", body)
 	}
 }

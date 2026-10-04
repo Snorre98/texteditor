@@ -419,6 +419,11 @@ func (s *BudgetUsageComponent) UnmarshalText(data []byte) error {
 	}
 }
 
+// CancelTurnNoContent is response for CancelTurn operation.
+type CancelTurnNoContent struct{}
+
+func (*CancelTurnNoContent) cancelTurnRes() {}
+
 // Ref: #/components/schemas/Candidate
 type Candidate struct {
 	BlockId OptString `json:"blockId"`
@@ -1168,7 +1173,10 @@ type ContextSnapshot struct {
 	Compacted     OptCompactionRecord      `json:"compacted"`
 	Window        OptWindowUsage           `json:"window"`
 	SessionBudget OptSessionBudget         `json:"sessionBudget"`
-	CreatedAt     int64                    `json:"createdAt"`
+	// True when the turn was cancelled by the user (POST /turns/{id}/cancel); the snapshot remains
+	// retrievable and records the partial usage. Absent/false for a normal turn.
+	Cancelled OptBool `json:"cancelled"`
+	CreatedAt int64   `json:"createdAt"`
 }
 
 // GetTurnId returns the value of TurnId.
@@ -1249,6 +1257,11 @@ func (s *ContextSnapshot) GetWindow() OptWindowUsage {
 // GetSessionBudget returns the value of SessionBudget.
 func (s *ContextSnapshot) GetSessionBudget() OptSessionBudget {
 	return s.SessionBudget
+}
+
+// GetCancelled returns the value of Cancelled.
+func (s *ContextSnapshot) GetCancelled() OptBool {
+	return s.Cancelled
 }
 
 // GetCreatedAt returns the value of CreatedAt.
@@ -1334,6 +1347,11 @@ func (s *ContextSnapshot) SetWindow(val OptWindowUsage) {
 // SetSessionBudget sets the value of SessionBudget.
 func (s *ContextSnapshot) SetSessionBudget(val OptSessionBudget) {
 	s.SessionBudget = val
+}
+
+// SetCancelled sets the value of Cancelled.
+func (s *ContextSnapshot) SetCancelled(val OptBool) {
+	s.Cancelled = val
 }
 
 // SetCreatedAt sets the value of CreatedAt.
@@ -1776,6 +1794,10 @@ type CreateSessionRequest struct {
 	WorkspaceId   OptString `json:"workspaceId"`
 	AnchorBlockId OptString `json:"anchorBlockId"`
 	ModeType      OptString `json:"modeType"`
+	// Optional human label for the new session. Purely a display title (data-model §1.4); it never
+	// affects assembly. An engine default (e.g. the document basename) may be derived when omitted; the
+	// client can rename it later via PUT /sessions/{id}.
+	Title OptString `json:"title"`
 }
 
 // GetDocumentId returns the value of DocumentId.
@@ -1798,6 +1820,11 @@ func (s *CreateSessionRequest) GetModeType() OptString {
 	return s.ModeType
 }
 
+// GetTitle returns the value of Title.
+func (s *CreateSessionRequest) GetTitle() OptString {
+	return s.Title
+}
+
 // SetDocumentId sets the value of DocumentId.
 func (s *CreateSessionRequest) SetDocumentId(val string) {
 	s.DocumentId = val
@@ -1816,6 +1843,11 @@ func (s *CreateSessionRequest) SetAnchorBlockId(val OptString) {
 // SetModeType sets the value of ModeType.
 func (s *CreateSessionRequest) SetModeType(val OptString) {
 	s.ModeType = val
+}
+
+// SetTitle sets the value of Title.
+func (s *CreateSessionRequest) SetTitle(val OptString) {
+	s.Title = val
 }
 
 // Ref: #/components/schemas/CreateWorkspaceRequest
@@ -1995,6 +2027,7 @@ func (s *Event) SetType(val EventType) {
 type EventType string
 
 const (
+	EventTypeTurn         EventType = "turn"
 	EventTypeToken        EventType = "token"
 	EventTypeMeter        EventType = "meter"
 	EventTypeCandidate    EventType = "candidate"
@@ -2011,6 +2044,7 @@ const (
 // AllValues returns all EventType values.
 func (EventType) AllValues() []EventType {
 	return []EventType{
+		EventTypeTurn,
 		EventTypeToken,
 		EventTypeMeter,
 		EventTypeCandidate,
@@ -2028,6 +2062,8 @@ func (EventType) AllValues() []EventType {
 // MarshalText implements encoding.TextMarshaler.
 func (s EventType) MarshalText() ([]byte, error) {
 	switch s {
+	case EventTypeTurn:
+		return []byte(s), nil
 	case EventTypeToken:
 		return []byte(s), nil
 	case EventTypeMeter:
@@ -2058,6 +2094,9 @@ func (s EventType) MarshalText() ([]byte, error) {
 // UnmarshalText implements encoding.TextUnmarshaler.
 func (s *EventType) UnmarshalText(data []byte) error {
 	switch EventType(data) {
+	case EventTypeTurn:
+		*s = EventTypeTurn
+		return nil
 	case EventTypeToken:
 		*s = EventTypeToken
 		return nil
@@ -3269,9 +3308,11 @@ func (s *NotFound) SetID(val string) {
 	s.ID = val
 }
 
+func (*NotFound) cancelTurnRes()        {}
 func (*NotFound) getSessionMeterRes()   {}
 func (*NotFound) getTurnContextRes()    {}
 func (*NotFound) putSessionContextRes() {}
+func (*NotFound) renameSessionRes()     {}
 func (*NotFound) resolveLocateRes()     {}
 
 type NotFoundError string
@@ -4427,6 +4468,23 @@ func (s *PutCorpusRequest) SetExclude(val []string) {
 	s.Exclude = val
 }
 
+// The rename body for PUT /sessions/{id}. `title` is required by the shape but may be an explicit
+// empty string to clear the label.
+// Ref: #/components/schemas/RenameSessionRequest
+type RenameSessionRequest struct {
+	Title string `json:"title"`
+}
+
+// GetTitle returns the value of Title.
+func (s *RenameSessionRequest) GetTitle() string {
+	return s.Title
+}
+
+// SetTitle sets the value of Title.
+func (s *RenameSessionRequest) SetTitle(val string) {
+	s.Title = val
+}
+
 // ResolveLocateNoContent is response for ResolveLocate operation.
 type ResolveLocateNoContent struct{}
 
@@ -4672,6 +4730,7 @@ func (s *Session) SetContextPolicy(val OptContextPolicy) {
 }
 
 func (*Session) putSessionContextRes() {}
+func (*Session) renameSessionRes()     {}
 
 // The session budget state for one turn (ADR-0051 §7). `soft` labels the warning (the turn proceeds);
 // `hard` labels the refusal (unless compaction rescued the turn).
@@ -5279,6 +5338,71 @@ func (s *TurnMeasurement) SetQuant(val OptString) {
 // SetWindowUtilization sets the value of WindowUtilization.
 func (s *TurnMeasurement) SetWindowUtilization(val OptFloat64) {
 	s.WindowUtilization = val
+}
+
+// The typed refusal when POST /turns/{id}/cancel targets a turn that is known (routed) but is no
+// longer running — it has already finished or was already cancelled. An id that was never a turn is
+// the typed 404 instead.
+// Ref: #/components/schemas/TurnNotRunning
+type TurnNotRunning struct {
+	Error  TurnNotRunningError `json:"error"`
+	TurnId string              `json:"turnId"`
+}
+
+// GetError returns the value of Error.
+func (s *TurnNotRunning) GetError() TurnNotRunningError {
+	return s.Error
+}
+
+// GetTurnId returns the value of TurnId.
+func (s *TurnNotRunning) GetTurnId() string {
+	return s.TurnId
+}
+
+// SetError sets the value of Error.
+func (s *TurnNotRunning) SetError(val TurnNotRunningError) {
+	s.Error = val
+}
+
+// SetTurnId sets the value of TurnId.
+func (s *TurnNotRunning) SetTurnId(val string) {
+	s.TurnId = val
+}
+
+func (*TurnNotRunning) cancelTurnRes() {}
+
+type TurnNotRunningError string
+
+const (
+	TurnNotRunningErrorTurnNotRunning TurnNotRunningError = "turn-not-running"
+)
+
+// AllValues returns all TurnNotRunningError values.
+func (TurnNotRunningError) AllValues() []TurnNotRunningError {
+	return []TurnNotRunningError{
+		TurnNotRunningErrorTurnNotRunning,
+	}
+}
+
+// MarshalText implements encoding.TextMarshaler.
+func (s TurnNotRunningError) MarshalText() ([]byte, error) {
+	switch s {
+	case TurnNotRunningErrorTurnNotRunning:
+		return []byte(s), nil
+	default:
+		return nil, errors.Errorf("invalid value: %q", s)
+	}
+}
+
+// UnmarshalText implements encoding.TextUnmarshaler.
+func (s *TurnNotRunningError) UnmarshalText(data []byte) error {
+	switch TurnNotRunningError(data) {
+	case TurnNotRunningErrorTurnNotRunning:
+		*s = TurnNotRunningErrorTurnNotRunning
+		return nil
+	default:
+		return errors.Errorf("invalid value: %q", data)
+	}
 }
 
 // Ref: #/components/schemas/TurnOptions

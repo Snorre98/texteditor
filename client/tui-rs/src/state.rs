@@ -6,7 +6,7 @@
 //! machine (token accumulation, done/degraded, candidate/conflict labels) is
 //! unit-tested without a terminal or a live engine.
 
-use crate::gen::{DiffEvent, MeterEvent, Mode, Revision};
+use crate::gen::{ContextSnapshot, DiffEvent, LocateResult, MeterEvent, Mode, Revision, Session};
 use crate::sse::SseEvent;
 
 /// Connection lifecycle for the status line.
@@ -56,6 +56,14 @@ pub struct StatusInfo {
     pub conflict: Option<String>,
 }
 
+/// The open workspace (engine-sourced identity, ADR-0049 §2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceInfo {
+    pub id: String,
+    pub root: String,
+    pub name: String,
+}
+
 /// An event from the async bridge to the UI. The UI reduces these into
 /// [`AppState`]; it never computes domain values.
 #[derive(Debug, Clone)]
@@ -73,8 +81,26 @@ pub enum UiEvent {
         path: String,
         external_change: bool,
     },
-    /// The resumed/created session.
-    Session { id: String },
+    /// The resumed/created session (title is engine-sourced and optional).
+    Session { id: String, title: Option<String> },
+    /// The resolved/created workspace (ADR-0049 §2).
+    Workspace {
+        id: String,
+        root: String,
+        name: String,
+    },
+    /// A workspace-scoped session list (ADR-0049 §5).
+    Sessions(Vec<Session>),
+    /// A bounded directory listing (ADR-0035/ADR-0049 §6).
+    Directory {
+        listing: crate::gen::DirectoryListing,
+    },
+    /// A typed `path-outside-allowed-roots` refusal (ADR-0049 §6) — rendered,
+    /// never swallowed.
+    DirectoryRefused {
+        path: String,
+        allowed_roots: Vec<String>,
+    },
     /// One typed SSE event.
     Turn(SseEvent),
     /// The turn stream ended (terminal event or disconnect).
@@ -91,6 +117,15 @@ pub enum UiEvent {
     Info(String),
 }
 
+/// A modal overlay (E2): the bounded directory picker or the session list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Overlay {
+    #[default]
+    None,
+    Directory,
+    Sessions,
+}
+
 /// The full render-only snapshot.
 #[derive(Debug, Default)]
 pub struct AppState {
@@ -100,6 +135,24 @@ pub struct AppState {
     pub document_id: Option<String>,
     pub document_path: Option<String>,
     pub session_id: Option<String>,
+    pub session_title: Option<String>,
+    /// The active turn id, captured from the `turn`/`context`/`locate` events;
+    /// address for the cancel and locate picker routes (E2).
+    pub turn_id: Option<String>,
+    /// True when the last turn ended `done {cancelled:true}`.
+    pub cancelled: bool,
+    /// Accumulated reasoning deltas for the thinking indicator (E2/C5).
+    pub thinking: String,
+    /// The open workspace (engine identity), when one is resolved (E2).
+    pub workspace: Option<WorkspaceInfo>,
+    /// The workspace-scoped session list (E2).
+    pub sessions: Vec<Session>,
+    /// The most recent directory listing (the file/mention picker) (E2).
+    pub directory: Option<crate::gen::DirectoryListing>,
+    /// The most recent context snapshot (inspector; E2). Engine data, rendered.
+    pub last_context: Option<ContextSnapshot>,
+    /// The most recent `/locate` outcome (E2).
+    pub last_locate: Option<LocateResult>,
     /// Finalized chat history.
     pub messages: Vec<ChatMessage>,
     /// The assistant text currently streaming (folded into `messages` on end).
@@ -115,6 +168,12 @@ pub struct AppState {
     pub protocol_notes: Vec<String>,
     pub error: Option<String>,
     pub should_quit: bool,
+    /// The open modal overlay (E2).
+    pub overlay: Overlay,
+    /// The selected row in the active overlay.
+    pub picker_index: usize,
+    /// The in-progress session title edit (Some while renaming).
+    pub rename: Option<String>,
 }
 
 impl AppState {
@@ -133,6 +192,10 @@ impl AppState {
         });
         self.streaming = Some(String::new());
         self.turn_active = true;
+        self.cancelled = false;
+        self.thinking.clear();
+        self.turn_id = None;
+        self.last_locate = None;
         self.status.conflict = None;
         self.error = None;
         self.candidate = None;
@@ -190,12 +253,62 @@ impl AppState {
                 self.status.target_path = Some(path.clone());
                 self.document_id = Some(id);
                 self.document_path = Some(path);
+                self.overlay = Overlay::None;
                 if external_change {
                     self.note("external-change: file re-read from disk on open".to_string());
                 }
             }
-            UiEvent::Session { id } => {
+            UiEvent::Session { id, title } => {
                 self.session_id = Some(id);
+                self.session_title = title;
+            }
+            UiEvent::Workspace { id, root, name } => {
+                self.workspace = Some(WorkspaceInfo { id, root, name });
+            }
+            UiEvent::Sessions(sessions) => {
+                self.sessions = sessions;
+            }
+            UiEvent::Directory { listing } => {
+                self.directory = Some(listing);
+                // A first listing with no document open is the bootstrap picker.
+                if self.document_id.is_none() {
+                    self.overlay = Overlay::Directory;
+                    self.picker_index = 0;
+                }
+            }
+            UiEvent::DirectoryRefused {
+                path,
+                allowed_roots,
+            } => {
+                // A typed refusal is rendered verbatim, never swallowed.
+                let allowed = if allowed_roots.is_empty() {
+                    "(none configured)".to_string()
+                } else {
+                    allowed_roots.join(", ")
+                };
+                self.error = Some(format!(
+                    "path-outside-allowed-roots: {path} (allowed: {allowed})"
+                ));
+                self.note(format!("path-outside-allowed-roots: {path}"));
+            }
+            UiEvent::Turn(SseEvent::Turn(turn)) => {
+                self.turn_id = Some(turn.turn_id.clone());
+                if self.session_id.is_none() {
+                    self.session_id = Some(turn.session_id.clone());
+                }
+            }
+            UiEvent::Turn(SseEvent::Locate(locate)) => {
+                if let Some(turn_id) = &locate.turn_id {
+                    self.turn_id = Some(turn_id.clone());
+                }
+                self.last_locate = Some(locate);
+            }
+            UiEvent::Turn(SseEvent::Thinking(thinking)) => {
+                self.thinking.push_str(&thinking.text);
+            }
+            UiEvent::Turn(SseEvent::Context(context)) => {
+                self.turn_id = Some(context.turn_id.clone());
+                self.last_context = Some(context);
             }
             UiEvent::Turn(SseEvent::Token(token)) => {
                 self.streaming
@@ -219,12 +332,17 @@ impl AppState {
             UiEvent::Turn(SseEvent::Diff(diff)) => {
                 self.diffs.push(diff);
             }
-            UiEvent::Turn(SseEvent::Rag(_)) | UiEvent::Turn(SseEvent::Context(_)) => {
-                // E1 decodes but does not render RAG/context; E2 owns those panes.
+            UiEvent::Turn(SseEvent::Rag(_)) => {
+                // The rag event is rendered through the last context snapshot
+                // (inspector); E2b owns the dedicated RAG pane.
             }
             UiEvent::Turn(SseEvent::Done(done)) => {
                 self.status.used_model = done.used_model;
                 self.status.degraded = done.degraded.unwrap_or(false);
+                self.cancelled = done.cancelled.unwrap_or(false);
+                if self.cancelled {
+                    self.note("turn cancelled".to_string());
+                }
                 self.finalize_streaming();
                 self.turn_active = false;
             }
@@ -293,6 +411,7 @@ mod tests {
         app.reduce(UiEvent::Turn(SseEvent::Done(DoneEvent {
             degraded: Some(true),
             used_model: Some("gemma".to_string()),
+            cancelled: None,
         })));
         assert!(!app.turn_active);
         assert_eq!(app.streaming, None);
@@ -390,5 +509,84 @@ mod tests {
             app.error.as_deref(),
             Some("context-window-exceeded: too big")
         );
+    }
+
+    fn turn_event(turn_id: &str, session_id: &str) -> UiEvent {
+        UiEvent::Turn(SseEvent::Turn(crate::gen::TurnEvent {
+            turn_id: turn_id.to_string(),
+            session_id: session_id.to_string(),
+        }))
+    }
+
+    #[test]
+    fn turn_event_captures_the_turn_id() {
+        let mut app = AppState::default();
+        app.reduce(turn_event("t1", "s1"));
+        assert_eq!(app.turn_id.as_deref(), Some("t1"));
+        assert_eq!(app.session_id.as_deref(), Some("s1"));
+    }
+
+    #[test]
+    fn locate_event_captures_the_turn_id() {
+        let mut app = AppState::default();
+        app.reduce(UiEvent::Turn(SseEvent::Locate(crate::gen::LocateResult {
+            block_id: None,
+            candidates: None,
+            chunk_key: None,
+            confidence: None,
+            context: None,
+            document_id: None,
+            match_type: None,
+            path: None,
+            span: None,
+            stale: None,
+            status: crate::gen::LocateResultStatus::Ambiguous,
+            turn_id: Some("t9".to_string()),
+        })));
+        assert_eq!(app.turn_id.as_deref(), Some("t9"));
+        assert!(app.last_locate.is_some());
+    }
+
+    #[test]
+    fn done_cancelled_marks_the_turn_cancelled() {
+        let mut app = AppState::default();
+        app.begin_turn("hi".to_string());
+        app.reduce(turn_event("t1", "s1"));
+        app.reduce(UiEvent::Turn(SseEvent::Done(crate::gen::DoneEvent {
+            cancelled: Some(true),
+            degraded: None,
+            used_model: Some("gemma".to_string()),
+        })));
+        assert!(app.cancelled);
+        assert!(!app.turn_active);
+    }
+
+    #[test]
+    fn thinking_deltas_accumulate() {
+        let mut app = AppState::default();
+        app.begin_turn("hi".to_string());
+        app.reduce(UiEvent::Turn(SseEvent::Thinking(
+            crate::gen::ThinkingEvent {
+                text: "pon".to_string(),
+            },
+        )));
+        app.reduce(UiEvent::Turn(SseEvent::Thinking(
+            crate::gen::ThinkingEvent {
+                text: "der".to_string(),
+            },
+        )));
+        assert_eq!(app.thinking, "ponder");
+    }
+
+    #[test]
+    fn directory_refusal_is_rendered_verbatim() {
+        let mut app = AppState::default();
+        app.reduce(UiEvent::DirectoryRefused {
+            path: "/etc".to_string(),
+            allowed_roots: vec!["/home/me".to_string()],
+        });
+        let err = app.error.as_deref().unwrap_or_default();
+        assert!(err.starts_with("path-outside-allowed-roots: /etc"));
+        assert!(err.contains("/home/me"));
     }
 }

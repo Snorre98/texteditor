@@ -35,7 +35,7 @@ func TestCreateResumeReopenSameSession(t *testing.T) {
 	s := newTestStore(t)
 
 	anchor := "block-P"
-	s1, err := s.Create("doc1", blockPtr(anchor), "proofreader")
+	s1, err := s.Create("doc1", blockPtr(anchor), "proofreader", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -44,7 +44,7 @@ func TestCreateResumeReopenSameSession(t *testing.T) {
 	}
 
 	// Re-anchoring the same block reopens the same session.
-	s2, err := s.Create("doc1", blockPtr(anchor), "proofreader")
+	s2, err := s.Create("doc1", blockPtr(anchor), "proofreader", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -53,7 +53,7 @@ func TestCreateResumeReopenSameSession(t *testing.T) {
 	}
 
 	// A fresh block mints a new session.
-	s3, err := s.Create("doc1", blockPtr("block-Q"), "proofreader")
+	s3, err := s.Create("doc1", blockPtr("block-Q"), "proofreader", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -64,7 +64,7 @@ func TestCreateResumeReopenSameSession(t *testing.T) {
 
 func TestUnanchoredSession(t *testing.T) {
 	s := newTestStore(t)
-	s1, err := s.Create("doc1", nil, "editor")
+	s1, err := s.Create("doc1", nil, "editor", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -72,7 +72,7 @@ func TestUnanchoredSession(t *testing.T) {
 		t.Fatalf("doc-level session should have nil anchor, got %v", *s1.AnchorBlockID)
 	}
 	// A second doc-level chat reopens the same unanchored session.
-	s2, err := s.Create("doc1", nil, "editor")
+	s2, err := s.Create("doc1", nil, "editor", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -83,16 +83,16 @@ func TestUnanchoredSession(t *testing.T) {
 
 func TestListByDocument(t *testing.T) {
 	s := newTestStore(t)
-	if _, err := s.Create("doc1", nil, "editor"); err != nil {
+	if _, err := s.Create("doc1", nil, "editor", ""); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.Create("doc1", blockPtr("a"), "editor"); err != nil {
+	if _, err := s.Create("doc1", blockPtr("a"), "editor", ""); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.Create("doc1", blockPtr("b"), "editor"); err != nil {
+	if _, err := s.Create("doc1", blockPtr("b"), "editor", ""); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.Create("doc2", nil, "editor"); err != nil {
+	if _, err := s.Create("doc2", nil, "editor", ""); err != nil {
 		t.Fatal(err)
 	}
 	sessions, err := s.ListByDocument("doc1")
@@ -106,7 +106,7 @@ func TestListByDocument(t *testing.T) {
 
 func TestAppendHistory(t *testing.T) {
 	s := newTestStore(t)
-	sess, _ := s.Create("doc1", nil, "editor")
+	sess, _ := s.Create("doc1", nil, "editor", "")
 
 	if err := s.Append(sess.ID, dto.Message{Role: "user", Content: "hi"}); err != nil {
 		t.Fatal(err)
@@ -150,7 +150,7 @@ func TestResumeNotFound(t *testing.T) {
 
 func TestSaveContextRoundTrip(t *testing.T) {
 	s := newTestStore(t)
-	sess, _ := s.Create("doc1", nil, "editor")
+	sess, _ := s.Create("doc1", nil, "editor", "")
 
 	snap := []byte(`{"turnId":"t1","messages":[{"component":"system"}]}`)
 	if err := s.SaveContext("t1", sess.ID, snap); err != nil {
@@ -180,7 +180,7 @@ func TestSaveContextRoundTrip(t *testing.T) {
 
 func TestSaveContextRetentionKeepsNewest100(t *testing.T) {
 	s := newTestStore(t)
-	sess, _ := s.Create("doc1", nil, "editor")
+	sess, _ := s.Create("doc1", nil, "editor", "")
 
 	// Insert 105 snapshots for one session; retention keeps the newest 100.
 	for i := 0; i < 105; i++ {
@@ -199,7 +199,7 @@ func TestSaveContextRetentionKeepsNewest100(t *testing.T) {
 		t.Fatalf("newest snapshot should be retained: %v", err)
 	}
 	// A second session's snapshots are unaffected by the first's retention.
-	sess2, _ := s.Create("doc2", nil, "editor")
+	sess2, _ := s.Create("doc2", nil, "editor", "")
 	if err := s.SaveContext("other", sess2.ID, []byte(`{}`)); err != nil {
 		t.Fatal(err)
 	}
@@ -225,7 +225,7 @@ func itoa(i int) string {
 
 func TestContextPolicyRoundTrip(t *testing.T) {
 	s := newTestStore(t)
-	sess, err := s.Create("doc1", nil, "editor")
+	sess, err := s.Create("doc1", nil, "editor", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -274,7 +274,7 @@ func TestContextPolicyReopenSurvives(t *testing.T) {
 		return db, New(db)
 	}
 	db, st := open()
-	sess, err := st.Create("doc1", nil, "editor")
+	sess, err := st.Create("doc1", nil, "editor", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -297,7 +297,7 @@ func TestContextPolicyReopenSurvives(t *testing.T) {
 
 func TestContextPolicyInvalidIsTyped(t *testing.T) {
 	s := newTestStore(t)
-	sess, _ := s.Create("doc1", nil, "editor")
+	sess, _ := s.Create("doc1", nil, "editor", "")
 	if err := s.SetContextPolicy(sess.ID, json.RawMessage(`{`)); !errors.Is(err, ErrInvalidContextPolicy) {
 		t.Fatalf("invalid policy error = %v, want ErrInvalidContextPolicy", err)
 	}
@@ -317,7 +317,7 @@ func TestContextPolicyUnknownSession(t *testing.T) {
 // labeled summary message; the most recent keepRecentTurns survive (ADR-0051 §8).
 func TestCompactHistoryReplacesOldestTurns(t *testing.T) {
 	s := newTestStore(t)
-	sess, err := s.Create("doc1", nil, "editor")
+	sess, err := s.Create("doc1", nil, "editor", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -359,5 +359,61 @@ func TestCompactHistoryReplacesOldestTurns(t *testing.T) {
 	// A second compaction with enough recent turns is a no-op.
 	if _, _, n, err := s.CompactHistory(sess.ID, "again", 10); err != nil || n != 0 {
 		t.Fatalf("no-op compaction = (%d,%v), want (0,nil)", n, err)
+	}
+}
+
+func TestCreateWithTitleAndRename(t *testing.T) {
+	s := newTestStore(t)
+
+	sess, err := s.Create("doc1", nil, "editor", "Thesis outline")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sess.Title != "Thesis outline" {
+		t.Fatalf("title = %q, want %q", sess.Title, "Thesis outline")
+	}
+
+	// Rename round-trips and is visible on resume.
+	if err := s.Rename(sess.ID, "Chapter 3"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.Resume(sess.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Title != "Chapter 3" {
+		t.Fatalf("renamed title = %q, want %q", got.Title, "Chapter 3")
+	}
+
+	// An explicit empty title clears the label.
+	if err := s.Rename(sess.ID, ""); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := s.Resume(sess.ID); got.Title != "" {
+		t.Fatalf("cleared title = %q, want empty", got.Title)
+	}
+}
+
+func TestRenameUnknownIsNotFound(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.Rename("missing", "x"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Rename unknown = %v, want ErrNotFound", err)
+	}
+}
+
+func TestCreateResumeKeepsExistingTitle(t *testing.T) {
+	s := newTestStore(t)
+	first, err := s.Create("doc1", nil, "editor", "original")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Create-or-resume for the same anchor must not overwrite the existing
+	// title with a request-supplied one.
+	again, err := s.Create("doc1", nil, "editor", "supplied")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.ID != first.ID || again.Title != "original" {
+		t.Fatalf("resume = {id:%s title:%q}, want existing {id:%s title:original}", again.ID, again.Title, first.ID)
 	}
 }

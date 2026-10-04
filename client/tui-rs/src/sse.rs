@@ -23,18 +23,21 @@
 //! compatible (ADR-0046 §3).
 
 use crate::gen::{
-    BackpressureEvent, CandidateEvent, ContextEvent, DiffEvent, DoneEvent, ErrorEvent, MeterEvent,
-    RagEvent, TokenEvent,
+    BackpressureEvent, CandidateEvent, ContextEvent, DiffEvent, DoneEvent, ErrorEvent, LocateEvent,
+    MeterEvent, RagEvent, ThinkingEvent, TokenEvent, TurnEvent,
 };
 
 /// The current SSE event vocabulary, in dispatch order.
 pub const KNOWN_EVENT_NAMES: &[&str] = &[
+    "turn",
     "token",
     "meter",
     "candidate",
     "diff",
     "rag",
     "context",
+    "locate",
+    "thinking",
     "done",
     "error",
     "backpressure",
@@ -46,12 +49,16 @@ pub const KNOWN_EVENT_NAMES: &[&str] = &[
 #[derive(Debug, Clone)]
 #[allow(clippy::large_enum_variant)]
 pub enum SseEvent {
+    /// The first event of a turn, carrying the turn id (E2).
+    Turn(TurnEvent),
     Token(TokenEvent),
     Meter(MeterEvent),
     Candidate(CandidateEvent),
     Diff(DiffEvent),
     Rag(RagEvent),
     Context(ContextEvent),
+    Locate(LocateEvent),
+    Thinking(ThinkingEvent),
     Done(DoneEvent),
     Error(ErrorEvent),
     Backpressure(BackpressureEvent),
@@ -61,12 +68,15 @@ impl SseEvent {
     /// The wire event name for this payload.
     pub fn name(&self) -> &'static str {
         match self {
+            Self::Turn(_) => "turn",
             Self::Token(_) => "token",
             Self::Meter(_) => "meter",
             Self::Candidate(_) => "candidate",
             Self::Diff(_) => "diff",
             Self::Rag(_) => "rag",
             Self::Context(_) => "context",
+            Self::Locate(_) => "locate",
+            Self::Thinking(_) => "thinking",
             Self::Done(_) => "done",
             Self::Error(_) => "error",
             Self::Backpressure(_) => "backpressure",
@@ -127,12 +137,15 @@ pub fn parse_message(block: &str) -> Option<RawMessage> {
 /// Dispatch a parsed message by event name to the generated payload type.
 pub fn dispatch(message: &RawMessage) -> Decoded {
     match message.event.as_str() {
+        "turn" => from_json(message, SseEvent::Turn),
         "token" => from_json(message, SseEvent::Token),
         "meter" => from_json(message, SseEvent::Meter),
         "candidate" => from_json(message, SseEvent::Candidate),
         "diff" => from_json(message, SseEvent::Diff),
         "rag" => from_json(message, SseEvent::Rag),
         "context" => from_json(message, SseEvent::Context),
+        "locate" => from_json(message, SseEvent::Locate),
+        "thinking" => from_json(message, SseEvent::Thinking),
         "done" => from_json(message, SseEvent::Done),
         "error" => from_json(message, SseEvent::Error),
         "backpressure" => from_json(message, SseEvent::Backpressure),
@@ -294,14 +307,41 @@ mod tests {
 
     #[test]
     fn unknown_event_is_labeled_and_not_an_error() {
-        let decoded = decode_block("event: thinking\ndata: {\"text\":\"...\"}").unwrap();
+        // A genuinely unknown future event is labeled and skipped.
+        let decoded = decode_block("event: frobnicate\ndata: {\"x\":1}").unwrap();
         assert!(matches!(
             decoded,
-            Decoded::Unknown { name } if name == "thinking"
+            Decoded::Unknown { name } if name == "frobnicate"
         ));
-        // locate is likewise unknown until E2.
-        let decoded = decode_block("event: locate\ndata: {\"status\":\"resolved\"}").unwrap();
-        assert!(matches!(decoded, Decoded::Unknown { .. }));
+    }
+
+    #[test]
+    fn dispatches_turn_locate_and_thinking() {
+        let decoded = decode_block("event: turn\ndata: {\"turnId\":\"t1\",\"sessionId\":\"s1\"}")
+            .expect("turn decodes");
+        match decoded {
+            Decoded::Event(SseEvent::Turn(t)) => {
+                assert_eq!(t.turn_id, "t1");
+                assert_eq!(t.session_id, "s1");
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+
+        let decoded =
+            decode_block("event: locate\ndata: {\"status\":\"resolved\"}").expect("locate decodes");
+        match decoded {
+            Decoded::Event(SseEvent::Locate(l)) => {
+                assert_eq!(l.status.as_str(), "resolved");
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+
+        let decoded = decode_block("event: thinking\ndata: {\"text\":\"pondering\"}")
+            .expect("thinking decodes");
+        match decoded {
+            Decoded::Event(SseEvent::Thinking(t)) => assert_eq!(t.text, "pondering"),
+            other => panic!("unexpected {other:?}"),
+        }
     }
 
     #[test]

@@ -21,8 +21,11 @@ type SessionStore interface {
 	// ListByWorkspace returns every session in this workspace shard, newest
 	// first (ADR-0049 §5: sessions are workspace-scoped by shard).
 	ListByWorkspace() ([]dto.Session, error)
-	Create(documentID string, anchorBlockID *string, modeType string) (dto.Session, error)
+	Create(documentID string, anchorBlockID *string, modeType, title string) (dto.Session, error)
 	Resume(id string) (dto.Session, error)
+	// Rename sets a session's human title (data-model §1.4). An explicit empty
+	// title clears it. An unknown session is ErrNotFound.
+	Rename(id, title string) error
 	Append(sessionID string, msg dto.Message) error
 	History(sessionID string) ([]dto.Message, error)
 	// SaveContext persists one turn's context snapshot in this shard, keeping
@@ -96,7 +99,7 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 // Create is create-or-resume: a (document_id, anchor_block_id) pair maps to at
 // most one session; re-anchoring to the same block reopens the same session
 // (ADR-0026 §1/§2, interface.md §10).
-func (s *store) Create(documentID string, anchorBlockID *string, modeType string) (dto.Session, error) {
+func (s *store) Create(documentID string, anchorBlockID *string, modeType, title string) (dto.Session, error) {
 	if existing, err := s.findByAnchor(documentID, anchorBlockID); err == nil {
 		return existing, nil
 	}
@@ -107,7 +110,7 @@ func (s *store) Create(documentID string, anchorBlockID *string, modeType string
 		DocumentID:    documentID,
 		AnchorBlockID: anchorBlockID,
 		ModeType:      modeType,
-		Title:         "",
+		Title:         title,
 		TokenBudget:   nil,
 		CreatedAt:     now,
 		UpdatedAt:     now,
@@ -158,6 +161,23 @@ func (s *store) Resume(id string) (dto.Session, error) {
 		return dto.Session{}, err
 	}
 	return sess, nil
+}
+
+// Rename sets a session's human title. It bumps updated_at so a rename is
+// reflected in the workspace's newest-first session listing. An unknown session
+// is ErrNotFound.
+func (s *store) Rename(id, title string) error {
+	res, err := s.db.Exec(
+		`UPDATE sessions SET title = ?, updated_at = ? WHERE id = ?`,
+		title, time.Now().Unix(), id,
+	)
+	if err != nil {
+		return err
+	}
+	if n, err := res.RowsAffected(); err == nil && n == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 // ListByWorkspace returns every session in the shard, newest first.

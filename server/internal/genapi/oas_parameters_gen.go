@@ -79,6 +79,71 @@ func decodeApplyEditParams(args [1]string, argsEscaped bool, r *http.Request) (p
 	return params, nil
 }
 
+// CancelTurnParams is parameters of cancelTurn operation.
+type CancelTurnParams struct {
+	ID string
+}
+
+func unpackCancelTurnParams(packed middleware.Parameters) (params CancelTurnParams) {
+	{
+		key := middleware.ParameterKey{
+			Name: "id",
+			In:   "path",
+		}
+		params.ID = packed[key].(string)
+	}
+	return params
+}
+
+func decodeCancelTurnParams(args [1]string, argsEscaped bool, r *http.Request) (params CancelTurnParams, _ error) {
+	// Decode path: id.
+	if err := func() error {
+		param := args[0]
+		if argsEscaped {
+			unescaped, err := url.PathUnescape(args[0])
+			if err != nil {
+				return errors.Wrap(err, "unescape path")
+			}
+			param = unescaped
+		}
+		if len(param) > 0 {
+			d := uri.NewPathDecoder(uri.PathDecoderConfig{
+				Param:   "id",
+				Value:   param,
+				Style:   uri.PathStyleSimple,
+				Explode: false,
+			})
+
+			if err := func() error {
+				val, err := d.DecodeValue()
+				if err != nil {
+					return err
+				}
+
+				c, err := conv.ToString(val)
+				if err != nil {
+					return err
+				}
+
+				params.ID = c
+				return nil
+			}(); err != nil {
+				return err
+			}
+		} else {
+			return validate.ErrFieldRequired
+		}
+		return nil
+	}(); err != nil {
+		return params, &ogenerrors.DecodeParamError{
+			Name: "id",
+			In:   "path",
+			Err:  err,
+		}
+	}
+	return params, nil
+}
+
 // CommitDocumentParams is parameters of commitDocument operation.
 type CommitDocumentParams struct {
 	ID string
@@ -1294,6 +1359,71 @@ func unpackPutSessionContextParams(packed middleware.Parameters) (params PutSess
 }
 
 func decodePutSessionContextParams(args [1]string, argsEscaped bool, r *http.Request) (params PutSessionContextParams, _ error) {
+	// Decode path: id.
+	if err := func() error {
+		param := args[0]
+		if argsEscaped {
+			unescaped, err := url.PathUnescape(args[0])
+			if err != nil {
+				return errors.Wrap(err, "unescape path")
+			}
+			param = unescaped
+		}
+		if len(param) > 0 {
+			d := uri.NewPathDecoder(uri.PathDecoderConfig{
+				Param:   "id",
+				Value:   param,
+				Style:   uri.PathStyleSimple,
+				Explode: false,
+			})
+
+			if err := func() error {
+				val, err := d.DecodeValue()
+				if err != nil {
+					return err
+				}
+
+				c, err := conv.ToString(val)
+				if err != nil {
+					return err
+				}
+
+				params.ID = c
+				return nil
+			}(); err != nil {
+				return err
+			}
+		} else {
+			return validate.ErrFieldRequired
+		}
+		return nil
+	}(); err != nil {
+		return params, &ogenerrors.DecodeParamError{
+			Name: "id",
+			In:   "path",
+			Err:  err,
+		}
+	}
+	return params, nil
+}
+
+// RenameSessionParams is parameters of renameSession operation.
+type RenameSessionParams struct {
+	ID string
+}
+
+func unpackRenameSessionParams(packed middleware.Parameters) (params RenameSessionParams) {
+	{
+		key := middleware.ParameterKey{
+			Name: "id",
+			In:   "path",
+		}
+		params.ID = packed[key].(string)
+	}
+	return params
+}
+
+func decodeRenameSessionParams(args [1]string, argsEscaped bool, r *http.Request) (params RenameSessionParams, _ error) {
 	// Decode path: id.
 	if err := func() error {
 		param := args[0]

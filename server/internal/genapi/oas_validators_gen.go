@@ -747,6 +747,8 @@ func (s *Event) Validate() error {
 
 func (s EventType) Validate() error {
 	switch s {
+	case "turn":
+		return nil
 	case "token":
 		return nil
 	case "meter":
@@ -1599,6 +1601,38 @@ func (s *TurnMeasurement) Validate() error {
 		return &validate.Error{Fields: failures}
 	}
 	return nil
+}
+
+func (s *TurnNotRunning) Validate() error {
+	if s == nil {
+		return validate.ErrNilPointer
+	}
+
+	var failures []validate.FieldError
+	if err := func() error {
+		if err := s.Error.Validate(); err != nil {
+			return err
+		}
+		return nil
+	}(); err != nil {
+		failures = append(failures, validate.FieldError{
+			Name:  "error",
+			Error: err,
+		})
+	}
+	if len(failures) > 0 {
+		return &validate.Error{Fields: failures}
+	}
+	return nil
+}
+
+func (s TurnNotRunningError) Validate() error {
+	switch s {
+	case "turn-not-running":
+		return nil
+	default:
+		return errors.Errorf("invalid value: %v", s)
+	}
 }
 
 func (s *TurnOptions) Validate() error {

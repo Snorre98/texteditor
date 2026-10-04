@@ -569,6 +569,41 @@ paths:
               schema:
                 $ref: '#/components/schemas/Session'
 
+  /sessions/{id}:
+    put:
+      operationId: renameSession
+      summary: Rename a session (set its human title)
+      description: >
+        Sets the session's human-readable `title` (data-model §1.4). The title is
+        engine-owned and purely a display label; renaming never touches messages,
+        context policy, or budget. An explicit empty title clears it. An unknown
+        session is the typed 404.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RenameSessionRequest'
+      responses:
+        '200':
+          description: the renamed session
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Session'
+        '404':
+          description: no session exists with the id
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotFound'
+
   /sessions/{id}/messages:
     get:
       operationId: getSessionMessages
@@ -695,6 +730,40 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/NoPendingLocate'
+
+  /turns/{id}/cancel:
+    post:
+      operationId: cancelTurn
+      summary: Cancel a running turn (user-initiated, labeled terminal outcome)
+      description: >
+        Cancels a turn that is still running. The engine cancels the turn's
+        context; the turn ends with a labeled terminal `done {cancelled:true}`
+        (partial assistant text, if any, is preserved), any partial usage is
+        metered, and the persisted context snapshot records `cancelled`. An
+        unknown turn id is the typed 404; a turn that is not currently running
+        (already finished or cancelled) is the typed 409. The 204 carries no
+        body — the turn's terminal event arrives on its existing /turn stream.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '204':
+          description: cancellation was delivered to the running turn
+        '404':
+          description: no turn exists with the id
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotFound'
+        '409':
+          description: the turn is known but is not currently running
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TurnNotRunning'
 
   /sessions/{id}/meter:
     get:
@@ -1343,6 +1412,23 @@ components:
           type: string
         modeType:
           type: string
+        title:
+          type: string
+          description: >
+            Optional human label for the new session. Purely a display title
+            (data-model §1.4); it never affects assembly. An engine default
+            (e.g. the document basename) may be derived when omitted; the client
+            can rename it later via PUT /sessions/{id}.
+
+    RenameSessionRequest:
+      type: object
+      description: >
+        The rename body for PUT /sessions/{id}. `title` is required by the shape
+        but may be an explicit empty string to clear the label.
+      required: [title]
+      properties:
+        title:
+          type: string
 
     SessionMeter:
       type: object
@@ -1402,6 +1488,20 @@ components:
         error:
           type: string
           enum: [no-pending-locate]
+        turnId:
+          type: string
+
+    TurnNotRunning:
+      type: object
+      description: >
+        The typed refusal when POST /turns/{id}/cancel targets a turn that is
+        known (routed) but is no longer running — it has already finished or was
+        already cancelled. An id that was never a turn is the typed 404 instead.
+      required: [error, turnId]
+      properties:
+        error:
+          type: string
+          enum: [turn-not-running]
         turnId:
           type: string
 
@@ -1501,7 +1601,22 @@ components:
       properties:
         type:
           type: string
-          enum: [token, meter, candidate, diff, rag, context, locate, thinking, done, error, backpressure]
+          enum: [turn, token, meter, candidate, diff, rag, context, locate, thinking, done, error, backpressure]
+
+    TurnEvent:
+      type: object
+      description: >
+        The first SSE event of a turn, emitted by the API server immediately
+        after subscribing the /turn stream (before the loop does any work). It
+        carries the turn id so a client can address the turn-scoped routes
+        POST /turns/{id}/cancel and POST /turns/{id}/locate while the turn runs.
+        Payloads otherwise do not repeat the turn id (one turn per stream).
+      required: [turnId, sessionId]
+      properties:
+        turnId:
+          type: string
+        sessionId:
+          type: string
 
     TokenEvent:
       type: object
@@ -1747,6 +1862,12 @@ components:
           $ref: '#/components/schemas/WindowUsage'
         sessionBudget:
           $ref: '#/components/schemas/SessionBudget'
+        cancelled:
+          type: boolean
+          description: >
+            True when the turn was cancelled by the user
+            (POST /turns/{id}/cancel); the snapshot remains retrievable and
+            records the partial usage. Absent/false for a normal turn.
         createdAt:
           type: integer
           format: int64
@@ -1964,6 +2085,13 @@ components:
           type: boolean
         usedModel:
           type: string
+        cancelled:
+          type: boolean
+          description: >
+            True when the turn ended because the user cancelled it
+            (POST /turns/{id}/cancel). The turn is not an error: any partial
+            assistant text streamed before cancellation is preserved, and
+            partial usage is metered. Absent/false for a normal completion.
 
     ErrorEvent:
       type: object

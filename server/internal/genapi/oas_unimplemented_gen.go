@@ -22,6 +22,19 @@ func (UnimplementedHandler) ApplyEdit(ctx context.Context, req *BlockEdit, param
 	return r, ht.ErrNotImplemented
 }
 
+// CancelTurn implements cancelTurn operation.
+//
+// Cancels a turn that is still running. The engine cancels the turn's context; the turn ends with a
+// labeled terminal `done {cancelled:true}` (partial assistant text, if any, is preserved), any partial
+// usage is metered, and the persisted context snapshot records `cancelled`. An unknown turn id is the
+// typed 404; a turn that is not currently running (already finished or cancelled) is the typed 409.
+// The 204 carries no body — the turn's terminal event arrives on its existing /turn stream.
+//
+// POST /turns/{id}/cancel
+func (UnimplementedHandler) CancelTurn(ctx context.Context, params CancelTurnParams) (r CancelTurnRes, _ error) {
+	return r, ht.ErrNotImplemented
+}
+
 // CommitDocument implements commitDocument operation.
 //
 // Accepts the staged candidates (newest-first, deterministic), re-validates each candidate's base
@@ -267,6 +280,17 @@ func (UnimplementedHandler) PutCorpus(ctx context.Context, req *PutCorpusRequest
 //
 // PUT /sessions/{id}/context
 func (UnimplementedHandler) PutSessionContext(ctx context.Context, req *ContextPolicy, params PutSessionContextParams) (r PutSessionContextRes, _ error) {
+	return r, ht.ErrNotImplemented
+}
+
+// RenameSession implements renameSession operation.
+//
+// Sets the session's human-readable `title` (data-model §1.4). The title is engine-owned and purely a
+// display label; renaming never touches messages, context policy, or budget. An explicit empty title
+// clears it. An unknown session is the typed 404.
+//
+// PUT /sessions/{id}
+func (UnimplementedHandler) RenameSession(ctx context.Context, req *RenameSessionRequest, params RenameSessionParams) (r RenameSessionRes, _ error) {
 	return r, ht.ErrNotImplemented
 }
 

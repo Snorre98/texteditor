@@ -13,6 +13,16 @@ type Handler interface {
 	//
 	// POST /documents/{id}/edits
 	ApplyEdit(ctx context.Context, req *BlockEdit, params ApplyEditParams) (*Revision, error)
+	// CancelTurn implements cancelTurn operation.
+	//
+	// Cancels a turn that is still running. The engine cancels the turn's context; the turn ends with a
+	// labeled terminal `done {cancelled:true}` (partial assistant text, if any, is preserved), any partial
+	// usage is metered, and the persisted context snapshot records `cancelled`. An unknown turn id is the
+	// typed 404; a turn that is not currently running (already finished or cancelled) is the typed 409.
+	// The 204 carries no body — the turn's terminal event arrives on its existing /turn stream.
+	//
+	// POST /turns/{id}/cancel
+	CancelTurn(ctx context.Context, params CancelTurnParams) (CancelTurnRes, error)
 	// CommitDocument implements commitDocument operation.
 	//
 	// Accepts the staged candidates (newest-first, deterministic), re-validates each candidate's base
@@ -180,6 +190,14 @@ type Handler interface {
 	//
 	// PUT /sessions/{id}/context
 	PutSessionContext(ctx context.Context, req *ContextPolicy, params PutSessionContextParams) (PutSessionContextRes, error)
+	// RenameSession implements renameSession operation.
+	//
+	// Sets the session's human-readable `title` (data-model §1.4). The title is engine-owned and purely a
+	// display label; renaming never touches messages, context policy, or budget. An explicit empty title
+	// clears it. An unknown session is the typed 404.
+	//
+	// PUT /sessions/{id}
+	RenameSession(ctx context.Context, req *RenameSessionRequest, params RenameSessionParams) (RenameSessionRes, error)
 	// ResolveLocate implements resolveLocate operation.
 	//
 	// When a `/locate` turn resolves to a fuzzy match it emits a `locate` event with ranked candidates and

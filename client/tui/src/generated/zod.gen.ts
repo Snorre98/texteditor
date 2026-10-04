@@ -408,7 +408,12 @@ export const zCreateSessionRequest = z.object({
     documentId: z.string(),
     workspaceId: z.string().optional(),
     anchorBlockId: z.string().optional(),
-    modeType: z.string().optional()
+    modeType: z.string().optional(),
+    title: z.string().optional()
+});
+
+export const zRenameSessionRequest = z.object({
+    title: z.string()
 });
 
 export const zSessionMeter = z.object({
@@ -446,6 +451,13 @@ export const zNotFound = z.object({
 export const zNoPendingLocate = z.object({
     error: z.enum([
         'no-pending-locate'
+    ]),
+    turnId: z.string()
+});
+
+export const zTurnNotRunning = z.object({
+    error: z.enum([
+        'turn-not-running'
     ]),
     turnId: z.string()
 });
@@ -489,6 +501,7 @@ export const zLocateResult = z.object({
 
 export const zEvent = z.object({
     type: z.enum([
+        'turn',
         'token',
         'meter',
         'candidate',
@@ -501,6 +514,11 @@ export const zEvent = z.object({
         'error',
         'backpressure'
     ])
+});
+
+export const zTurnEvent = z.object({
+    turnId: z.string(),
+    sessionId: z.string()
 });
 
 export const zTokenEvent = z.object({
@@ -684,6 +702,7 @@ export const zContextSnapshot = z.object({
         used: z.number().int().optional(),
         budget: z.number().int().optional()
     }).optional(),
+    cancelled: z.boolean().optional(),
     createdAt: z.coerce.bigint()
 });
 
@@ -795,7 +814,8 @@ export const zLocateEvent = zLocateResult;
 
 export const zDoneEvent = z.object({
     degraded: z.boolean().optional(),
-    usedModel: z.string().optional()
+    usedModel: z.string().optional(),
+    cancelled: z.boolean().optional()
 });
 
 export const zErrorEvent = z.object({
@@ -861,6 +881,8 @@ export const zListSessionsResponse = z.array(zSession);
 
 export const zCreateSessionResponse = zSession;
 
+export const zRenameSessionResponse = zSession;
+
 export const zGetSessionMessagesResponse = z.array(zMessage);
 
 export const zPutSessionContextResponse = zSession;
@@ -868,5 +890,7 @@ export const zPutSessionContextResponse = zSession;
 export const zGetTurnContextResponse = zContextSnapshot;
 
 export const zResolveLocateResponse = z.void();
+
+export const zCancelTurnResponse = z.void();
 
 export const zGetSessionMeterResponse = zSessionMeter;

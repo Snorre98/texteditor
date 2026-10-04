@@ -60,7 +60,7 @@ func TestLazyOpenAndMigrate(t *testing.T) {
 		}
 	}
 	// The session store is migrated and usable.
-	sess, err := lease.Sessions.Create("doc1", nil, "")
+	sess, err := lease.Sessions.Create("doc1", nil, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}

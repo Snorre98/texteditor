@@ -7,6 +7,7 @@ type OperationName = string
 
 const (
 	ApplyEditOperation           OperationName = "ApplyEdit"
+	CancelTurnOperation          OperationName = "CancelTurn"
 	CommitDocumentOperation      OperationName = "CommitDocument"
 	CreateSessionOperation       OperationName = "CreateSession"
 	CreateWorkspaceOperation     OperationName = "CreateWorkspace"
@@ -34,6 +35,7 @@ const (
 	ProvisionModelOperation      OperationName = "ProvisionModel"
 	PutCorpusOperation           OperationName = "PutCorpus"
 	PutSessionContextOperation   OperationName = "PutSessionContext"
+	RenameSessionOperation       OperationName = "RenameSession"
 	ResolveLocateOperation       OperationName = "ResolveLocate"
 	SaveDocumentOperation        OperationName = "SaveDocument"
 	StartModelOperation          OperationName = "StartModel"

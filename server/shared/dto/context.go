@@ -159,7 +159,10 @@ type ContextSnapshot struct {
 	Compacted      *CompactionRecord `json:"compacted,omitempty"`
 	Window         *WindowUsage      `json:"window,omitempty"`
 	SessionBudget  *SessionBudget    `json:"sessionBudget,omitempty"`
-	CreatedAt      int64             `json:"createdAt"`
+	// Cancelled labels a user-cancelled turn (ADR-0046 E2); partial usage is
+	// still metered. Absent/false for a normal turn.
+	Cancelled bool  `json:"cancelled,omitempty"`
+	CreatedAt int64 `json:"createdAt"`
 }
 
 // SessionBudget is the session budget state for one turn (ADR-0051 §7): the

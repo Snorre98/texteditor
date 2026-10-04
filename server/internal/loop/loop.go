@@ -47,6 +47,11 @@ type AgentLoop interface {
 	// degrades it to plain chat. ErrNoPendingLocate (typed 409) is returned when
 	// the turn is not waiting on a picker.
 	ResolveLocate(turnID string, choice dto.LocateChoice) error
+	// Cancel cancels a still-running turn (user-initiated, POST
+	// /turns/{id}/cancel). The turn ends with a labeled terminal outcome and any
+	// partial usage is metered. ErrTurnNotRunning (typed 409) is returned when
+	// the turn is known but no longer running.
+	Cancel(turnID string) error
 }
 
 // Interface is an alias for AgentLoop (the contracted name, interface.md §7).
@@ -99,6 +104,11 @@ var (
 	// errNoOutcome is the labeled terminal error when a turn produces neither a
 	// tool call nor an answer (ADR-0051 §2).
 	errNoOutcome = errors.New("no-outcome: the turn produced neither a tool call nor an answer")
+	// ErrTurnNotRunning is the typed refusal (mapped to HTTP 409) when
+	// POST /turns/{id}/cancel targets a turn that is known but no longer running
+	// (already finished or cancelled). An id that was never a turn is the
+	// API-level typed 404 instead.
+	ErrTurnNotRunning = errors.New("turn-not-running: this turn is not currently running")
 )
 
 // loop is the concrete Agent loop.
@@ -110,19 +120,70 @@ type loop struct {
 	// a cancel/timeout degrades it to plain chat.
 	pendingMu sync.Mutex
 	pending   map[string]*pendingLocate
+
+	// cancels holds the cancel func of every running turn; cancelled records
+	// user-initiated cancels so a turn can label its terminal outcome
+	// (`done {cancelled:true}`) distinctly from a provider/context error
+	// (ADR-0046 E2). Both are in-memory and turn-scoped.
+	cancelMu  sync.Mutex
+	cancels   map[string]context.CancelFunc
+	cancelled map[string]bool
 }
 
 // New returns an Agent loop over the supplied dependencies.
 func New(d Deps) AgentLoop {
-	return &loop{d: d, pending: map[string]*pendingLocate{}}
+	return &loop{
+		d:         d,
+		pending:   map[string]*pendingLocate{},
+		cancels:   map[string]context.CancelFunc{},
+		cancelled: map[string]bool{},
+	}
 }
 
 // Run starts a turn asynchronously, returning its turnID. Events are tagged with
-// the turnID; correlation to the requesting client is the API server's job.
+// the turnID; correlation to the requesting client is the API server's job. The
+// turn runs on a cancellable context so POST /turns/{id}/cancel can interrupt it.
 func (l *loop) Run(ctx context.Context, task dto.Task) (string, error) {
 	turnID := uuid.NewString()
-	go l.runTurn(ctx, turnID, task)
+	turnCtx, cancel := context.WithCancel(ctx)
+	l.cancelMu.Lock()
+	l.cancels[turnID] = cancel
+	l.cancelMu.Unlock()
+	go func() {
+		defer func() {
+			cancel()
+			l.cancelMu.Lock()
+			delete(l.cancels, turnID)
+			delete(l.cancelled, turnID)
+			l.cancelMu.Unlock()
+		}()
+		l.runTurn(turnCtx, turnID, task)
+	}()
 	return turnID, nil
+}
+
+// Cancel cancels a still-running turn. It marks the turn as user-cancelled
+// (so runTurn labels the terminal outcome) and cancels its context. A turn that
+// is not running is ErrTurnNotRunning (the API maps it to a typed 409).
+func (l *loop) Cancel(turnID string) error {
+	l.cancelMu.Lock()
+	cancel, ok := l.cancels[turnID]
+	if ok {
+		l.cancelled[turnID] = true
+	}
+	l.cancelMu.Unlock()
+	if !ok {
+		return ErrTurnNotRunning
+	}
+	cancel()
+	return nil
+}
+
+// wasCancelled reports whether Cancel was called for the turn.
+func (l *loop) wasCancelled(turnID string) bool {
+	l.cancelMu.Lock()
+	defer l.cancelMu.Unlock()
+	return l.cancelled[turnID]
 }
 
 // validate checks the task resolves: mode exists and a model serves it.
@@ -430,6 +491,14 @@ func (l *loop) runTurn(ctx context.Context, turnID string, task dto.Task) {
 	// observing)* → answering. policy.MaxSteps is the one global bound.
 	result, err := l.runSteps(ctx, turnID, task, target, payload, tools, anchor, policy, &st)
 	if err != nil {
+		// User-initiated cancel is a labeled non-error terminal outcome, not an
+		// engine error (ADR-0046 E2): preserve any partial answer, meter the
+		// partial usage, record `cancelled` in the snapshot, and end with
+		// `done {cancelled:true}`.
+		if l.wasCancelled(turnID) {
+			l.cancelledOutcome(turnID, task, svc, res, breakdown, result, startedAt, payload, &st, snapshot)
+			return
+		}
 		// Label the terminal outcome (thinking-truncated / no-outcome) in the
 		// snapshot before the error event terminates the stream.
 		snapshot.Thinking = st.snapshot()
@@ -476,6 +545,54 @@ func (l *loop) runTurn(ctx context.Context, turnID string, task dto.Task) {
 	}
 
 	l.emitFinal(turnID, res, result)
+}
+
+// cancelledOutcome finishes a user-cancelled turn (ADR-0046 E2). It emits the
+// partial answer (if any) so the client does not lose already-generated text,
+// meters whatever partial usage the provider reported, records `cancelled` and
+// the measurements in the persisted snapshot, persists the partial assistant
+// message, and emits the labeled terminal `done {cancelled:true}`. It is a
+// normal terminal outcome, never an error.
+func (l *loop) cancelledOutcome(turnID string, task dto.Task, svc *shard.Services, res dto.Resolution, breakdown dto.Breakdown, partial streamResult, startedAt time.Time, payload dto.Payload, st *thinkingState, snapshot dto.ContextSnapshot) {
+	st.reasoningTokens = partial.reasoningTokens
+	st.truncated = false
+
+	meterBreakdown := breakdown
+	if partial.counts.ThinkingTokens == 0 && partial.reasoningTokens > 0 {
+		meterBreakdown.Thinking = partial.reasoningTokens
+	}
+	measurement := dto.TurnMeasurement{
+		PromptTokens:      partial.counts.InputTokens,
+		ThinkingTokens:    partial.counts.ThinkingTokens,
+		CompletionTokens:  partial.counts.OutputTokens,
+		LatencyMs:         time.Since(startedAt).Milliseconds(),
+		Model:             res.UsedName,
+		Quant:             quantOf(res.UsedName),
+		WindowUtilization: payload.Window.Utilization,
+	}
+	if measurement.ThinkingTokens == 0 {
+		measurement.ThinkingTokens = partial.reasoningTokens
+	}
+	// The turn context is already cancelled; persist through a non-cancelled
+	// context so the partial meter row and snapshot still land.
+	if partial.counts.InputTokens+partial.counts.OutputTokens > 0 || partial.reasoningTokens > 0 {
+		if _, err := svc.Meter.Attribute(context.WithoutCancel(context.Background()), turnID, task.SessionID, res.UsedName, meterBreakdown, partial.counts, measurement); err != nil {
+			// Best-effort: the cancel outcome still terminates the turn.
+			_ = err
+		}
+	}
+
+	snapshot.Thinking = st.snapshot()
+	snapshot.Measurements = &measurement
+	snapshot.Cancelled = true
+
+	// Emit any partial answer so the client shows it before the terminal event.
+	l.emitToken(turnID, partial.text)
+	l.persistAndEmitContext(turnID, task, svc, snapshot)
+	if partial.text != "" {
+		_ = svc.Sessions.Append(task.SessionID, dto.Message{Role: "assistant", Content: partial.text})
+	}
+	l.emitCancelled(turnID, res)
 }
 
 // persistAndEmitContext marshals, persists, and emits one context snapshot. It
@@ -694,7 +811,10 @@ func (l *loop) runSteps(ctx context.Context, turnID string, task dto.Task, targe
 		}
 
 		if err := l.d.Provider.Stream(ctx, target, req, emit); err != nil {
-			return streamResult{}, err
+			// Return the partial result so a cancelled turn can still meter
+			// whatever usage the provider reported before the interruption, and
+			// preserve any partial answer text (E2 cancel).
+			return res, err
 		}
 
 		// Exact thinking accounting (ADR-0051 §4): the provider's count when
@@ -891,6 +1011,17 @@ func (l *loop) emitFinal(turnID string, res dto.Resolution, r streamResult) {
 	data, _ := json.Marshal(map[string]interface{}{
 		"degraded":  res.Degraded,
 		"usedModel": res.UsedName,
+	})
+	l.emit(turnID, dto.Event{Type: "done", Data: data})
+}
+
+// emitCancelled emits the labeled terminal `done {cancelled:true}` for a
+// user-cancelled turn (ADR-0046 E2).
+func (l *loop) emitCancelled(turnID string, res dto.Resolution) {
+	data, _ := json.Marshal(map[string]interface{}{
+		"degraded":  res.Degraded,
+		"usedModel": res.UsedName,
+		"cancelled": true,
 	})
 	l.emit(turnID, dto.Event{Type: "done", Data: data})
 }

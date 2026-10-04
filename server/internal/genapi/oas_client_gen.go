@@ -32,6 +32,16 @@ type Invoker interface {
 	//
 	// POST /documents/{id}/edits
 	ApplyEdit(ctx context.Context, request *BlockEdit, params ApplyEditParams) (*Revision, error)
+	// CancelTurn invokes cancelTurn operation.
+	//
+	// Cancels a turn that is still running. The engine cancels the turn's context; the turn ends with a
+	// labeled terminal `done {cancelled:true}` (partial assistant text, if any, is preserved), any partial
+	// usage is metered, and the persisted context snapshot records `cancelled`. An unknown turn id is the
+	// typed 404; a turn that is not currently running (already finished or cancelled) is the typed 409.
+	// The 204 carries no body — the turn's terminal event arrives on its existing /turn stream.
+	//
+	// POST /turns/{id}/cancel
+	CancelTurn(ctx context.Context, params CancelTurnParams) (CancelTurnRes, error)
 	// CommitDocument invokes commitDocument operation.
 	//
 	// Accepts the staged candidates (newest-first, deterministic), re-validates each candidate's base
@@ -199,6 +209,14 @@ type Invoker interface {
 	//
 	// PUT /sessions/{id}/context
 	PutSessionContext(ctx context.Context, request *ContextPolicy, params PutSessionContextParams) (PutSessionContextRes, error)
+	// RenameSession invokes renameSession operation.
+	//
+	// Sets the session's human-readable `title` (data-model §1.4). The title is engine-owned and purely a
+	// display label; renaming never touches messages, context policy, or budget. An explicit empty title
+	// clears it. An unknown session is the typed 404.
+	//
+	// PUT /sessions/{id}
+	RenameSession(ctx context.Context, request *RenameSessionRequest, params RenameSessionParams) (RenameSessionRes, error)
 	// ResolveLocate invokes resolveLocate operation.
 	//
 	// When a `/locate` turn resolves to a fuzzy match it emits a `locate` event with ranked candidates and
@@ -371,6 +389,109 @@ func (c *Client) sendApplyEdit(ctx context.Context, request *BlockEdit, params A
 
 	stage = "DecodeResponse"
 	result, err := decodeApplyEditResponse(resp)
+	if err != nil {
+		return res, errors.Wrap(err, "decode response")
+	}
+
+	return result, nil
+}
+
+// CancelTurn invokes cancelTurn operation.
+//
+// Cancels a turn that is still running. The engine cancels the turn's context; the turn ends with a
+// labeled terminal `done {cancelled:true}` (partial assistant text, if any, is preserved), any partial
+// usage is metered, and the persisted context snapshot records `cancelled`. An unknown turn id is the
+// typed 404; a turn that is not currently running (already finished or cancelled) is the typed 409.
+// The 204 carries no body — the turn's terminal event arrives on its existing /turn stream.
+//
+// POST /turns/{id}/cancel
+func (c *Client) CancelTurn(ctx context.Context, params CancelTurnParams) (CancelTurnRes, error) {
+	res, err := c.sendCancelTurn(ctx, params)
+	return res, err
+}
+
+func (c *Client) sendCancelTurn(ctx context.Context, params CancelTurnParams) (res CancelTurnRes, err error) {
+	otelAttrs := []attribute.KeyValue{
+		otelogen.OperationID("cancelTurn"),
+		semconv.HTTPRequestMethodKey.String("POST"),
+		semconv.URLTemplateKey.String("/turns/{id}/cancel"),
+	}
+	otelAttrs = append(otelAttrs, c.cfg.Attributes...)
+
+	// Run stopwatch.
+	startTime := time.Now()
+	defer func() {
+		// Use floating point division here for higher precision (instead of Millisecond method).
+		elapsedDuration := time.Since(startTime)
+		c.duration.Record(ctx, float64(elapsedDuration)/float64(time.Millisecond), metric.WithAttributes(otelAttrs...))
+	}()
+
+	// Increment request counter.
+	c.requests.Add(ctx, 1, metric.WithAttributes(otelAttrs...))
+
+	// Start a span for this request.
+	ctx, span := c.cfg.Tracer.Start(ctx, CancelTurnOperation,
+		trace.WithAttributes(otelAttrs...),
+		clientSpanKind,
+	)
+	// Track stage for error reporting.
+	var stage string
+	defer func() {
+		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, stage)
+			c.errors.Add(ctx, 1, metric.WithAttributes(otelAttrs...))
+		}
+		span.End()
+	}()
+
+	stage = "BuildURL"
+	u := uri.Clone(c.requestURL(ctx))
+	var pathParts [3]string
+	pathParts[0] = "/turns/"
+	{
+		// Encode "id" parameter.
+		e := uri.NewPathEncoder(uri.PathEncoderConfig{
+			Param:   "id",
+			Style:   uri.PathStyleSimple,
+			Explode: false,
+		})
+		if err := func() error {
+			return e.EncodeValue(conv.StringToString(params.ID))
+		}(); err != nil {
+			return res, errors.Wrap(err, "encode path")
+		}
+		encoded, err := e.Result()
+		if err != nil {
+			return res, errors.Wrap(err, "encode path")
+		}
+		pathParts[1] = encoded
+	}
+	pathParts[2] = "/cancel"
+	uri.AddPathParts(u, pathParts[:]...)
+
+	stage = "EncodeRequest"
+	r, err := ht.NewRequest(ctx, "POST", u)
+	if err != nil {
+		return res, errors.Wrap(err, "create request")
+	}
+
+	stage = "SendRequest"
+	resp, err := c.cfg.Client.Do(r)
+	if err != nil {
+		return res, errors.Wrap(err, "do request")
+	}
+	body := resp.Body
+	defer func() {
+		// Drain the body to EOF before closing, so the underlying
+		// connection can be reused by the Transport regardless of the
+		// response status code. See https://github.com/ogen-go/ogen/issues/1670.
+		_, _ = io.Copy(io.Discard, body)
+		_ = body.Close()
+	}()
+
+	stage = "DecodeResponse"
+	result, err := decodeCancelTurnResponse(resp)
 	if err != nil {
 		return res, errors.Wrap(err, "decode response")
 	}
@@ -2945,6 +3066,109 @@ func (c *Client) sendPutSessionContext(ctx context.Context, request *ContextPoli
 
 	stage = "DecodeResponse"
 	result, err := decodePutSessionContextResponse(resp)
+	if err != nil {
+		return res, errors.Wrap(err, "decode response")
+	}
+
+	return result, nil
+}
+
+// RenameSession invokes renameSession operation.
+//
+// Sets the session's human-readable `title` (data-model §1.4). The title is engine-owned and purely a
+// display label; renaming never touches messages, context policy, or budget. An explicit empty title
+// clears it. An unknown session is the typed 404.
+//
+// PUT /sessions/{id}
+func (c *Client) RenameSession(ctx context.Context, request *RenameSessionRequest, params RenameSessionParams) (RenameSessionRes, error) {
+	res, err := c.sendRenameSession(ctx, request, params)
+	return res, err
+}
+
+func (c *Client) sendRenameSession(ctx context.Context, request *RenameSessionRequest, params RenameSessionParams) (res RenameSessionRes, err error) {
+	otelAttrs := []attribute.KeyValue{
+		otelogen.OperationID("renameSession"),
+		semconv.HTTPRequestMethodKey.String("PUT"),
+		semconv.URLTemplateKey.String("/sessions/{id}"),
+	}
+	otelAttrs = append(otelAttrs, c.cfg.Attributes...)
+
+	// Run stopwatch.
+	startTime := time.Now()
+	defer func() {
+		// Use floating point division here for higher precision (instead of Millisecond method).
+		elapsedDuration := time.Since(startTime)
+		c.duration.Record(ctx, float64(elapsedDuration)/float64(time.Millisecond), metric.WithAttributes(otelAttrs...))
+	}()
+
+	// Increment request counter.
+	c.requests.Add(ctx, 1, metric.WithAttributes(otelAttrs...))
+
+	// Start a span for this request.
+	ctx, span := c.cfg.Tracer.Start(ctx, RenameSessionOperation,
+		trace.WithAttributes(otelAttrs...),
+		clientSpanKind,
+	)
+	// Track stage for error reporting.
+	var stage string
+	defer func() {
+		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, stage)
+			c.errors.Add(ctx, 1, metric.WithAttributes(otelAttrs...))
+		}
+		span.End()
+	}()
+
+	stage = "BuildURL"
+	u := uri.Clone(c.requestURL(ctx))
+	var pathParts [2]string
+	pathParts[0] = "/sessions/"
+	{
+		// Encode "id" parameter.
+		e := uri.NewPathEncoder(uri.PathEncoderConfig{
+			Param:   "id",
+			Style:   uri.PathStyleSimple,
+			Explode: false,
+		})
+		if err := func() error {
+			return e.EncodeValue(conv.StringToString(params.ID))
+		}(); err != nil {
+			return res, errors.Wrap(err, "encode path")
+		}
+		encoded, err := e.Result()
+		if err != nil {
+			return res, errors.Wrap(err, "encode path")
+		}
+		pathParts[1] = encoded
+	}
+	uri.AddPathParts(u, pathParts[:]...)
+
+	stage = "EncodeRequest"
+	r, err := ht.NewRequest(ctx, "PUT", u)
+	if err != nil {
+		return res, errors.Wrap(err, "create request")
+	}
+	if err := encodeRenameSessionRequest(request, r); err != nil {
+		return res, errors.Wrap(err, "encode request")
+	}
+
+	stage = "SendRequest"
+	resp, err := c.cfg.Client.Do(r)
+	if err != nil {
+		return res, errors.Wrap(err, "do request")
+	}
+	body := resp.Body
+	defer func() {
+		// Drain the body to EOF before closing, so the underlying
+		// connection can be reused by the Transport regardless of the
+		// response status code. See https://github.com/ogen-go/ogen/issues/1670.
+		_, _ = io.Copy(io.Discard, body)
+		_ = body.Close()
+	}()
+
+	stage = "DecodeResponse"
+	result, err := decodeRenameSessionResponse(resp)
 	if err != nil {
 		return res, errors.Wrap(err, "decode response")
 	}

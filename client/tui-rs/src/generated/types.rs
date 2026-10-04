@@ -8,6 +8,37 @@
 #![allow(clippy::let_unit_value)]
 #![allow(unreachable_patterns)]
 use serde::{Deserialize, Serialize};
+/**The typed refusal when POST /turns/{id}/cancel targets a turn that is known (routed) but is no longer running — it has already finished or was already cancelled. An id that was never a turn is the typed 404 instead.
+*/
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct TurnNotRunning {
+    pub error: TurnNotRunningError,
+    #[serde(rename = "turnId")]
+    pub turn_id: String,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, Default)]
+pub enum TurnNotRunningError {
+    #[default]
+    #[serde(rename = "turn-not-running")]
+    TurnNotRunning,
+}
+impl TurnNotRunningError {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::TurnNotRunning => "turn-not-running",
+        }
+    }
+}
+impl ::std::fmt::Display for TurnNotRunningError {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+impl AsRef<str> for TurnNotRunningError {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Task {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -781,6 +812,8 @@ pub struct Event {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, Default)]
 pub enum EventType {
     #[default]
+    #[serde(rename = "turn")]
+    Turn,
     #[serde(rename = "token")]
     Token,
     #[serde(rename = "meter")]
@@ -807,6 +840,7 @@ pub enum EventType {
 impl EventType {
     pub fn as_str(&self) -> &'static str {
         match self {
+            Self::Turn => "turn",
             Self::Token => "token",
             Self::Meter => "meter",
             Self::Candidate => "candidate",
@@ -1079,6 +1113,10 @@ pub struct ContextSnapshot {
     #[serde(rename = "autoRag")]
     pub auto_rag: bool,
     pub budget: Vec<BudgetUsage>,
+    /**True when the turn was cancelled by the user (POST /turns/{id}/cancel); the snapshot remains retrievable and records the partial usage. Absent/false for a normal turn.
+     */
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cancelled: Option<bool>,
     pub chunks: Vec<ContextChunk>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub compacted: Option<CompactionRecord>,
@@ -1755,6 +1793,10 @@ pub struct CreateSessionRequest {
     pub document_id: String,
     #[serde(rename = "modeType", skip_serializing_if = "Option::is_none")]
     pub mode_type: Option<String>,
+    /**Optional human label for the new session. Purely a display title (data-model §1.4); it never affects assembly. An engine default (e.g. the document basename) may be derived when omitted; the client can rename it later via PUT /sessions/{id}.
+     */
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
     /**The workspace shard that owns the new session (ADR-0049 §5). Optional: when absent the engine resolves-or-creates a workspace rooted at the canonical parent directory of the document.
      */
     #[serde(rename = "workspaceId", skip_serializing_if = "Option::is_none")]
@@ -1767,6 +1809,7 @@ impl CreateSessionRequest {
             document_id,
             anchor_block_id: None,
             mode_type: None,
+            title: None,
             workspace_id: None,
         }
     }
@@ -1798,6 +1841,12 @@ impl CreateSessionRequestBuilder {
     #[must_use]
     pub fn mode_type(mut self, mode_type: String) -> Self {
         self.value.mode_type = Some(mode_type);
+        self
+    }
+    #[doc = concat!("Set the optional `", "title", "` request field.")]
+    #[must_use]
+    pub fn title(mut self, title: String) -> Self {
+        self.value.title = Some(title);
         self
     }
     #[doc = concat!("Set the optional `", "workspaceId", "` request field.")]
@@ -1869,6 +1918,10 @@ pub struct Document {
 }
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct DoneEvent {
+    /**True when the turn ended because the user cancelled it (POST /turns/{id}/cancel). The turn is not an error: any partial assistant text streamed before cancellation is preserved, and partial usage is metered. Absent/false for a normal completion.
+     */
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cancelled: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub degraded: Option<bool>,
     #[serde(rename = "usedModel", skip_serializing_if = "Option::is_none")]
@@ -1966,6 +2019,12 @@ impl PutCorpusRequestBuilder {
         self.value
     }
 }
+/**The rename body for PUT /sessions/{id}. `title` is required by the shape but may be an explicit empty string to clear the label.
+*/
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct RenameSessionRequest {
+    pub title: String,
+}
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct SamplingParams {
     #[serde(rename = "maxTokens", skip_serializing_if = "Option::is_none")]
@@ -1982,4 +2041,13 @@ pub struct ThinkingEvent {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct TokenEvent {
     pub text: String,
+}
+/**The first SSE event of a turn, emitted by the API server immediately after subscribing the /turn stream (before the loop does any work). It carries the turn id so a client can address the turn-scoped routes POST /turns/{id}/cancel and POST /turns/{id}/locate while the turn runs. Payloads otherwise do not repeat the turn id (one turn per stream).
+*/
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct TurnEvent {
+    #[serde(rename = "sessionId")]
+    pub session_id: String,
+    #[serde(rename = "turnId")]
+    pub turn_id: String,
 }

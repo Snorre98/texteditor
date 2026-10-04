@@ -67,9 +67,11 @@ func New(d Deps, bus EventSource) (*Server, error) {
 }
 
 // EventSource is the sealed subset of the event bus the /turn handler needs:
-// subscribe with a filter. The loop/meter already hold an Emit subset.
+// subscribe with a filter, and emit the first `turn` event (carrying the turn
+// id) once subscribed. The loop/meter hold their own Emit subset.
 type EventSource interface {
 	Subscribe(filter func(dto.Event) bool) <-chan dto.Event
+	Emit(ev dto.Event)
 }
 
 type handler struct {
@@ -632,12 +634,46 @@ func (h *handler) CreateSession(ctx context.Context, req *genapi.CreateSessionRe
 		anchor = &v
 	}
 	modeType := req.ModeType.Or("")
-	s, err := lease.Sessions.Create(req.DocumentId, anchor, modeType)
+	s, err := lease.Sessions.Create(req.DocumentId, anchor, modeType, req.Title.Or(""))
 	if err != nil {
 		return nil, err
 	}
 	// Route the session id to its shard so message/meter reads resolve later.
 	if err := h.d.Workspaces.RouteSession(s.ID, workspaceID); err != nil {
+		return nil, err
+	}
+	o := sessionToGen(s, workspaceID)
+	return &o, nil
+}
+
+// RenameSession backs PUT /sessions/{id}: set a session's human title. The
+// session id is resolved to its workspace shard through the registry; an
+// unknown session is the typed 404.
+func (h *handler) RenameSession(ctx context.Context, req *genapi.RenameSessionRequest, p genapi.RenameSessionParams) (genapi.RenameSessionRes, error) {
+	workspaceID, ok, err := h.d.Workspaces.SessionWorkspace(p.ID)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return notFound("session", p.ID), nil
+	}
+	lease, err := h.d.Shards.Services(ctx, workspaceID)
+	if err != nil {
+		return nil, err
+	}
+	defer lease.Release()
+
+	if err := lease.Sessions.Rename(p.ID, req.Title); err != nil {
+		if errors.Is(err, session.ErrNotFound) {
+			return notFound("session", p.ID), nil
+		}
+		return nil, err
+	}
+	s, err := lease.Sessions.Resume(p.ID)
+	if err != nil {
+		if errors.Is(err, session.ErrNotFound) {
+			return notFound("session", p.ID), nil
+		}
 		return nil, err
 	}
 	o := sessionToGen(s, workspaceID)
@@ -731,6 +767,28 @@ func (h *handler) ResolveLocate(ctx context.Context, req *genapi.LocateChoice, p
 		return nil, err
 	}
 	return &genapi.ResolveLocateNoContent{}, nil
+}
+
+// CancelTurn backs POST /turns/{id}/cancel: cancel a still-running turn. An
+// unknown turn id is the typed 404 (never routed); a routed turn that is no
+// longer running is the typed 409. The 204 carries no body — the turn's labeled
+// terminal `done {cancelled:true}` arrives on its existing /turn stream.
+func (h *handler) CancelTurn(ctx context.Context, p genapi.CancelTurnParams) (genapi.CancelTurnRes, error) {
+	if _, _, ok, err := h.d.Workspaces.TurnRoute(p.ID); err != nil {
+		return nil, err
+	} else if !ok {
+		return notFound("turn", p.ID), nil
+	}
+	if err := h.d.Loop.Cancel(p.ID); err != nil {
+		if errors.Is(err, loop.ErrTurnNotRunning) {
+			return &genapi.TurnNotRunning{
+				Error:  genapi.TurnNotRunningErrorTurnNotRunning,
+				TurnId: p.ID,
+			}, nil
+		}
+		return nil, err
+	}
+	return &genapi.CancelTurnNoContent{}, nil
 }
 
 // GetSessionMeter backs GET /sessions/{id}/meter (ADR-0044 §4): resolve the
@@ -874,6 +932,16 @@ func (h *handler) StartTurn(ctx context.Context, req *genapi.Task, w http.Respon
 	}
 
 	stream := h.bus.Subscribe(func(e dto.Event) bool { return e.TurnID == turnID })
+
+	// The first event carries the turn id so a client can address the
+	// turn-scoped routes (/turns/{id}/cancel, /turns/{id}/locate) while the turn
+	// runs. It is emitted here (not by the loop) so it is queued on this stream's
+	// subscription before the loop's goroutine can emit anything.
+	turnData, _ := json.Marshal(map[string]string{
+		"turnId":    turnID,
+		"sessionId": req.SessionId,
+	})
+	h.bus.Emit(dto.Event{TurnID: turnID, Type: "turn", Data: turnData})
 
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")

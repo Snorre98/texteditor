@@ -238,9 +238,11 @@ func newStubSessions() *stubSessions { return &stubSessions{snapshots: map[strin
 
 func (s *stubSessions) ListByDocument(string) ([]dto.Session, error) { return nil, nil }
 func (s *stubSessions) ListByWorkspace() ([]dto.Session, error)      { return nil, nil }
-func (s *stubSessions) Create(string, *string, string) (dto.Session, error) {
+func (s *stubSessions) Create(string, *string, string, string) (dto.Session, error) {
 	return dto.Session{}, nil
 }
+
+func (s *stubSessions) Rename(string, string) error { return nil }
 func (s *stubSessions) Resume(string) (dto.Session, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -734,9 +736,11 @@ type budgetSessions struct{ budget *int }
 
 func (budgetSessions) ListByDocument(string) ([]dto.Session, error) { return nil, nil }
 func (budgetSessions) ListByWorkspace() ([]dto.Session, error)      { return nil, nil }
-func (budgetSessions) Create(string, *string, string) (dto.Session, error) {
+func (budgetSessions) Create(string, *string, string, string) (dto.Session, error) {
 	return dto.Session{}, nil
 }
+
+func (budgetSessions) Rename(string, string) error { return nil }
 func (b budgetSessions) Resume(string) (dto.Session, error) {
 	return dto.Session{TokenBudget: b.budget}, nil
 }
@@ -2480,4 +2484,125 @@ func TestSessionBudgetSoftAndHard(t *testing.T) {
 			t.Fatalf("error code = %q, want session-budget-exceeded", ed.Code)
 		}
 	})
+}
+
+// --------------------------- cancel (E2) ---------------------------
+
+func lastDoneEvent(t *testing.T, bus *stubBus) dto.Event {
+	t.Helper()
+	bus.mu.Lock()
+	defer bus.mu.Unlock()
+	for i := len(bus.events) - 1; i >= 0; i-- {
+		if bus.events[i].Type == "done" {
+			return bus.events[i]
+		}
+	}
+	t.Fatalf("no done event: %+v", bus.events)
+	return dto.Event{}
+}
+
+func TestCancelRunningTurnEmitsLabeledDoneAndMetersPartial(t *testing.T) {
+	bus := &stubBus{done: make(chan struct{})}
+	started := make(chan struct{})
+	deps := happyPathDeps(bus)
+	meter := shardSvc(deps).Meter.(*stubMeter)
+	deps.Provider = stubProvider{stream: func(ctx context.Context, emit func(dto.RawEvent)) error {
+		emit(dto.RawEvent{Type: "token", Data: json.RawMessage(`{"text":"partial answer"}`)})
+		emit(dto.RawEvent{Type: "reasoning", Data: json.RawMessage(`{"text":"pondering"}`)})
+		emit(dto.RawEvent{Type: "done", Data: json.RawMessage(`{"inputTokens":10,"outputTokens":3,"thinkingTokens":4}`)})
+		close(started)
+		<-ctx.Done()
+		return ctx.Err()
+	}}
+	l := New(deps)
+
+	turnID, err := l.Run(context.Background(), dto.Task{
+		SessionID: "s1", ModeName: "proofreader", DocumentID: "d1", UserInput: "hi",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-started
+	if err := l.Cancel(turnID); err != nil {
+		t.Fatalf("Cancel = %v, want nil", err)
+	}
+
+	select {
+	case <-bus.done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("turn did not finish after cancel")
+	}
+
+	done := lastDoneEvent(t, bus)
+	var payload struct {
+		Cancelled bool `json:"cancelled"`
+	}
+	if err := json.Unmarshal(done.Data, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if !payload.Cancelled {
+		t.Fatalf("done payload = %s, want cancelled:true", done.Data)
+	}
+
+	// Partial usage is metered.
+	if meter.called != 1 {
+		t.Fatalf("meter.Attribute calls = %d, want 1", meter.called)
+	}
+	if meter.measurement == nil || meter.measurement.CompletionTokens != 3 || meter.measurement.PromptTokens != 10 {
+		t.Fatalf("measurement = %+v, want prompt 10 completion 3", meter.measurement)
+	}
+
+	// The persisted snapshot records cancelled and the partial text is durable.
+	sessions := shardSvc(deps).Sessions.(*stubSessions)
+	sessions.mu.Lock()
+	raw := sessions.snapshots[turnID]
+	sessions.mu.Unlock()
+	if !strings.Contains(string(raw), `"cancelled":true`) {
+		t.Fatalf("snapshot missing cancelled label: %s", raw)
+	}
+	foundPartial := false
+	for _, m := range sessions.appendedMessages() {
+		if m.Role == "assistant" && m.Content == "partial answer" {
+			foundPartial = true
+		}
+	}
+	if !foundPartial {
+		t.Fatalf("partial assistant text not persisted: %+v", sessions.appendedMessages())
+	}
+}
+
+func TestCancelUnknownTurnIsNotRunning(t *testing.T) {
+	bus := &stubBus{done: make(chan struct{})}
+	l := New(happyPathDeps(bus))
+	if err := l.Cancel("never-a-turn"); !errors.Is(err, ErrTurnNotRunning) {
+		t.Fatalf("Cancel unknown = %v, want ErrTurnNotRunning", err)
+	}
+}
+
+func TestCancelCompletedTurnIsNotRunning(t *testing.T) {
+	bus := &stubBus{done: make(chan struct{})}
+	l := New(happyPathDeps(bus))
+	turnID, err := l.Run(context.Background(), dto.Task{
+		SessionID: "s1", ModeName: "proofreader", DocumentID: "d1", UserInput: "hi",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-bus.done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("turn did not finish")
+	}
+	// The registry entry is removed when runTurn returns; poll briefly for that.
+	deadline := time.Now().Add(time.Second)
+	for {
+		err := l.Cancel(turnID)
+		if errors.Is(err, ErrTurnNotRunning) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("Cancel completed = %v, want ErrTurnNotRunning", err)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 }

@@ -356,6 +356,19 @@ export type CreateSessionRequest = {
     workspaceId?: string;
     anchorBlockId?: string;
     modeType?: string;
+    /**
+     * Optional human label for the new session. Purely a display title (data-model §1.4); it never affects assembly. An engine default (e.g. the document basename) may be derived when omitted; the client can rename it later via PUT /sessions/{id}.
+     *
+     */
+    title?: string;
+};
+
+/**
+ * The rename body for PUT /sessions/{id}. `title` is required by the shape but may be an explicit empty string to clear the label.
+ *
+ */
+export type RenameSessionRequest = {
+    title: string;
 };
 
 /**
@@ -395,6 +408,15 @@ export type NotFound = {
  */
 export type NoPendingLocate = {
     error: 'no-pending-locate';
+    turnId: string;
+};
+
+/**
+ * The typed refusal when POST /turns/{id}/cancel targets a turn that is known (routed) but is no longer running — it has already finished or was already cancelled. An id that was never a turn is the typed 404 instead.
+ *
+ */
+export type TurnNotRunning = {
+    error: 'turn-not-running';
     turnId: string;
 };
 
@@ -449,7 +471,16 @@ export type LocateResult = {
  *
  */
 export type Event = {
-    type: 'token' | 'meter' | 'candidate' | 'diff' | 'rag' | 'context' | 'locate' | 'thinking' | 'done' | 'error' | 'backpressure';
+    type: 'turn' | 'token' | 'meter' | 'candidate' | 'diff' | 'rag' | 'context' | 'locate' | 'thinking' | 'done' | 'error' | 'backpressure';
+};
+
+/**
+ * The first SSE event of a turn, emitted by the API server immediately after subscribing the /turn stream (before the loop does any work). It carries the turn id so a client can address the turn-scoped routes POST /turns/{id}/cancel and POST /turns/{id}/locate while the turn runs. Payloads otherwise do not repeat the turn id (one turn per stream).
+ *
+ */
+export type TurnEvent = {
+    turnId: string;
+    sessionId: string;
 };
 
 export type TokenEvent = {
@@ -592,6 +623,11 @@ export type ContextSnapshot = {
     compacted?: CompactionRecord;
     window?: WindowUsage;
     sessionBudget?: SessionBudget;
+    /**
+     * True when the turn was cancelled by the user (POST /turns/{id}/cancel); the snapshot remains retrievable and records the partial usage. Absent/false for a normal turn.
+     *
+     */
+    cancelled?: boolean;
     createdAt: number;
 };
 
@@ -758,6 +794,11 @@ export type LocateEvent = LocateResult;
 export type DoneEvent = {
     degraded?: boolean;
     usedModel?: string;
+    /**
+     * True when the turn ended because the user cancelled it (POST /turns/{id}/cancel). The turn is not an error: any partial assistant text streamed before cancellation is preserved, and partial usage is metered. Absent/false for a normal completion.
+     *
+     */
+    cancelled?: boolean;
 };
 
 export type ErrorEvent = {
@@ -1323,6 +1364,33 @@ export type CreateSessionResponses = {
 
 export type CreateSessionResponse = CreateSessionResponses[keyof CreateSessionResponses];
 
+export type RenameSessionData = {
+    body: RenameSessionRequest;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/sessions/{id}';
+};
+
+export type RenameSessionErrors = {
+    /**
+     * no session exists with the id
+     */
+    404: NotFound;
+};
+
+export type RenameSessionError = RenameSessionErrors[keyof RenameSessionErrors];
+
+export type RenameSessionResponses = {
+    /**
+     * the renamed session
+     */
+    200: Session;
+};
+
+export type RenameSessionResponse = RenameSessionResponses[keyof RenameSessionResponses];
+
 export type GetSessionMessagesData = {
     body?: never;
     path: {
@@ -1425,6 +1493,37 @@ export type ResolveLocateResponses = {
 };
 
 export type ResolveLocateResponse = ResolveLocateResponses[keyof ResolveLocateResponses];
+
+export type CancelTurnData = {
+    body?: never;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/turns/{id}/cancel';
+};
+
+export type CancelTurnErrors = {
+    /**
+     * no turn exists with the id
+     */
+    404: NotFound;
+    /**
+     * the turn is known but is not currently running
+     */
+    409: TurnNotRunning;
+};
+
+export type CancelTurnError = CancelTurnErrors[keyof CancelTurnErrors];
+
+export type CancelTurnResponses = {
+    /**
+     * cancellation was delivered to the running turn
+     */
+    204: void;
+};
+
+export type CancelTurnResponse = CancelTurnResponses[keyof CancelTurnResponses];
 
 export type GetSessionMeterData = {
     body?: never;
