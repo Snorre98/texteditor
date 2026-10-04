@@ -11,7 +11,8 @@ arc42 skeleton, 12 sections. Related: [ADR log](adr/), [behavioral contracts](be
 A local-first, single-machine assistant for academic writing and editing. The
 active client is the terminal TUI (Ratatui, Rust — ADR-0046); the Tauri/web
 editor is landed but **frozen** (ADR-0044). The engine is a **context engine**: it indexes the author's markdown
-vault, retrieves and gates evidence, assembles the model payload, and makes
+vault under author-controlled, multi-root corpus scope (workspace-scoped,
+ADR-0049), retrieves and gates evidence, assembles the model payload, and makes
 every token — and every inclusion, exclusion, and drop — visible and replayable.
 It is **not** an inference engine (that's delegated) and **not** a full IDE. One
 user governs it, and that user also controls — from `macos-dev-config` — **which
@@ -100,7 +101,9 @@ The architecture's defining moves:
 6. **Context is the product.** The engine's value is what reaches the model:
    indexed vault → retrieval → decision gate → one metered assembler → provider,
    with a persisted, explainable snapshot per turn (ADR-0044, ADR-0011). The
-   TUI is the active client; Tauri/web are frozen.
+   author controls what is retrievable (multi-root, workspace-scoped corpus
+   scope) and what enters a turn (the context tray), both engine-side
+   (ADR-0049). The TUI is the active client; Tauri/web are frozen.
 
 ## 5. Building Block View
 
@@ -332,6 +335,9 @@ flowchart TB
 | Vault locate | `/locate` command; deterministic markdown-stripped exact-then-fuzzy search over the open document then the vault index; typed `LocateResult`; anchored, guarded edit — ADR-0048 |
 | Decision layer | retrieval gating as a second metered model call; one global pipeline policy; fail-open with labeled degradation — ADR-0044 (extends ADR-0028); no per-mode config (ADR-0045) |
 | Context inspector | persisted per-turn snapshot: assembled messages with component + provenance, retrieval/decision outcomes, budgets, labeled drops; engine data, clients render — ADR-0044, ADR-0011 |
+| Context management | workspace registry + multi-root corpus scope (roots + include/exclude, per-document status, idempotent eviction) and the per-turn context tray (pin/remove, retrieval query, auto-RAG); Workspace ≠ Corpus — the workspace root bounds browsing/editing only — ADR-0049 |
+| Workspace-scoped storage | global `app.db` + git/worktree for document identity, `workspaces.db` for the registry; per-workspace context-state shards (`index.db`/`sessions.db`/`meter.db`) opened lazily — one file per service *instance*, not per service — ADR-0049 (amends ADR-0016) |
+| Filesystem boundary | `ALLOWED_ROOTS` bounds `GET /directories` browsing and corpus indexing; outside paths are typed refusals, even at `ENGINE_BIND=0.0.0.0` — ADR-0049, ADR-0021 |
 | Edit formatting | the engine owns the bytes: whole-block edits, `TextFormatter` normalize/validate/format, block-level guard, structured edit result — ADR-0029 |
 | Workspace navigation | engine-served shallow directory listing (Workspace leaf) + turn-scoped, metered `@`-mentions that are read-only context, never versioned documents — ADR-0035, ADR-0036 |
 | Inference control surface | a future `InferenceControl` interface *behind* the Provider seam (a sibling of `ProviderGateway`, not a change to it); the "knobs" (logprobs, grammar, KV, speculative decoding) are decoupled from the OpenAI-compatible contract for the MVP — `research/vision-native-local-llm-text-editing.md` |
@@ -391,6 +397,7 @@ Full records in [adr/](adr/). Index:
 | 0046 | TUI v2: standalone Ratatui (Rust) client, replacing OpenTUI | Accepted |
 | 0047 | Auto write-through on approve with external-change detection | Accepted |
 | 0048 | `/locate`: anchor a pasted chunk to its vault location | Accepted |
+| 0049 | Context management: workspaces, multi-root corpus, allowed-roots boundary, context tray | Accepted — amends 0016 (per-instance SQLite), 0026 (workspace-scoped sessions), 0035 §3 (workspace entity; leaf rename) |
 
 ## 10. Quality Requirements
 
@@ -436,6 +443,7 @@ Each is an SEI general scenario with a concrete response-measure (ADR-0022).
 | fleet-observability.feature | fleet state surface + last-good cache + remediation | 0040 |
 | chat-window.feature | Tauri floating chat window (frozen) | 0041, 0042 |
 | locate-anchor.feature | `/locate` chunk anchoring: deterministic resolve, ambiguity, anchored guarded edit | 0048, 0036, 0029, 0047 |
+| context-management.feature | workspaces, multi-root corpus scope, allowed-roots boundary, context tray, pin-vs-gate | 0049, 0011, 0036, 0044, 0048 |
 
 ### 10.3 Definition of done (documentation)
 
@@ -479,6 +487,12 @@ The documentation set is complete when:
 | Pure DTO | a boundary type with no behavior; the only thing that crosses a module seam (locked-service tenet) |
 | Provision | fetch model weights via the HF API (async, observable) |
 | Vault | the author's markdown corpus (thesis chapters + notes) that is indexed and retrieved over |
+| Workspace | persistent engine entity: a root directory plus its subdirectories; governs browsing/editing only — Workspace ≠ Corpus (ADR-0049) |
+| Workspace shard | per-workspace SQLite context state (`index.db`/`sessions.db`/`meter.db`) under `<data>/workspaces/<id>/`; document identity and git stay global (ADR-0049) |
+| Corpus root | an absolute file or directory in a workspace's multi-root corpus; roots may lie outside the workspace root (ADR-0049) |
+| Corpus scope | a corpus's roots plus include/exclude globs; engine-owned and index-only — never writes document files (ADR-0049) |
+| Context tray | the per-turn view of assembled context components with pin/remove, editable retrieval query, and auto-RAG toggle; the final set is what the snapshot records (ADR-0049) |
+| Allowed roots | the `ALLOWED_ROOTS` allowlist bounding directory browsing and corpus indexing; outside paths are refused with a typed error (ADR-0049, ADR-0021) |
 | Context snapshot | the persisted per-turn record of the assembled payload: messages, component + provenance, retrieval/decision outcomes, budgets, labeled drops |
 | Context inspector | the contract surface + TUI panel that renders context snapshots (ADR-0044) |
 | Decision layer | the optional typed-decision model (Laya) that gates retrieval as a second metered call under one global policy (ADR-0044, ADR-0045) |

@@ -4,8 +4,10 @@ The active roadmap after [ADR-0044](../adr/0044-context-engine-tui-first.md),
 as extended by [ADR-0045](../adr/0045-prompt-presets-one-pipeline.md) (prompt
 presets, one pipeline), [ADR-0046](../adr/0046-ratatui-tui-v2.md) (Ratatui TUI
 v2), [ADR-0047](../adr/0047-auto-write-through-conflicts.md) (auto
-write-through + conflicts), and [ADR-0048](../adr/0048-locate-chunk-anchoring.md)
-(`/locate`). Track 2 (deployment + Tauri editor) is **landed and frozen**
+write-through + conflicts), [ADR-0048](../adr/0048-locate-chunk-anchoring.md)
+(`/locate`), and [ADR-0049](../adr/0049-context-management-corpus-tray.md)
+(workspaces, multi-root corpus, context tray, workspace-sharded context
+storage). Track 2 (deployment + Tauri editor) is **landed and frozen**
 ([`implementation-sequence-future.md`](implementation-sequence-future.md));
 nothing here resumes it.
 
@@ -73,23 +75,37 @@ Gate: each preset runs an edit turn; no behavioral mode fields remain.
 
 ---
 
-## Phase C — Real RAG + context inspector (ADR-0044 Phases 1–2)
+## Phase C — Real RAG + context management + context inspector (ADR-0044 Phases 1–2, ADR-0049)
 
-Unchanged from the ADR-0044 plan:
+Engine-first: workspace/corpus state and the pipeline land before the tray UI.
 
 1. **Indexing lifecycle** — wire `Retriever.Index` into open/save plus a vault
-   bulk-ingest surface; `VAULT_ROOT` setting; index status on `/health`.
+   bulk-ingest surface; per-workspace multi-root corpus scope (roots + globs;
+   default `**/*.md`, hidden dirs excluded; the single `VAULT_ROOT` setting is
+   superseded by per-workspace scope + `ALLOWED_ROOTS`); index status on
+   `/health`.
 2. **Heading-aware chunks** with provenance (path, heading path, block ID).
 3. **Real hybrid retrieval** — FTS5 `bm25` + vec0 KNN fusion, dedupe,
-   threshold; fix the re-index FTS staleness and vec0 id-collision bugs.
+   threshold; eviction deletes both vec0 and FTS rows idempotently; fix the
+   re-index FTS staleness and vec0 id-collision bugs.
 4. **Visible auto-RAG** — the same `rag` event shape as tool retrieval;
    labeled history/RAG truncation (no silent drops).
 5. **Assembler v2 + snapshots** — per-message component/provenance, labeled
    drops, persisted turn snapshots with retention, `context` SSE,
    `GET /turns/{id}/context`, `GET /sessions/{id}/meter`.
+6. **Workspaces + corpus management (ADR-0049)** — sealed `WorkspaceStore`
+   (`workspaces.db`: registry + corpus roots/scope); per-workspace shard dirs
+   (`workspaces/<id>/{index.db,sessions.db,meter.db}`) with lazy open +
+   per-shard `sqlmigrate`; document identity/git stay global; `GET/POST
+   /workspaces`; `GET/PUT /corpus` (multi-root scope + per-document status),
+   `POST /corpus/index` with observable progress, `DELETE
+   /corpus/documents/{id}` (idempotent eviction); `ALLOWED_ROOTS` bounds both
+   `GET /directories` and corpus indexing with a typed refusal; `index`
+   progress event (Phase C defines none).
 
-Gate: open a vault → `index.db` populated → auto-RAG provenance visible →
-any turn explainable after it ends.
+Gate: open a vault → workspace registered + shard populated → multi-root scope
+and idempotent eviction behave → auto-RAG provenance visible → any turn
+explainable after it ends.
 
 ---
 
@@ -121,7 +137,8 @@ file; ambiguity and not-found behave as contracted.
 ## Phase E — Ratatui TUI v2 (ADR-0046)
 
 May start after Phase B if a usable client is needed sooner; otherwise after
-Phase D.
+Phase D. The corpus tree and context tray consume Phase C's `/corpus` surface
+and per-workspace shards — they must not ship against an empty index.
 
 1. **Crate** `client/tui-rs/`: Ratatui + crossterm, plain cargo, tokio bridge
    (async generated calls + stream → UI channel).
@@ -133,8 +150,12 @@ Phase D.
    probe and `baseUrl` adoption.
 5. **UI**: chat streaming, preset tabs, meter, RAG/context panel, diff/approve,
    status line (target file, write-through/conflict state), bracketed paste,
-   `@`-mention picker (engine support exists, ADR-0036), session list/resume,
-   cancel generation, session titles. No editor panel, no manual save.
+   `@`-mention picker (engine support exists, ADR-0036), workspace
+   open/resume, corpus tree (multi-root scope, per-document status,
+   index/evict/rebuild, allowed-roots boundary UX), context tray (assembled
+   components with pin/remove, editable retrieval query, auto-RAG toggle,
+   pin-for-session), session list/resume scoped to the workspace, cancel
+   generation, session titles. No editor panel, no manual save.
 6. **Fleet orchestration engine-side** (ADR-0040 recorded note) before or with
    the client; the TUI renders `/fleet` only. Fold in the daemon reliability
    fixes the lifecycle verbs depend on (pass `NAME` to `serve.sh`, stop through
@@ -171,5 +192,13 @@ documented.
   TUI (ADR-0046) while the Tauri trees remain frozen (ADR-0044).
 - Every model call is metered; `/locate` is deterministic and token-free.
 - Failures degrade with a label; no silent drops, no silent clobbers.
+- Workspace ≠ corpus: the workspace root bounds browsing/editing; the corpus
+  is a multi-root set that may reach outside it (ADR-0049).
+- Corpus management is index-only: scope changes and eviction touch the
+  workspace shard's vec0 + FTS rows and never write document files;
+  write-through stays ADR-0047. Context state is workspace-sharded (index,
+  sessions, meter); document identity and git stay global (ADR-0049).
+- Browsing and corpus indexing are bounded by `ALLOWED_ROOTS`; outside paths
+  are typed refusals, never silent (ADR-0049).
 - Data over code: presets, pipeline policy, and decision policy are JSON
   config.

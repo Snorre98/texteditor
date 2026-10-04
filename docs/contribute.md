@@ -50,7 +50,8 @@ Pinned toolchain notes:
 | `--port` | `ENGINE_PORT` | `0` | `0` = dynamic free port; pin it for a stable URL |
 | `--daemon` | `DAEMON_URL` | `http://127.0.0.1:9300` | control daemon base URL (ADR-0025) |
 | `--cors-origins` | `ENGINE_CORS_ORIGINS` | `""` | comma-separated allowlist (empty = CORS off) |
-| `--data` | — | `~/.local/share/texteditor` | SQLite files + git worktrees |
+| `--data` | — | `~/.local/share/texteditor` | SQLite files + git worktrees (+ per-workspace context-state shards, ADR-0049) |
+| — | `ALLOWED_ROOTS` | `$HOME` | bounds `GET /directories` + corpus indexing; outside paths refused (ADR-0049, Phase C) |
 
 The bound base URL is advertised on `GET /health` (`baseUrl`) so dynamic-port
 clients can discover rather than assume (ADR-0021 §1).
@@ -64,9 +65,16 @@ cd client/tauri && bun test && bun run typecheck
 cd client/tauri/src-tauri && cargo test         # sidecar handshake (needs the daemon)
 ```
 
-The 13 `.feature` behavior specs (`docs/writing-assistant/behaviors/`) are
+The 14 `.feature` behavior specs (`docs/writing-assistant/behaviors/`) are
 prose contracts, verified through the boundary tests — there is no Gherkin
 runner, and no CI yet (see `docs/writing-assistant/status.md`).
+
+Manual live-model smoke (ADR-0047 write-through; excluded from `go test` — it
+needs a running engine + control daemon + a live model serving `proofreader`):
+
+```sh
+tools/smoke-write-through.sh   # ENGINE_URL defaults to http://127.0.0.1:9100
+```
 
 ## Tauri client details (frozen, ADR-0044)
 

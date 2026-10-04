@@ -18,7 +18,7 @@ Last verified: 2026-10-04.
 | Router seam (D2–D5) + enablement seam (D1 minus the ML job) | ✅ committed (`504cd16`) |
 | Track 2 — Deployment (E) · Tauri editor (F) | ✅ landed — **frozen** (ADR-0044) |
 | Fleet observability surface (ADR-0040 — `/fleet`, batch status, selectors) | ✅ |
-| Context-engine refocus (write-through safety, presets, RAG wiring, context inspector, `/locate`, Ratatui TUI) | 🚧 active roadmap — [`plans/implementation-sequence-context-engine.md`](plans/implementation-sequence-context-engine.md) |
+| Context-engine refocus (write-through safety, presets, RAG wiring, context inspector, `/locate`, context management — workspaces, multi-root corpus, tray — Ratatui TUI) | 🚧 active roadmap — [`plans/implementation-sequence-context-engine.md`](plans/implementation-sequence-context-engine.md) |
 | D1 ML fine-tune (Needle 2 `.cact` + flip a mode to `router`) | 🚧 deferred by trigger |
 | CI automation | 🚧 none |
 | `InferenceControl` surface (risk #9) | 🚧 deferred |
@@ -32,7 +32,7 @@ Last verified: 2026-10-04.
 | OpenTUI TUI (TS/Solid) | ⏸ frozen | `client/tui/` — replaced by the Ratatui TUI v2 (ADR-0046); retired on parity |
 | Tauri 2 + Vue 3 + CodeMirror 6 editor | ⏸ frozen | `client/tauri/` (landed in Track 2; frozen by ADR-0044 — no new work); Tailwind v4 + shadcn-vue (ADR-0042) power the floating chat window |
 | Model serving — external, over REST | ✅ | reached via the `macos-dev-config` control daemon; runners `llama.cpp \| mlx-lm \| mlx-vlm \| delegate` (ADR-0030 — **no Ollama/LM Studio**) |
-| SQLite via `modernc.org/sqlite` | ✅ | four per-service files: `app.db`, `index.db`, `meter.db`, `sessions.db` |
+| SQLite via `modernc.org/sqlite` | ✅ | four per-service files: `app.db`, `index.db`, `meter.db`, `sessions.db`; Phase C adds `workspaces.db` + per-workspace context-state shards (ADR-0049) |
 | Single OpenAPI/JSON Schema contract | ✅ | `api/openapi.yaml`; codegen → ogen (Go) + Hey API (TS) + `openapi-to-rust` (Rust) |
 
 ## Layers
@@ -87,6 +87,8 @@ format, never registered).
 | FTS5 full-text index | ✅ |
 | Token-metering events + conversation history | ✅ |
 | git as the versioning engine | ✅ |
+| Workspace registry + corpus scope (`workspaces.db`) | 🚧 planned — ADR-0049 (Phase C) |
+| Per-workspace context-state shards (`index.db`/`sessions.db`/`meter.db`) | 🚧 planned — ADR-0049 (Phase C) |
 
 ## Layer 3 — Clients
 
@@ -141,15 +143,15 @@ point, contract-first, interface-first coupling.
 
 The phases (A–F) are detailed in
 [`plans/implementation-sequence-context-engine.md`](plans/implementation-sequence-context-engine.md)
-(ADR-0044 as extended by ADR-0045–0048).
+(ADR-0044 as extended by ADR-0045–0049).
 
 1. **Phase A — trustworthy write-through (ADR-0047)** — open revalidation + path canonicalization; pre-write conflict check (`file-changed-externally`); no-op re-sync; newest-first, base-validated candidates; guards live on the model path; symlink-safe writes; HTTP-level E2E tests.
 2. **Phase B — prompt presets + one pipeline (ADR-0045)** — collapse mode data to name/systemPrompt/defaultModel; `config/pipeline.json`; one agentic loop, all tools, global budgets; park the router seam.
-3. **Phase C — real RAG + context inspector (ADR-0044)** — production indexing + vault bulk ingest (`VAULT_ROOT`); hybrid FTS5 + vec0 fusion; auto-RAG `rag` events; labeled truncation; assembler v2 + persisted snapshots + `context` route + `GET /sessions/{id}/meter`.
+3. **Phase C — real RAG + context management + context inspector (ADR-0044, ADR-0049)** — production indexing + vault bulk ingest; workspace registry (`workspaces.db`) + per-workspace context-state shards; multi-root corpus scope (default `**/*.md`, hidden dirs excluded) with canonicalized dedupe; `ALLOWED_ROOTS` boundary on browsing + indexing; idempotent eviction (vec0 + FTS) and per-document status (`/corpus`); hybrid FTS5 + vec0 fusion; auto-RAG `rag` events; labeled truncation; assembler v2 + persisted snapshots + `context` route + `GET /sessions/{id}/meter`.
 4. **Phase D — `/locate` (ADR-0048)** — engine-side command parse; normalized exact-then-fuzzy resolver over the open document then the vault; `locate` event + snapshot record; ambiguity picker; anchored guarded edit.
-5. **Phase E — Ratatui TUI v2 (ADR-0046)** — `client/tui-rs/`; regenerated Rust client + Rust SSE decoder; preset tabs, meter, context panel, diff/approve, write-through status, bracketed paste, mentions/sessions/cancel; fleet orchestration engine-side + daemon reliability fixes; retire OpenTUI on parity.
+5. **Phase E — Ratatui TUI v2 (ADR-0046)** — `client/tui-rs/`; regenerated Rust client + Rust SSE decoder; preset tabs, meter, context panel, diff/approve, write-through status, bracketed paste, mentions/sessions/cancel; workspace open/resume, corpus tree (multi-root scope, status, index/evict/rebuild, allowed-roots UX), context tray (pin/remove, retrieval query, auto-RAG, pin-for-session); fleet orchestration engine-side + daemon reliability fixes; retire OpenTUI on parity.
 6. **Phase F — decision layer (Laya) + thesis validation** — `laya-decider` runner; one global retrieval-gating policy; second meter row; golden-query metrics; model evaluation; budget defaults recorded.
-7. **Add CI** — no `.github/workflows` exists, yet the plans frame every acceptance criterion as a "CI gate". Engine `go test ./...`, TUI (`cargo test` for tui-rs; OpenTUI/Tauri gates skipped while frozen); optionally a Gherkin runner for the 13 `.feature` specs (currently prose-only). The build seam is ready: `tools/build-tauri.sh` (ADR-0043) is CI-shaped — no machine-specific paths, frozen lockfile, skippable gates.
+7. **Add CI** — no `.github/workflows` exists, yet the plans frame every acceptance criterion as a "CI gate". Engine `go test ./...`, TUI (`cargo test` for tui-rs; OpenTUI/Tauri gates skipped while frozen); optionally a Gherkin runner for the 14 `.feature` specs (currently prose-only). The build seam is ready: `tools/build-tauri.sh` (ADR-0043) is CI-shaped — no machine-specific paths, frozen lockfile, skippable gates.
 8. **Fix provision tooling** — `macos-dev-config/internal/fleetdaemon/provision.go` shells the deprecated `huggingface-cli`; switch to `hf download` (huggingface-hub ≥ 1.27).
 9. **D1 ML fine-tune** (deferred by design, trigger-gated; the router seam is parked by ADR-0045) — fine-tune Needle 2 over the `cmd/toolhash` vocabulary → produce `needle2.cact` → `needle-finetune.sh` archives it + records `source.fingerprint` → wiring a mode to the router now requires revisiting ADR-0045. Finalize the `.cact` stdout-format assumption (`needle-facade.md §2`).
 10. **`InferenceControl` surface** (architecture.md risk #9) — future sibling interface behind the Provider seam, not a planned phase.

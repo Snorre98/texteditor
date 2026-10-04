@@ -56,17 +56,18 @@ row: ADR-0001/0016 map to it and to §2/§5.2/§8.
 | 0046 | §3, §7 | client-swap | module-boundaries | — |
 | 0047 | §5.2, §6, §8 | versioning | interface, data-model, failure-semantics | Q4 |
 | 0048 | §4, §5.2, §6, §8 | locate-anchor | interface, data-model | Q4, Q6 |
+| 0049 | §4, §5.2, §8 | context-management | interface, data-model | Q1, Q6 |
 
 ## Behavior contract ↔ quality scenario coverage
 
 | §10.2 scenario | Behavior contract |
 |---|---|
-| Q1 (transparent token cost) | token-metering.feature |
+| Q1 (transparent token cost) | token-metering.feature, context-management.feature |
 | Q2 (modifiability) | serving-control.feature, provider-hotswap.feature |
 | Q3 (hot-swappable serving) | provider-hotswap.feature |
 | Q4 (edit integrity) | versioning.feature, locate-anchor.feature |
 | Q5 (testability) | client-swap.feature (dumb generated clients) |
-| Q6 (explainable context) | context-inspector.feature, locate-anchor.feature |
+| Q6 (explainable context) | context-inspector.feature, locate-anchor.feature, context-management.feature |
 
 ## Behavior contract ↔ ADR coverage
 
@@ -85,6 +86,7 @@ row: ADR-0001/0016 map to it and to §2/§5.2/§8.
 | chat-window.feature | 0041, 0042 |
 | context-inspector.feature | 0044, 0011, 0024, 0036 |
 | locate-anchor.feature | 0048, 0036, 0029, 0047 |
+| context-management.feature | 0049, 0011, 0036, 0044, 0048 |
 
 ## Supersession notes
 
@@ -155,6 +157,16 @@ row: ADR-0001/0016 map to it and to §2/§5.2/§8.
 - ADR-0044 → *extended* (not reversed) by ADR-0045 (the decision layer gets
   one global policy, not per-mode config) and ADR-0046 (Rust codegen is
   unfrozen for the Ratatui TUI only; Tauri/web remain frozen).
+- ADR-0011/0036/0044/0048 → *extended* (not reversed) by ADR-0049: workspaces,
+  a multi-root corpus scope with per-document status and idempotent eviction,
+  the `ALLOWED_ROOTS` filesystem boundary, and the per-turn context tray are
+  engine-owned controls over the same metered assembler and snapshot; bounded
+  by ADR-0045 (no per-preset config). ADR-0049 also *amends* ADR-0016 (one
+  SQLite file per service *instance*: global document/registry files plus
+  per-workspace context-state shards), ADR-0026 (the Session store is
+  workspace-scoped; sessions persist in the workspace shard), and ADR-0035 §3
+  (workspaces become engine entities; the stateless filesystem leaf is renamed
+  `Filesystem` at implementation).
 
 Superseded ADRs remain in the log, untouched; supersession is recorded in the
 superseding ADR's header and in the §9 index.
