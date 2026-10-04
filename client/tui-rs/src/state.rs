@@ -81,8 +81,16 @@ pub enum UiEvent {
         path: String,
         external_change: bool,
     },
-    /// The resumed/created session (title is engine-sourced and optional).
-    Session { id: String, title: Option<String> },
+    /// The resumed/created session (title + policy are engine-sourced).
+    Session {
+        id: String,
+        title: Option<String>,
+        policy: Option<crate::gen::ContextPolicy>,
+    },
+    /// The opened document's block tree (reader; ADR-0050).
+    Blocks(Vec<crate::gen::Block>),
+    /// The persisted session context policy after a tray save (E2).
+    SessionPolicy(crate::gen::ContextPolicy),
     /// The resolved/created workspace (ADR-0049 §2).
     Workspace {
         id: String,
@@ -124,6 +132,9 @@ pub enum Overlay {
     None,
     Directory,
     Sessions,
+    Tray,
+    Mentions,
+    Locate,
 }
 
 /// The full render-only snapshot.
@@ -153,6 +164,22 @@ pub struct AppState {
     pub last_context: Option<ContextSnapshot>,
     /// The most recent `/locate` outcome (E2).
     pub last_locate: Option<LocateResult>,
+    /// The pending `@`-mention attachments for the next turn (absolute paths).
+    pub mentions: Vec<String>,
+    /// The opened document's block tree (reader view-model; ADR-0050 §4).
+    pub blocks: Vec<crate::gen::Block>,
+    /// Reader pane visibility (ADR-0050 §4).
+    pub reader_visible: bool,
+    /// Inspector pane visibility (meter + context; ADR-0044).
+    pub inspector_visible: bool,
+    /// The selected chunk in the context tray.
+    pub tray_index: usize,
+    /// The persisted session context policy (engine-sourced; E2 tray).
+    pub session_policy: Option<crate::gen::ContextPolicy>,
+    /// The in-progress retrieval-query edit.
+    pub query_edit: Option<String>,
+    /// When set, the next turn carries the tray policy as a per-turn override.
+    pub override_next_turn: bool,
     /// Finalized chat history.
     pub messages: Vec<ChatMessage>,
     /// The assistant text currently streaming (folded into `messages` on end).
@@ -258,9 +285,17 @@ impl AppState {
                     self.note("external-change: file re-read from disk on open".to_string());
                 }
             }
-            UiEvent::Session { id, title } => {
+            UiEvent::Session { id, title, policy } => {
                 self.session_id = Some(id);
                 self.session_title = title;
+                self.session_policy = policy;
+                self.tray_index = 0;
+            }
+            UiEvent::Blocks(blocks) => {
+                self.blocks = blocks;
+            }
+            UiEvent::SessionPolicy(policy) => {
+                self.session_policy = Some(policy);
             }
             UiEvent::Workspace { id, root, name } => {
                 self.workspace = Some(WorkspaceInfo { id, root, name });
@@ -300,6 +335,12 @@ impl AppState {
             UiEvent::Turn(SseEvent::Locate(locate)) => {
                 if let Some(turn_id) = &locate.turn_id {
                     self.turn_id = Some(turn_id.clone());
+                }
+                // An ambiguous outcome opens the picker; the turn waits for the
+                // choice (ADR-0048 §4).
+                if matches!(locate.status, crate::gen::LocateResultStatus::Ambiguous) {
+                    self.overlay = Overlay::Locate;
+                    self.picker_index = 0;
                 }
                 self.last_locate = Some(locate);
             }
@@ -548,6 +589,35 @@ mod tests {
     }
 
     #[test]
+    fn ambiguous_locate_opens_the_picker() {
+        let mut app = AppState::default();
+        app.reduce(UiEvent::Turn(SseEvent::Locate(crate::gen::LocateResult {
+            block_id: None,
+            candidates: Some(vec![crate::gen::LocateCandidate {
+                block_id: None,
+                chunk_key: "/v/a.md#0".to_string(),
+                document_id: None,
+                path: "/v/a.md".to_string(),
+                score: 0.9,
+                stale: None,
+                text_preview: "…".to_string(),
+            }]),
+            chunk_key: None,
+            confidence: None,
+            context: None,
+            document_id: None,
+            match_type: None,
+            path: None,
+            span: None,
+            stale: None,
+            status: crate::gen::LocateResultStatus::Ambiguous,
+            turn_id: Some("t1".to_string()),
+        })));
+        assert_eq!(app.overlay, Overlay::Locate);
+        assert_eq!(app.picker_index, 0);
+    }
+
+    #[test]
     fn done_cancelled_marks_the_turn_cancelled() {
         let mut app = AppState::default();
         app.begin_turn("hi".to_string());
@@ -576,6 +646,37 @@ mod tests {
             },
         )));
         assert_eq!(app.thinking, "ponder");
+    }
+
+    #[test]
+    fn blocks_event_populates_the_reader_view() {
+        let mut app = AppState::default();
+        app.reduce(UiEvent::Blocks(vec![crate::gen::Block {
+            id: "b1".to_string(),
+            parent_id: None,
+            kind: crate::gen::BlockKind::Paragraph,
+            position: 0,
+            text: "Hello".to_string(),
+            hash: None,
+        }]));
+        assert_eq!(app.blocks.len(), 1);
+        assert_eq!(app.blocks[0].text, "Hello");
+    }
+
+    #[test]
+    fn session_event_carries_the_context_policy() {
+        let mut app = AppState::default();
+        app.reduce(UiEvent::Session {
+            id: "s1".to_string(),
+            title: Some("Draft".to_string()),
+            policy: Some(crate::gen::ContextPolicy {
+                auto_rag: Some(false),
+                ..Default::default()
+            }),
+        });
+        assert_eq!(app.session_id.as_deref(), Some("s1"));
+        assert_eq!(app.session_title.as_deref(), Some("Draft"));
+        assert_eq!(app.session_policy.as_ref().unwrap().auto_rag, Some(false));
     }
 
     #[test]

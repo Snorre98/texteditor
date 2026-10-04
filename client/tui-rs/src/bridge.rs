@@ -24,9 +24,9 @@ use futures_util::StreamExt;
 
 use crate::discovery::{self, EngineEnv};
 use crate::gen::{
-    BlockEdit, CancelTurnApiError, CommitDocumentApiError, CommitRequest, CreateSessionRequest,
-    CreateWorkspaceRequest, HttpClient, ListDirectoryApiError, OpenDocumentRequest,
-    RenameSessionRequest, Session, Task,
+    BlockEdit, CancelTurnApiError, CommitDocumentApiError, CommitRequest, ContextPolicy,
+    CreateSessionRequest, CreateWorkspaceRequest, HttpClient, ListDirectoryApiError,
+    OpenDocumentRequest, RenameSessionRequest, Session, Task,
 };
 use crate::sse::{Decoded, SseDecoder};
 use crate::state::UiEvent;
@@ -50,10 +50,26 @@ pub enum Command {
     NewSession,
     /// Rename a session.
     RenameSession { session_id: String, title: String },
-    /// Run one turn with the active preset.
-    SendTurn { mode: String, input: String },
+    /// Run one turn with the active preset; `context` is the optional per-turn
+    /// override (ADR-0049 §8) and `mentions` the turn-scoped attachments.
+    SendTurn {
+        mode: String,
+        input: String,
+        context: Option<ContextPolicy>,
+        mentions: Vec<String>,
+    },
     /// Cancel the running turn by id (POST /turns/{id}/cancel).
     Cancel { turn_id: String },
+    /// Answer a waiting turn's `/locate` ambiguity picker (ADR-0048 §4).
+    ResolveLocate {
+        turn_id: String,
+        chunk_key: Option<String>,
+        cancel: bool,
+    },
+    /// Load the active document's block tree (reader; ADR-0050).
+    LoadBlocks,
+    /// Persist the session context policy (tray; ADR-0049 §8).
+    PutSessionContext { policy: ContextPolicy },
     /// Accept the staged candidate for `block_id` (stage + commit + write-through).
     Approve { block_id: String },
     /// Retry an approve with the explicit `overwrite: true` opt-in.
@@ -138,7 +154,12 @@ async fn run_worker(
             Command::RenameSession { session_id, title } => {
                 worker.rename_session(session_id, title).await
             }
-            Command::SendTurn { mode, input } => match worker.build_turn_task(mode, input) {
+            Command::SendTurn {
+                mode,
+                input,
+                context,
+                mentions,
+            } => match worker.build_turn_task(mode, input, context, mentions) {
                 Some(task) => {
                     if let Some(client) = worker.client.clone() {
                         let tx = worker.event_tx.clone();
@@ -151,6 +172,13 @@ async fn run_worker(
                 }
             },
             Command::Cancel { turn_id } => worker.cancel(turn_id).await,
+            Command::ResolveLocate {
+                turn_id,
+                chunk_key,
+                cancel,
+            } => worker.resolve_locate(turn_id, chunk_key, cancel).await,
+            Command::LoadBlocks => worker.load_blocks().await,
+            Command::PutSessionContext { policy } => worker.put_session_context(policy).await,
             Command::Approve { block_id } => worker.approve(block_id, false).await,
             Command::Overwrite { block_id } => worker.approve(block_id, true).await,
             Command::Shutdown => {
@@ -266,6 +294,7 @@ impl Worker {
             Err(err) => self.error(format!("list presets failed: {err}")),
         }
 
+        self.load_blocks().await;
         self.resume_or_create(&document.id).await;
     }
 
@@ -321,6 +350,7 @@ impl Worker {
                     self.emit(UiEvent::Session {
                         id: session.id,
                         title: session.title,
+                        policy: session.context_policy,
                     });
                 } else {
                     self.create_session(document_id, None).await;
@@ -350,6 +380,7 @@ impl Worker {
                 self.emit(UiEvent::Session {
                     id: session.id,
                     title: session.title,
+                    policy: session.context_policy,
                 });
             }
             Err(err) => self.error(format!("create session failed: {err}")),
@@ -372,6 +403,7 @@ impl Worker {
         self.emit(UiEvent::Session {
             id: session.id,
             title: session.title,
+            policy: session.context_policy,
         });
     }
 
@@ -388,6 +420,7 @@ impl Worker {
                     self.emit(UiEvent::Session {
                         id: session.id.clone(),
                         title: session.title.clone(),
+                        policy: session.context_policy.clone(),
                     });
                 }
                 self.refresh_sessions().await;
@@ -396,13 +429,70 @@ impl Worker {
         }
     }
 
+    /// Load the active document's block tree for the reader (ADR-0050 §2).
+    async fn load_blocks(&self) {
+        let (Some(client), Some(document_id)) = (self.client.clone(), self.doc_id.clone()) else {
+            return;
+        };
+        match client.get_blocks(&document_id).await {
+            Ok(blocks) => self.emit(UiEvent::Blocks(blocks)),
+            Err(err) => self.error(format!("load document failed: {err}")),
+        }
+    }
+
+    /// Persist the session context policy (tray; ADR-0049 §8).
+    async fn put_session_context(&self, policy: ContextPolicy) {
+        let (Some(client), Some(session_id)) = (self.client.clone(), self.session_id.clone())
+        else {
+            self.error("no session; tray not saved");
+            return;
+        };
+        match client.put_session_context(&session_id, policy).await {
+            Ok(session) => {
+                if let Some(policy) = session.context_policy {
+                    self.emit(UiEvent::SessionPolicy(policy));
+                }
+            }
+            Err(err) => self.error(format!("save tray failed: {err}")),
+        }
+    }
+
     /// Build the turn Task from the worker's engine facts.
-    fn build_turn_task(&self, mode: String, input: String) -> Option<Task> {
+    fn build_turn_task(
+        &self,
+        mode: String,
+        input: String,
+        context: Option<ContextPolicy>,
+        mentions: Vec<String>,
+    ) -> Option<Task> {
         let document_id = self.doc_id.clone()?;
         let session_id = self.session_id.clone()?;
         let mut task = Task::new(document_id, mode, session_id, input);
         task.workspace_id = self.workspace_id.clone();
+        task.context = context;
+        if !mentions.is_empty() {
+            task.mentions = Some(
+                mentions
+                    .into_iter()
+                    .map(|path| crate::gen::Mention { path })
+                    .collect(),
+            );
+        }
         Some(task)
+    }
+
+    /// Answer a waiting `/locate` picker (ADR-0048 §4).
+    async fn resolve_locate(&self, turn_id: String, chunk_key: Option<String>, cancel: bool) {
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        let choice = crate::gen::LocateChoice {
+            chunk_key,
+            cancel: if cancel { Some(true) } else { None },
+        };
+        if let Err(err) = client.resolve_locate(&turn_id, choice).await {
+            self.error(format!("locate choice failed: {err}"));
+        }
     }
 
     /// Cancel a turn by id. A typed 404/409 is labeled; the turn's own terminal
@@ -465,7 +555,11 @@ impl Worker {
             overwrite: Some(overwrite),
         };
         match client.commit_document(&document_id, Some(request)).await {
-            Ok(revision) => self.emit(UiEvent::Approved { revision }),
+            Ok(revision) => {
+                self.emit(UiEvent::Approved { revision });
+                // The engine's tree changed; refresh the reader (ADR-0050).
+                self.load_blocks().await;
+            }
             Err(err) => {
                 if let Some(api) = err.api() {
                     if let Some(CommitDocumentApiError::Status409(conflict)) = &api.typed {

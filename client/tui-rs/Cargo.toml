@@ -26,6 +26,10 @@ thiserror = "2"
 # TUI (ADR-0046 §1): Ratatui widgets on crossterm, plain cargo, no Tauri/Node.
 ratatui = "0.29"
 crossterm = "0.28"
+# Reader pane renderer (ADR-0050 §3): markdown → styled ratatui Text.
+# Pinned to 0.3.2: it targets ratatui ^0.29 (0.3.3+ moved to ratatui-core,
+# which is a distinct Text type incompatible with ratatui 0.29's).
+tui-markdown = "=0.3.2"
 
 # Async bridge (ADR-0046 §4): one runtime owns the generated calls + the /turn
 # byte stream; the UI thread is synchronous. No other tokio features are needed

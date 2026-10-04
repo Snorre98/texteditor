@@ -642,6 +642,10 @@ type AgentLoop interface {
     // a chosen candidate resumes the anchored turn, a cancel degrades it to
     // plain chat. ErrNoPendingLocate (typed 409) when the turn is not waiting.
     ResolveLocate(turnID string, choice LocateChoice) error
+    // Cancel cancels a still-running turn (POST /turns/{id}/cancel). The turn
+    // ends with a labeled terminal `done {cancelled:true}`, partial usage is
+    // metered; ErrTurnNotRunning (typed 409) when it is no longer running.
+    Cancel(turnID string) error
 }
 ```
 
@@ -711,6 +715,19 @@ session), `Task.Selection` is set, and `edit_markdown`'s `blockId` + `baseHash`
 are forced from the anchor so the model supplies only `text`. Not-found and
 cancel/timeout degrade to plain chat with a labeled outcome. Locating is
 deterministic and token-free.)
+
+(Amended by ADR-0046 §5 (Phase E2): the loop gains a turn-scoped cancel registry.
+`Run` derives a cancellable context per turn; `Cancel(turnID)` marks the turn
+user-cancelled and cancels it, returning `ErrTurnNotRunning` (typed 409) when the
+turn is not running. A cancelled turn ends with a labeled terminal
+`done {cancelled:true}` (never an error): any partial answer text is emitted and
+persisted, whatever partial usage the provider reported is metered, and the
+snapshot records `cancelled`. The API server emits a `turn` SSE event
+(`{turnId, sessionId}`) as the first event of the stream, right after
+subscribing, so a client can address `POST /turns/{id}/cancel` and
+`POST /turns/{id}/locate` while the turn runs. `SessionStore.Create` gains a
+`title` argument and `Rename` sets it (`PUT /sessions/{id}`); `title` was already
+persisted.)
 
 ## 8. Mode registry + Tool registry + Tool executor (Go)
 
@@ -1074,8 +1091,9 @@ type Session struct {
 type SessionStore interface {
     ListByDocument(documentID string) ([]Session, error)
     ListByWorkspace() ([]Session, error) // workspace-scoped by shard
-    Create(documentID string, anchorBlockID *string, modeType string) (Session, error)
+    Create(documentID string, anchorBlockID *string, modeType, title string) (Session, error)
     Resume(id string) (Session, error)          // find-or-open an anchored session
+    Rename(id, title string) error              // set the human title (E2); ErrNotFound when unknown
     Append(sessionID string, msg Message) error
     History(sessionID string) ([]Message, error)
     SaveContext(turnID, sessionID string, snapshot json.RawMessage) error // persisted per-turn snapshot
@@ -1102,7 +1120,7 @@ never interprets pins/excludes.
 ```go
 type Event struct {
     TurnID string
-    Type   string // token|meter|candidate|diff|rag|context|done|error|backpressure
+    Type   string // turn|token|meter|candidate|diff|rag|context|locate|thinking|done|error|backpressure
     Data   json.RawMessage
 }
 
