@@ -30,7 +30,8 @@ embeds a sibling module's package type.
 | `Target` | Provider | 2 |
 | `Resolution`, `LiveState` | Fleet | 1 |
 | `Chunk` | Retriever, Chunker, Assembler | 3, 4, 5 |
-| `ChunkRef` | Retriever (`Get`), context tray / `Task` | 3, 7 |
+| `ChunkRef` | Retriever (`Get`), context tray / `Task`, `ContextPolicy` | 3, 7 |
+| `ContextPolicy` | Session store (`Session.contextPolicy`), Agent loop (`Task.Context`), API server | 10, 7 |
 | `IndexedDocument` | Retriever (`Status`), corpus status | 3 |
 | `Message` | Session store, Assembler, `Payload` | 0b |
 | `Request` | Assembler (`Payload`), Provider | 5, 2 |
@@ -253,6 +254,8 @@ type Chunk struct {
     Source   string  `json:"source"` // citation/provenance marker
     Path     string  `json:"path,omitempty"`    // canonical absolute file path
     Heading  string  `json:"heading,omitempty"` // heading stack / nearest heading
+    Pinned        bool `json:"pinned,omitempty"`        // snapshot human pin (C4)
+    HumanOverride bool `json:"humanOverride,omitempty"` // snapshot override (C4)
 }
 
 type IndexedDocument struct { // Retriever.Status
@@ -265,8 +268,8 @@ type IndexedDocument struct { // Retriever.Status
 
 type ChunkRef struct { // tray pin/exclude reference (ADR-0049 §8)
     Path     string
-    ChunkKey string
-    Hash     string // optional content hash
+    ChunkKey string // optional; omitted = every chunk under Path
+    Hash     string // optional content hash (advisory in C4)
 }
 
 type Retriever interface {
@@ -354,7 +357,8 @@ type AssemblerInput struct {
     Params      SamplingParams // merged effective params
     Tools       []ToolDef     // all registered tools (global; ADR-0045), in splice order
     Policy      PipelinePolicy // the one global pipeline policy (budgets; ADR-0045 §3)
-    RAGChunks   []Chunk
+    Pinned      []Chunk       // human-pinned chunks (ADR-0049 §7/§11), front-loaded
+    RAGChunks   []Chunk       // auto-retrieved chunks, spliced after Pinned
     History     []Message
     Mentions    []MentionContent // ADR-0036; spliced after history, before user input
     UserInput   string
@@ -393,8 +397,20 @@ type MessageProvenance struct {
 // ContextMessage / ContextDrop / BudgetUsage are the wire forms of the snapshot
 // (ADR-0044 §4); the snapshot is engine data clients render verbatim.
 type ContextMessage struct { Role, Component, Source string; Tokens int; Pinned bool }
-type ContextDrop struct { Component, Reason string; Count int; Detail string }
+type ContextDrop struct { Component, Reason string; Count int; Detail string; HumanOverride bool }
 type BudgetUsage struct { Component string; Used, Limit int }
+
+// ContextPolicy is the context-tray decision set (ADR-0049 §7/§8). The engine
+// persists one per session (Session.contextPolicy) and accepts per-turn
+// overrides (Task.Context). Merge is replace-when-present per field: a non-nil
+// slice/pointer replaces the lower layer wholesale (an explicit empty list
+// clears), a nil field inherits. It carries decisions, never payload text.
+type ContextPolicy struct {
+    Pinned         []ChunkRef
+    Excluded       []ChunkRef
+    AutoRag        *bool
+    RetrievalQuery *string
+}
 
 // ContextSnapshot is the persisted per-turn record (GET /turns/{id}/context and
 // the `context` SSE payload). Decision (Phase F) and Locate (Phase D) are
@@ -440,6 +456,14 @@ per-component budget utilization against `PipelinePolicy` (`limit` only for the
 three budgeted components). The signature is unchanged and the leaf stays
 pure/deterministic: the assembler never knows about sessions, workspaces, or
 snapshots.)
+
+(Amended by ADR-0049 §7/§8/§11 (Phase C4): `AssemblerInput` gains `Pinned
+[]Chunk`; pinned chunks are front-loaded (emitted immediately after the system
+message, before history and auto RAG chunks) in ref order and share the RAG
+budget with `RAGChunks`, so pins never bypass budgets. `MessageProvenance.Pinned`
+labels pinned rows; `ContextDrop.HumanOverride` labels a pinned chunk dropped by
+truncation. Snapshot `Chunk` rows carry `Pinned`/`HumanOverride`. The assembler
+stays pure and signature-unchanged.)
 
 ## 6. Token metering (Go)
 
@@ -524,6 +548,7 @@ type Task struct {
     Selection   *Selection
     Mentions    []Mention   // turn-scoped context attachments (ADR-0036)
     Options     *TurnOptions
+    Context     *ContextPolicy // optional per-turn context override (ADR-0049 §8)
 }
 
 type AgentLoop interface {
@@ -564,6 +589,21 @@ assembler's provenance/drops/budget plus the retrieved chunks into a
 (`SaveContext`), and emits the `context` SSE event carrying the snapshot bytes.
 The assembler never knows about sessions/workspaces; the loop builds the
 envelope from the assembler output + retrieval results.)
+
+(Amended by ADR-0049 §8/§11 (Phase C4): `Task` gains optional `Context
+*ContextPolicy`. At turn start the loop merges it replace-when-present per field
+over the persisted session policy (`Session.contextPolicy`): an override field
+replaces the session field wholesale (an explicit empty list clears), an absent
+field inherits; defaults are `autoRag=true` and `retrievalQuery=Task.UserInput`.
+It then runs auto-RAG only when the effective `autoRag` is true, drops
+auto-retrieved chunks matching `excluded` (by `chunkKey`, else canonical
+`path`) with a labeled `excluded` drop, resolves `pinned` refs through
+`Retriever.Get` (works off the top-k) and labels unresolved refs as `not-found`
+human-override drops, passes pins to the assembler as `Pinned` (front-loaded,
+budget-shared), emits the `rag` event for the post-exclude/pre-truncation auto
+set only, and records the effective `retrievalQuery`/`autoRag` plus pinned/
+auto chunks (pins labeled `pinned`/`humanOverride`) in the snapshot. The
+override is never persisted.)
 
 ## 8. Mode registry + Tool registry + Tool executor (Go)
 
@@ -908,6 +948,7 @@ type Session struct {
     ModeType      string   // persisted per-session persona
     Title         string
     TokenBudget   *int     // optional per-session cumulative-token cap
+    ContextPolicy json.RawMessage // persisted session policy JSON (ADR-0049 §8); nil = none
     CreatedAt     int64
     UpdatedAt     int64
 }
@@ -921,6 +962,8 @@ type SessionStore interface {
     History(sessionID string) ([]Message, error)
     SaveContext(turnID, sessionID string, snapshot json.RawMessage) error // persisted per-turn snapshot
     TurnContext(turnID string) (json.RawMessage, error)                   // ErrNotFound when unknown
+    SetContextPolicy(sessionID string, policy json.RawMessage) error      // ADR-0049 §8
+    ContextPolicy(sessionID string) (json.RawMessage, error)              // nil when none
 }
 ```
 
@@ -931,6 +974,10 @@ The API server routes a session id to its workspace shard through the
 `SaveContext` persists one turn's `ContextSnapshot` (opaque JSON passthrough —
 the leaf never parses it) and prunes the session to the newest 100 snapshots in
 one transaction (ADR-0044 §4 retention); `TurnContext` reads it back by turn id.
+`SetContextPolicy` validates the JSON against `ContextPolicy` (typed
+`ErrInvalidContextPolicy`) and persists it (`ErrNotFound` for an unknown
+session); `ContextPolicy` reads it back. Both are opaque to the leaf, which
+never interprets pins/excludes.
 
 ## 11. SSE event bus (Go)
 
@@ -958,6 +1005,11 @@ emits one `context` event after assembly whose payload is the turn's persisted
 reconstruct it). Auto-RAG also emits a `rag` event at turn start with the same
 `{ok, chunks}` shape as tool retrieval. Clients that do not understand `context`
 must ignore it without dropping the stream (labeled, never fatal).
+
+*Phase C4 (ADR-0049 §8) added no new SSE event.* The context tray rides
+`Task.context` and `PUT /sessions/{id}/context`; the `rag` event remains the
+post-exclude, pre-truncation auto-retrieved set, and pins appear only in the
+`context` snapshot (labeled `pinned`/`humanOverride`).
 
 
 ## 12. Serving lifecycle — the verb contract (transported by the daemon)

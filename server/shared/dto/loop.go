@@ -28,4 +28,8 @@ type Task struct {
 	Selection   *Selection
 	Mentions    []Mention // turn-scoped context attachments (ADR-0036); never persisted
 	Options     *TurnOptions
+	// Context is the optional per-turn context override (ADR-0049 §8). It merges
+	// replace-when-present per field over the persisted session policy; it is
+	// never persisted.
+	Context *ContextPolicy
 }

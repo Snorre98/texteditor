@@ -220,7 +220,7 @@ flowchart TB
 | Tool registry | tool definitions + schemas (all tools global) | `Register`, `List` | schema validation |
 | Tool executor | tool execution (ctx carries the turn's shard services) | `Invoke(ctx, name, args)` | name-keyed handler map |
 | Tool decider (optional) | tool-intent resolution ("which tool, what args") from a writer's `request_tool` intent — **parked/unwired** (ADR-0045) | `SignalTool`, `Decide(ctx, intent, c)` | prompt layout, Provider.Chat, τ threshold, `.cact` fingerprint |
-| Context assembler | payload + attribution + per-message provenance/drops/budget (pure) | `Assemble(ctx, in) → (Payload, Breakdown)` | layout, truncation, accounting, provenance, labeled drops, budget utilization |
+| Context assembler | payload + attribution + per-message provenance/drops/budget (pure) | `Assemble(ctx, in) → (Payload, Breakdown)` | layout, truncation, accounting, provenance, labeled drops, budget utilization, front-loaded pins sharing the RAG budget |
 | Token metering | counts + attribution + persistence + per-session aggregation | `Attribute(ctx, turnID, breakdown, counts)`, `SessionUsage`, `SessionBreakdown` | scale-to-total, shard `meter.db`, per-component cumulative aggregate |
 | Retriever | hybrid retrieval + provenance + eviction + status, per workspace shard | `Query`, `Index`, `IndexPath`, `Evict`, `Status`, `Get` | embedding, vec0 KNN + FTS5 bm25 fused with RRF, shard `index.db` |
 | Chunker | chunking (pure) | `Chunk(tree []Block, maxTokens int)` | splitting algorithm |
@@ -230,7 +230,7 @@ flowchart TB
 | Workspace store (leaf) | global workspace registry + corpus scope + jobs + routing | `ResolveOrCreate`, `Get`, `List`, `FindContaining`, `Scope`, `SetScope`, job/tombstone/routing methods | `workspaces.db` |
 | Shard manager | per-workspace context-state lifecycle (lazy open, migrate, LRU close, leases) | `Services(ctx, workspaceID) → *Lease` | `workspaces/<id>/{index,sessions,meter}.db`, LRU cap, refcounts |
 | Corpus service | index-only multi-root corpus: scope, reconcile, status, async jobs, lifecycle hook | `Get`, `SetScope`, `Index`, `Evict`, `NotifyChanged` | glob walk via Filesystem, single-flight jobs, tombstones/errors |
-| Session store | sessions + their messages + persisted per-turn snapshots (one per selection/doc), workspace-scoped by shard | `ListByDocument`, `ListByWorkspace`, `Create`, `Resume`, `Append`, `History`, `SaveContext`, `TurnContext` | shard `sessions.db`, `turn_context` retention |
+| Session store | sessions + their messages + persisted per-turn snapshots + the session context policy (one per selection/doc), workspace-scoped by shard | `ListByDocument`, `ListByWorkspace`, `Create`, `Resume`, `Append`, `History`, `SaveContext`, `TurnContext`, `SetContextPolicy`, `ContextPolicy` | shard `sessions.db`, `turn_context` retention, `context_policy` (validated opaque JSON, ADR-0049 §8) |
 | API server | REST/SSE surface (codegen'd) | routes per OpenAPI spec | framing, turnID↔session↔client correlation |
 | SSE event bus | typed event fan-out | `Emit`, `Subscribe` | connection registry, backpressure |
 

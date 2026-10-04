@@ -587,6 +587,43 @@ paths:
                 items:
                   $ref: '#/components/schemas/Message'
 
+  /sessions/{id}/context:
+    put:
+      operationId: putSessionContext
+      summary: Persist a session's context policy (ADR-0049 §8)
+      description: >
+        Replaces the session's persisted context policy (pins, excludes,
+        auto-RAG flag, retrieval query) and returns the session so the client
+        reads back what was persisted. The policy carries the same shape as the
+        per-turn `Task.context` override; it survives turns, reconnects, and
+        session resume. Per-turn overrides are never persisted. An unknown
+        session is the typed 404.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ContextPolicy'
+      responses:
+        '200':
+          description: the session with its persisted policy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Session'
+        '404':
+          description: no session exists with the id
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotFound'
+
   /turns/{id}/context:
     get:
       operationId: getTurnContext
@@ -1202,6 +1239,8 @@ components:
             $ref: '#/components/schemas/Mention'
         options:
           $ref: '#/components/schemas/TurnOptions'
+        context:
+          $ref: '#/components/schemas/ContextPolicy'
 
     Message:
       type: object
@@ -1244,6 +1283,8 @@ components:
         updatedAt:
           type: integer
           format: int64
+        contextPolicy:
+          $ref: '#/components/schemas/ContextPolicy'
 
     CreateSessionRequest:
       type: object
@@ -1442,9 +1483,10 @@ components:
         A stable reference to one indexed chunk, used by the context tray for
         pin/exclude decisions (ADR-0049 §8). `chunkKey` is path#index for
         corpus files and documentID#index for versioned documents; `path` is
-        the canonical absolute file path. `hash` optionally pins the chunk's
-        content hash so a stale pin is detectable.
-      required: [path, chunkKey]
+        the canonical absolute file path. When `chunkKey` is omitted the ref
+        names every chunk under `path`; `hash` optionally pins the chunk's
+        content hash so a stale pin is detectable (advisory in Phase C4).
+      required: [path]
       properties:
         path:
           type: string
@@ -1452,6 +1494,46 @@ components:
           type: string
         hash:
           type: string
+
+    ContextPolicy:
+      type: object
+      description: >
+        A session-level context policy (persisted) or a per-turn override
+        (`Task.context`). All fields are optional. Merge is replace-when-present
+        per field: a present field replaces the lower layer wholesale (an
+        explicit empty `pinned`/`excluded` list clears that field), while an
+        absent field inherits it. Pins are human overrides that bypass the
+        decision gate (Phase F) but never budgets; auto-retrieved chunks remain
+        gated. The client sends decisions, never payload text.
+      properties:
+        pinned:
+          type: array
+          items:
+            $ref: '#/components/schemas/ChunkRef'
+          description: >
+            Chunks to include as human-pinned overrides, front-loaded
+            deterministically and resolved through the index (works even when
+            not in the retrieval top-k).
+        excluded:
+          type: array
+          items:
+            $ref: '#/components/schemas/ChunkRef'
+          description: >
+            Retrieved chunks to drop from the payload, matched by `chunkKey`
+            (or by canonical `path` when only a path is given); each removal is
+            recorded as a labeled drop.
+        autoRag:
+          type: boolean
+          description: >
+            Whether auto-RAG retrieval runs. When absent the persisted session
+            policy (or the default, true) applies. When false, retrieval is
+            skipped but pins still apply.
+        retrievalQuery:
+          type: string
+          description: >
+            The query auto-RAG runs. When absent the persisted session policy,
+            else `Task.userInput`, applies. Affects retrieval only, never the
+            user message.
 
     ContextSnapshot:
       type: object
@@ -1544,6 +1626,14 @@ components:
           type: string
         heading:
           type: string
+        pinned:
+          type: boolean
+          description: True when the chunk is a human-pinned override (Phase C4).
+        humanOverride:
+          type: boolean
+          description: >
+            True when the chunk is a human override (Phase C4; pins bypass the
+            Phase F decision gate, never budgets).
 
     ContextDrop:
       type: object
@@ -1561,6 +1651,12 @@ components:
           type: integer
         detail:
           type: string
+        humanOverride:
+          type: boolean
+          description: >
+            True when the dropped item was a human override (a pinned chunk
+            dropped by truncation, Phase C4); labels the override in the
+            snapshot.
 
     BudgetUsage:
       type: object

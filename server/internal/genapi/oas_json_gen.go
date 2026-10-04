@@ -978,6 +978,136 @@ func (s *Capabilities) UnmarshalJSON(data []byte) error {
 }
 
 // Encode implements json.Marshaler.
+func (s *ChunkRef) Encode(e *jx.Encoder) {
+	e.ObjStart()
+	s.encodeFields(e)
+	e.ObjEnd()
+}
+
+// encodeFields encodes fields.
+func (s *ChunkRef) encodeFields(e *jx.Encoder) {
+	{
+		e.FieldStart("path")
+		e.Str(s.Path)
+	}
+	{
+		if s.ChunkKey.Set {
+			e.FieldStart("chunkKey")
+			s.ChunkKey.Encode(e)
+		}
+	}
+	{
+		if s.Hash.Set {
+			e.FieldStart("hash")
+			s.Hash.Encode(e)
+		}
+	}
+}
+
+var jsonFieldsNameOfChunkRef = [3]string{
+	0: "path",
+	1: "chunkKey",
+	2: "hash",
+}
+
+// Decode decodes ChunkRef from json.
+func (s *ChunkRef) Decode(d *jx.Decoder) error {
+	if s == nil {
+		return errors.New("invalid: unable to decode ChunkRef to nil")
+	}
+	var requiredBitSet [1]uint8
+
+	if err := d.ObjBytes(func(d *jx.Decoder, k []byte) error {
+		switch string(k) {
+		case "path":
+			requiredBitSet[0] |= 1 << 0
+			if err := func() error {
+				v, err := d.Str()
+				s.Path = string(v)
+				if err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"path\"")
+			}
+		case "chunkKey":
+			if err := func() error {
+				s.ChunkKey.Reset()
+				if err := s.ChunkKey.Decode(d); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"chunkKey\"")
+			}
+		case "hash":
+			if err := func() error {
+				s.Hash.Reset()
+				if err := s.Hash.Decode(d); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"hash\"")
+			}
+		default:
+			return d.Skip()
+		}
+		return nil
+	}); err != nil {
+		return errors.Wrap(err, "decode ChunkRef")
+	}
+	// Validate required fields.
+	var failures []validate.FieldError
+	for i, mask := range [1]uint8{
+		0b00000001,
+	} {
+		if result := (requiredBitSet[i] & mask) ^ mask; result != 0 {
+			// Mask only required fields and check equality to mask using XOR.
+			//
+			// If XOR result is not zero, result is not equal to expected, so some fields are missed.
+			// Bits of fields which would be set are actually bits of missed fields.
+			missed := bits.OnesCount8(result)
+			for bitN := 0; bitN < missed; bitN++ {
+				bitIdx := bits.TrailingZeros8(result)
+				fieldIdx := i*8 + bitIdx
+				var name string
+				if fieldIdx < len(jsonFieldsNameOfChunkRef) {
+					name = jsonFieldsNameOfChunkRef[fieldIdx]
+				} else {
+					name = strconv.Itoa(fieldIdx)
+				}
+				failures = append(failures, validate.FieldError{
+					Name:  name,
+					Error: validate.ErrFieldRequired,
+				})
+				// Reset bit.
+				result &^= 1 << bitIdx
+			}
+		}
+	}
+	if len(failures) > 0 {
+		return &validate.Error{Fields: failures}
+	}
+
+	return nil
+}
+
+// MarshalJSON implements stdjson.Marshaler.
+func (s *ChunkRef) MarshalJSON() ([]byte, error) {
+	e := jx.Encoder{}
+	s.Encode(&e)
+	return e.Bytes(), nil
+}
+
+// UnmarshalJSON implements stdjson.Unmarshaler.
+func (s *ChunkRef) UnmarshalJSON(data []byte) error {
+	d := jx.DecodeBytes(data)
+	return s.Decode(d)
+}
+
+// Encode implements json.Marshaler.
 func (s *CommitRequest) Encode(e *jx.Encoder) {
 	e.ObjStart()
 	s.encodeFields(e)
@@ -1087,9 +1217,21 @@ func (s *ContextChunk) encodeFields(e *jx.Encoder) {
 			s.Heading.Encode(e)
 		}
 	}
+	{
+		if s.Pinned.Set {
+			e.FieldStart("pinned")
+			s.Pinned.Encode(e)
+		}
+	}
+	{
+		if s.HumanOverride.Set {
+			e.FieldStart("humanOverride")
+			s.HumanOverride.Encode(e)
+		}
+	}
 }
 
-var jsonFieldsNameOfContextChunk = [7]string{
+var jsonFieldsNameOfContextChunk = [9]string{
 	0: "blockId",
 	1: "chunkKey",
 	2: "text",
@@ -1097,6 +1239,8 @@ var jsonFieldsNameOfContextChunk = [7]string{
 	4: "source",
 	5: "path",
 	6: "heading",
+	7: "pinned",
+	8: "humanOverride",
 }
 
 // Decode decodes ContextChunk from json.
@@ -1104,7 +1248,7 @@ func (s *ContextChunk) Decode(d *jx.Decoder) error {
 	if s == nil {
 		return errors.New("invalid: unable to decode ContextChunk to nil")
 	}
-	var requiredBitSet [1]uint8
+	var requiredBitSet [2]uint8
 
 	if err := d.ObjBytes(func(d *jx.Decoder, k []byte) error {
 		switch string(k) {
@@ -1182,6 +1326,26 @@ func (s *ContextChunk) Decode(d *jx.Decoder) error {
 			}(); err != nil {
 				return errors.Wrap(err, "decode field \"heading\"")
 			}
+		case "pinned":
+			if err := func() error {
+				s.Pinned.Reset()
+				if err := s.Pinned.Decode(d); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"pinned\"")
+			}
+		case "humanOverride":
+			if err := func() error {
+				s.HumanOverride.Reset()
+				if err := s.HumanOverride.Decode(d); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"humanOverride\"")
+			}
 		default:
 			return d.Skip()
 		}
@@ -1191,8 +1355,9 @@ func (s *ContextChunk) Decode(d *jx.Decoder) error {
 	}
 	// Validate required fields.
 	var failures []validate.FieldError
-	for i, mask := range [1]uint8{
+	for i, mask := range [2]uint8{
 		0b00000101,
+		0b00000000,
 	} {
 		if result := (requiredBitSet[i] & mask) ^ mask; result != 0 {
 			// Mask only required fields and check equality to mask using XOR.
@@ -1265,13 +1430,20 @@ func (s *ContextDrop) encodeFields(e *jx.Encoder) {
 			s.Detail.Encode(e)
 		}
 	}
+	{
+		if s.HumanOverride.Set {
+			e.FieldStart("humanOverride")
+			s.HumanOverride.Encode(e)
+		}
+	}
 }
 
-var jsonFieldsNameOfContextDrop = [4]string{
+var jsonFieldsNameOfContextDrop = [5]string{
 	0: "component",
 	1: "reason",
 	2: "count",
 	3: "detail",
+	4: "humanOverride",
 }
 
 // Decode decodes ContextDrop from json.
@@ -1326,6 +1498,16 @@ func (s *ContextDrop) Decode(d *jx.Decoder) error {
 				return nil
 			}(); err != nil {
 				return errors.Wrap(err, "decode field \"detail\"")
+			}
+		case "humanOverride":
+			if err := func() error {
+				s.HumanOverride.Reset()
+				if err := s.HumanOverride.Decode(d); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"humanOverride\"")
 			}
 		default:
 			return d.Skip()
@@ -1671,6 +1853,142 @@ func (s ContextMessageRole) MarshalJSON() ([]byte, error) {
 
 // UnmarshalJSON implements stdjson.Unmarshaler.
 func (s *ContextMessageRole) UnmarshalJSON(data []byte) error {
+	d := jx.DecodeBytes(data)
+	return s.Decode(d)
+}
+
+// Encode implements json.Marshaler.
+func (s *ContextPolicy) Encode(e *jx.Encoder) {
+	e.ObjStart()
+	s.encodeFields(e)
+	e.ObjEnd()
+}
+
+// encodeFields encodes fields.
+func (s *ContextPolicy) encodeFields(e *jx.Encoder) {
+	{
+		if s.Pinned != nil {
+			e.FieldStart("pinned")
+			e.ArrStart()
+			for _, elem := range s.Pinned {
+				elem.Encode(e)
+			}
+			e.ArrEnd()
+		}
+	}
+	{
+		if s.Excluded != nil {
+			e.FieldStart("excluded")
+			e.ArrStart()
+			for _, elem := range s.Excluded {
+				elem.Encode(e)
+			}
+			e.ArrEnd()
+		}
+	}
+	{
+		if s.AutoRag.Set {
+			e.FieldStart("autoRag")
+			s.AutoRag.Encode(e)
+		}
+	}
+	{
+		if s.RetrievalQuery.Set {
+			e.FieldStart("retrievalQuery")
+			s.RetrievalQuery.Encode(e)
+		}
+	}
+}
+
+var jsonFieldsNameOfContextPolicy = [4]string{
+	0: "pinned",
+	1: "excluded",
+	2: "autoRag",
+	3: "retrievalQuery",
+}
+
+// Decode decodes ContextPolicy from json.
+func (s *ContextPolicy) Decode(d *jx.Decoder) error {
+	if s == nil {
+		return errors.New("invalid: unable to decode ContextPolicy to nil")
+	}
+
+	if err := d.ObjBytes(func(d *jx.Decoder, k []byte) error {
+		switch string(k) {
+		case "pinned":
+			if err := func() error {
+				s.Pinned = make([]ChunkRef, 0)
+				if err := d.Arr(func(d *jx.Decoder) error {
+					var elem ChunkRef
+					if err := elem.Decode(d); err != nil {
+						return err
+					}
+					s.Pinned = append(s.Pinned, elem)
+					return nil
+				}); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"pinned\"")
+			}
+		case "excluded":
+			if err := func() error {
+				s.Excluded = make([]ChunkRef, 0)
+				if err := d.Arr(func(d *jx.Decoder) error {
+					var elem ChunkRef
+					if err := elem.Decode(d); err != nil {
+						return err
+					}
+					s.Excluded = append(s.Excluded, elem)
+					return nil
+				}); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"excluded\"")
+			}
+		case "autoRag":
+			if err := func() error {
+				s.AutoRag.Reset()
+				if err := s.AutoRag.Decode(d); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"autoRag\"")
+			}
+		case "retrievalQuery":
+			if err := func() error {
+				s.RetrievalQuery.Reset()
+				if err := s.RetrievalQuery.Decode(d); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"retrievalQuery\"")
+			}
+		default:
+			return d.Skip()
+		}
+		return nil
+	}); err != nil {
+		return errors.Wrap(err, "decode ContextPolicy")
+	}
+
+	return nil
+}
+
+// MarshalJSON implements stdjson.Marshaler.
+func (s *ContextPolicy) MarshalJSON() ([]byte, error) {
+	e := jx.Encoder{}
+	s.Encode(&e)
+	return e.Bytes(), nil
+}
+
+// UnmarshalJSON implements stdjson.Unmarshaler.
+func (s *ContextPolicy) UnmarshalJSON(data []byte) error {
 	d := jx.DecodeBytes(data)
 	return s.Decode(d)
 }
@@ -5622,6 +5940,39 @@ func (s *OptCommitRequest) UnmarshalJSON(data []byte) error {
 	return s.Decode(d)
 }
 
+// Encode encodes ContextPolicy as json.
+func (o OptContextPolicy) Encode(e *jx.Encoder) {
+	if !o.Set {
+		return
+	}
+	o.Value.Encode(e)
+}
+
+// Decode decodes ContextPolicy from json.
+func (o *OptContextPolicy) Decode(d *jx.Decoder) error {
+	if o == nil {
+		return errors.New("invalid: unable to decode OptContextPolicy to nil")
+	}
+	o.Set = true
+	if err := o.Value.Decode(d); err != nil {
+		return err
+	}
+	return nil
+}
+
+// MarshalJSON implements stdjson.Marshaler.
+func (s OptContextPolicy) MarshalJSON() ([]byte, error) {
+	e := jx.Encoder{}
+	s.Encode(&e)
+	return e.Bytes(), nil
+}
+
+// UnmarshalJSON implements stdjson.Unmarshaler.
+func (s *OptContextPolicy) UnmarshalJSON(data []byte) error {
+	d := jx.DecodeBytes(data)
+	return s.Decode(d)
+}
+
 // Encode encodes CorpusJob as json.
 func (o OptCorpusJob) Encode(e *jx.Encoder) {
 	if !o.Set {
@@ -6747,9 +7098,15 @@ func (s *Session) encodeFields(e *jx.Encoder) {
 			s.UpdatedAt.Encode(e)
 		}
 	}
+	{
+		if s.ContextPolicy.Set {
+			e.FieldStart("contextPolicy")
+			s.ContextPolicy.Encode(e)
+		}
+	}
 }
 
-var jsonFieldsNameOfSession = [9]string{
+var jsonFieldsNameOfSession = [10]string{
 	0: "id",
 	1: "documentId",
 	2: "workspaceId",
@@ -6759,6 +7116,7 @@ var jsonFieldsNameOfSession = [9]string{
 	6: "tokenBudget",
 	7: "createdAt",
 	8: "updatedAt",
+	9: "contextPolicy",
 }
 
 // Decode decodes Session from json.
@@ -6863,6 +7221,16 @@ func (s *Session) Decode(d *jx.Decoder) error {
 				return nil
 			}(); err != nil {
 				return errors.Wrap(err, "decode field \"updatedAt\"")
+			}
+		case "contextPolicy":
+			if err := func() error {
+				s.ContextPolicy.Reset()
+				if err := s.ContextPolicy.Decode(d); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"contextPolicy\"")
 			}
 		default:
 			return d.Skip()
@@ -7311,9 +7679,15 @@ func (s *Task) encodeFields(e *jx.Encoder) {
 			s.Options.Encode(e)
 		}
 	}
+	{
+		if s.Context.Set {
+			e.FieldStart("context")
+			s.Context.Encode(e)
+		}
+	}
 }
 
-var jsonFieldsNameOfTask = [8]string{
+var jsonFieldsNameOfTask = [9]string{
 	0: "sessionId",
 	1: "modeName",
 	2: "documentId",
@@ -7322,6 +7696,7 @@ var jsonFieldsNameOfTask = [8]string{
 	5: "selection",
 	6: "mentions",
 	7: "options",
+	8: "context",
 }
 
 // Decode decodes Task from json.
@@ -7329,7 +7704,7 @@ func (s *Task) Decode(d *jx.Decoder) error {
 	if s == nil {
 		return errors.New("invalid: unable to decode Task to nil")
 	}
-	var requiredBitSet [1]uint8
+	var requiredBitSet [2]uint8
 
 	if err := d.ObjBytes(func(d *jx.Decoder, k []byte) error {
 		switch string(k) {
@@ -7428,6 +7803,16 @@ func (s *Task) Decode(d *jx.Decoder) error {
 			}(); err != nil {
 				return errors.Wrap(err, "decode field \"options\"")
 			}
+		case "context":
+			if err := func() error {
+				s.Context.Reset()
+				if err := s.Context.Decode(d); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"context\"")
+			}
 		default:
 			return d.Skip()
 		}
@@ -7437,8 +7822,9 @@ func (s *Task) Decode(d *jx.Decoder) error {
 	}
 	// Validate required fields.
 	var failures []validate.FieldError
-	for i, mask := range [1]uint8{
+	for i, mask := range [2]uint8{
 		0b00010111,
+		0b00000000,
 	} {
 		if result := (requiredBitSet[i] & mask) ^ mask; result != 0 {
 			// Mask only required fields and check equality to mask using XOR.

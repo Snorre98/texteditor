@@ -2,13 +2,17 @@ package loop
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"sync"
 	"testing"
 	"time"
 
+	_ "modernc.org/sqlite"
+
 	"texteditor/internal/assembler"
 	"texteditor/internal/filesystem"
+	"texteditor/internal/meter"
 	"texteditor/internal/retriever"
 	"texteditor/internal/session"
 	"texteditor/internal/shard"
@@ -112,14 +116,19 @@ func (stubDoc) History(string) ([]dto.Revision, error)              { return nil
 func (stubDoc) Candidates(string, string) ([]dto.Candidate, error)  { return nil, nil }
 
 type stubRetriever struct {
-	mu     sync.Mutex
-	chunks []dto.Chunk
-	calls  []int // topK per Query
+	mu        sync.Mutex
+	chunks    []dto.Chunk
+	calls     []int // topK per Query
+	texts     []string
+	getChunks []dto.Chunk
+	getRefs   [][]dto.ChunkRef
+	getCalls  int
 }
 
-func (s *stubRetriever) Query(_ context.Context, _ string, topK int) ([]dto.Chunk, error) {
+func (s *stubRetriever) Query(_ context.Context, text string, topK int) ([]dto.Chunk, error) {
 	s.mu.Lock()
 	s.calls = append(s.calls, topK)
+	s.texts = append(s.texts, text)
 	s.mu.Unlock()
 	return s.chunks, nil
 }
@@ -127,14 +136,30 @@ func (*stubRetriever) Index(context.Context, string) error             { return 
 func (*stubRetriever) IndexPath(context.Context, string, string) error { return nil }
 func (*stubRetriever) Evict(context.Context, string) error             { return nil }
 func (*stubRetriever) Status() ([]dto.IndexedDocument, error)          { return nil, nil }
-func (*stubRetriever) Get(context.Context, []dto.ChunkRef) ([]dto.Chunk, error) {
-	return nil, nil
+func (s *stubRetriever) Get(_ context.Context, refs []dto.ChunkRef) ([]dto.Chunk, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.getCalls++
+	s.getRefs = append(s.getRefs, refs)
+	return s.getChunks, nil
 }
 
 func (s *stubRetriever) queries() []int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return append([]int(nil), s.calls...)
+}
+
+func (s *stubRetriever) queryTexts() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.texts...)
+}
+
+func (s *stubRetriever) getCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.getCalls
 }
 
 // stubPipeline supplies the one global policy (ADR-0045 §3) to the loop.
@@ -144,6 +169,7 @@ func (s stubPipeline) Policy() dto.PipelinePolicy { return s.policy }
 
 type stubSessions struct {
 	hist      []dto.Message
+	policy    json.RawMessage
 	mu        sync.Mutex
 	snapshots map[string]json.RawMessage
 }
@@ -155,9 +181,26 @@ func (s *stubSessions) ListByWorkspace() ([]dto.Session, error)      { return ni
 func (s *stubSessions) Create(string, *string, string) (dto.Session, error) {
 	return dto.Session{}, nil
 }
-func (s *stubSessions) Resume(string) (dto.Session, error)    { return dto.Session{}, nil }
+func (s *stubSessions) Resume(string) (dto.Session, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return dto.Session{ContextPolicy: s.policy}, nil
+}
 func (s *stubSessions) Append(string, dto.Message) error      { return nil }
 func (s *stubSessions) History(string) ([]dto.Message, error) { return s.hist, nil }
+
+func (s *stubSessions) SetContextPolicy(_ string, policy json.RawMessage) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.policy = append(json.RawMessage(nil), policy...)
+	return nil
+}
+
+func (s *stubSessions) ContextPolicy(string) (json.RawMessage, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.policy, nil
+}
 
 func (s *stubSessions) SaveContext(turnID, sessionID string, snapshot json.RawMessage) error {
 	s.mu.Lock()
@@ -588,6 +631,8 @@ func (budgetSessions) SaveContext(string, string, json.RawMessage) error {
 func (budgetSessions) TurnContext(string) (json.RawMessage, error) {
 	return nil, session.ErrNotFound
 }
+func (budgetSessions) SetContextPolicy(string, json.RawMessage) error { return nil }
+func (budgetSessions) ContextPolicy(string) (json.RawMessage, error)  { return nil, nil }
 
 type budgetMeter struct{ used int }
 
@@ -1274,4 +1319,331 @@ func TestInjectDocumentIDCarriesMode(t *testing.T) {
 	if _, ok := m["modeName"]; ok {
 		t.Fatalf("diff args = %v, must not carry modeName", m)
 	}
+}
+
+// --------------------- context tray (ADR-0049 §7/§8/§11) ---------------------
+
+func boolPtr(b bool) *bool    { return &b }
+func strPtr(s string) *string { return &s }
+
+// runAndCollect runs one turn and returns its events, turnID, and snapshot.
+func runAndCollect(t *testing.T, deps Deps, task dto.Task) ([]dto.Event, string, dto.ContextSnapshot) {
+	t.Helper()
+	bus := deps.Bus.(*stubBus)
+	l := New(deps)
+	turnID, err := l.Run(context.Background(), task)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitDone(t, bus)
+	events := busEvents(t, bus)
+	return events, turnID, snapshotOf(t, events)
+}
+
+func snapshotOf(t *testing.T, events []dto.Event) dto.ContextSnapshot {
+	t.Helper()
+	var snap dto.ContextSnapshot
+	found := false
+	for _, ev := range events {
+		if ev.Type == "context" {
+			if err := json.Unmarshal(ev.Data, &snap); err != nil {
+				t.Fatal(err)
+			}
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("no context event: %+v", events)
+	}
+	return snap
+}
+
+func ragChunksOf(t *testing.T, events []dto.Event) []dto.Chunk {
+	t.Helper()
+	for _, ev := range events {
+		if ev.Type == "rag" {
+			var rag struct {
+				Ok     bool        `json:"ok"`
+				Chunks []dto.Chunk `json:"chunks"`
+			}
+			if err := json.Unmarshal(ev.Data, &rag); err != nil {
+				t.Fatal(err)
+			}
+			return rag.Chunks
+		}
+	}
+	t.Fatalf("no rag event: %+v", events)
+	return nil
+}
+
+// TestTrayExclusionFiltersChunk: a per-turn excluded ref drops the chunk from
+// the payload and the snapshot records the removal ("Removing a chunk in the
+// tray keeps it out of the payload").
+func TestTrayExclusionFiltersChunk(t *testing.T) {
+	bus := &stubBus{done: make(chan struct{})}
+	deps := happyPathDeps(bus)
+	svc := shardSvc(deps)
+	svc.Retriever = &stubRetriever{chunks: []dto.Chunk{
+		{ChunkKey: "/v/a.md#0", Path: "/v/a.md", Text: "keep me"},
+		{ChunkKey: "/v/b.md#0", Path: "/v/b.md", Text: "drop me"},
+	}}
+	deps.Assembler = assembler.New()
+
+	task := dto.Task{
+		SessionID: "s1", ModeName: "proofreader", DocumentID: "d1", UserInput: "q",
+		Context: &dto.ContextPolicy{Excluded: []dto.ChunkRef{{Path: "/v/b.md", ChunkKey: "/v/b.md#0"}}},
+	}
+	events, _, snap := runAndCollect(t, deps, task)
+
+	if rag := ragChunksOf(t, events); len(rag) != 1 || rag[0].Path != "/v/a.md" {
+		t.Fatalf("rag chunks = %+v, want only /v/a.md (post-exclude)", rag)
+	}
+	for _, c := range snap.Chunks {
+		if c.Path == "/v/b.md" {
+			t.Fatalf("excluded chunk present in snapshot: %+v", snap.Chunks)
+		}
+	}
+	var excluded *dto.ContextDrop
+	for i := range snap.Drops {
+		if snap.Drops[i].Reason == "excluded" {
+			excluded = &snap.Drops[i]
+		}
+	}
+	if excluded == nil || excluded.Count != 1 || excluded.Component != "rag" {
+		t.Fatalf("excluded drop = %+v, want rag/excluded count 1", excluded)
+	}
+}
+
+// TestSessionPinPersistsAndResolvesViaGet: a session pin survives into the next
+// turn (no Task.context), resolves through Retriever.Get even though it is not
+// in the top-k, and is labeled a human override; auto chunks stay unlabeled.
+func TestSessionPinPersistsAndResolvesViaGet(t *testing.T) {
+	bus := &stubBus{done: make(chan struct{})}
+	deps := happyPathDeps(bus)
+	svc := shardSvc(deps)
+	ret := &stubRetriever{
+		chunks:    []dto.Chunk{{ChunkKey: "/v/auto.md#0", Path: "/v/auto.md", Text: "auto passage"}},
+		getChunks: []dto.Chunk{{ChunkKey: "/v/pin.md#2", Path: "/v/pin.md", Text: "pinned passage"}},
+	}
+	svc.Retriever = ret
+	svc.Sessions.(*stubSessions).policy = json.RawMessage(`{"pinned":[{"path":"/v/pin.md","chunkKey":"/v/pin.md#2"}]}`)
+	deps.Assembler = assembler.New()
+
+	events, _, snap := runAndCollect(t, deps, dto.Task{
+		SessionID: "s1", ModeName: "proofreader", DocumentID: "d1", UserInput: "q",
+	})
+
+	if ret.getCount() != 1 {
+		t.Fatalf("Retriever.Get calls = %d, want 1 for the session pin", ret.getCount())
+	}
+	if len(snap.Chunks) != 2 {
+		t.Fatalf("snapshot chunks = %+v, want auto + pinned", snap.Chunks)
+	}
+	pinned := snap.Chunks[0]
+	if !pinned.Pinned || !pinned.HumanOverride || pinned.Path != "/v/pin.md" {
+		t.Fatalf("pinned chunk = %+v, want labeled human override", pinned)
+	}
+	auto := snap.Chunks[1]
+	if auto.Pinned || auto.Path != "/v/auto.md" {
+		t.Fatalf("auto chunk = %+v, want unlabeled", auto)
+	}
+	if rag := ragChunksOf(t, events); len(rag) != 1 || rag[0].Path != "/v/auto.md" {
+		t.Fatalf("rag event must stay the auto-retrieved set: %+v", rag)
+	}
+	var pinnedRow bool
+	for _, m := range snap.Messages {
+		if m.Component == "rag" && m.Pinned {
+			pinnedRow = true
+		}
+	}
+	if !pinnedRow {
+		t.Fatalf("snapshot messages lack a pinned rag row: %+v", snap.Messages)
+	}
+}
+
+// TestAutoRagFalseSkipsRetrievalButAppliesPins: autoRag=false suppresses Query
+// but pins are still resolved and included.
+func TestAutoRagFalseSkipsRetrievalButAppliesPins(t *testing.T) {
+	bus := &stubBus{done: make(chan struct{})}
+	deps := happyPathDeps(bus)
+	svc := shardSvc(deps)
+	ret := &stubRetriever{
+		chunks:    []dto.Chunk{{ChunkKey: "/v/auto.md#0", Path: "/v/auto.md", Text: "auto"}},
+		getChunks: []dto.Chunk{{ChunkKey: "/v/pin.md#0", Path: "/v/pin.md", Text: "pin"}},
+	}
+	svc.Retriever = ret
+	deps.Assembler = assembler.New()
+
+	_, _, snap := runAndCollect(t, deps, dto.Task{
+		SessionID: "s1", ModeName: "proofreader", DocumentID: "d1", UserInput: "q",
+		Context: &dto.ContextPolicy{
+			AutoRag: boolPtr(false),
+			Pinned:  []dto.ChunkRef{{Path: "/v/pin.md", ChunkKey: "/v/pin.md#0"}},
+		},
+	})
+
+	if got := len(ret.queries()); got != 0 {
+		t.Fatalf("Query calls = %d, want 0 when autoRag=false", got)
+	}
+	if ret.getCount() != 1 {
+		t.Fatalf("Get calls = %d, want 1 (pins still apply)", ret.getCount())
+	}
+	if snap.AutoRag {
+		t.Fatalf("snapshot autoRag = true, want false")
+	}
+	if len(snap.Chunks) != 1 || !snap.Chunks[0].Pinned {
+		t.Fatalf("snapshot chunks = %+v, want only the pinned chunk", snap.Chunks)
+	}
+}
+
+// TestRetrievalQueryOverride: the override query reaches the retriever and the
+// snapshot, but never replaces the user message.
+func TestRetrievalQueryOverride(t *testing.T) {
+	bus := &stubBus{done: make(chan struct{})}
+	deps := happyPathDeps(bus)
+	svc := shardSvc(deps)
+	ret := &stubRetriever{}
+	svc.Retriever = ret
+	deps.Assembler = assembler.New()
+
+	_, _, snap := runAndCollect(t, deps, dto.Task{
+		SessionID: "s1", ModeName: "proofreader", DocumentID: "d1", UserInput: "the real request",
+		Context: &dto.ContextPolicy{RetrievalQuery: strPtr("a custom retrieval query")},
+	})
+
+	texts := ret.queryTexts()
+	if len(texts) != 1 || texts[0] != "a custom retrieval query" {
+		t.Fatalf("retrieval texts = %v, want the override", texts)
+	}
+	if snap.RetrievalQuery != "a custom retrieval query" {
+		t.Fatalf("snapshot retrievalQuery = %q", snap.RetrievalQuery)
+	}
+}
+
+// TestReplaceWhenPresentEmptyPinsSuppressSession: an explicit empty pinned list
+// clears the session pins for that turn only.
+func TestReplaceWhenPresentEmptyPinsSuppressSession(t *testing.T) {
+	bus := &stubBus{done: make(chan struct{})}
+	deps := happyPathDeps(bus)
+	svc := shardSvc(deps)
+	ret := &stubRetriever{getChunks: []dto.Chunk{{ChunkKey: "/v/pin.md#0", Path: "/v/pin.md", Text: "pin"}}}
+	svc.Retriever = ret
+	svc.Sessions.(*stubSessions).policy = json.RawMessage(`{"pinned":[{"path":"/v/pin.md","chunkKey":"/v/pin.md#0"}]}`)
+	deps.Assembler = assembler.New()
+
+	_, _, snap := runAndCollect(t, deps, dto.Task{
+		SessionID: "s1", ModeName: "proofreader", DocumentID: "d1", UserInput: "q",
+		Context: &dto.ContextPolicy{Pinned: []dto.ChunkRef{}},
+	})
+
+	if ret.getCount() != 0 {
+		t.Fatalf("Get calls = %d, want 0 (session pins suppressed)", ret.getCount())
+	}
+	if len(snap.Chunks) != 0 {
+		t.Fatalf("snapshot chunks = %+v, want none (pins cleared)", snap.Chunks)
+	}
+}
+
+// TestPerTurnOverrideDoesNotPersist: the override is ephemeral — the session
+// row's policy is unchanged after a turn carrying Task.context.
+func TestPerTurnOverrideDoesNotPersist(t *testing.T) {
+	bus := &stubBus{done: make(chan struct{})}
+	deps := happyPathDeps(bus)
+	svc := shardSvc(deps)
+	svc.Retriever = &stubRetriever{getChunks: []dto.Chunk{{ChunkKey: "/v/pin.md#0", Path: "/v/pin.md", Text: "pin"}}}
+	sessions := svc.Sessions.(*stubSessions)
+	deps.Assembler = assembler.New()
+
+	_, _, _ = runAndCollect(t, deps, dto.Task{
+		SessionID: "s1", ModeName: "proofreader", DocumentID: "d1", UserInput: "q",
+		Context: &dto.ContextPolicy{
+			Pinned:  []dto.ChunkRef{{Path: "/v/pin.md", ChunkKey: "/v/pin.md#0"}},
+			AutoRag: boolPtr(false),
+		},
+	})
+
+	raw, err := sessions.ContextPolicy("s1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if raw != nil {
+		t.Fatalf("session policy persisted from a per-turn override: %s", raw)
+	}
+}
+
+// TestPinnedOverBudgetLabeledAndMeterSum: pins+auto over the RAG budget truncate
+// (pinned drops labeled human override) and the meter's component sum still
+// equals the provider-reported prompt total.
+func TestPinnedOverBudgetLabeledAndMeterSum(t *testing.T) {
+	bus := &stubBus{done: make(chan struct{})}
+	deps := happyPathDeps(bus)
+	svc := shardSvc(deps)
+	long := ""
+	for i := 0; i < 400; i++ {
+		long += "x"
+	}
+	svc.Retriever = &stubRetriever{
+		chunks: []dto.Chunk{{ChunkKey: "/v/auto.md#0", Path: "/v/auto.md", Text: long}},
+		getChunks: []dto.Chunk{
+			{ChunkKey: "/v/p1.md#0", Path: "/v/p1.md", Text: long},
+			{ChunkKey: "/v/p2.md#0", Path: "/v/p2.md", Text: long},
+		},
+	}
+	svc.Meter = newRealMeter(t)
+	deps.Assembler = assembler.New()
+	deps.Pipeline = stubPipeline{policy: dto.PipelinePolicy{
+		MaxSteps: 6, MaxHistoryTokens: 32000, MaxRagTokens: 120, MaxMentionTokens: 16000, AutoRagTopK: 3,
+	}}
+
+	_, _, snap := runAndCollect(t, deps, dto.Task{
+		SessionID: "s1", ModeName: "proofreader", DocumentID: "d1", UserInput: "q",
+		Context: &dto.ContextPolicy{Pinned: []dto.ChunkRef{
+			{Path: "/v/p1.md", ChunkKey: "/v/p1.md#0"},
+			{Path: "/v/p2.md", ChunkKey: "/v/p2.md#0"},
+		}},
+	})
+
+	var pinnedDrop, autoDrop *dto.ContextDrop
+	for i := range snap.Drops {
+		if snap.Drops[i].Reason != "rag-budget" {
+			continue
+		}
+		if snap.Drops[i].HumanOverride {
+			pinnedDrop = &snap.Drops[i]
+		} else {
+			autoDrop = &snap.Drops[i]
+		}
+	}
+	if pinnedDrop == nil || pinnedDrop.Count != 1 {
+		t.Fatalf("pinned drop = %+v, want labeled count 1", pinnedDrop)
+	}
+	if autoDrop == nil || autoDrop.Count != 1 {
+		t.Fatalf("auto drop = %+v, want count 1", autoDrop)
+	}
+
+	m, err := svc.Meter.SessionBreakdown(context.Background(), "s1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := 0
+	for _, c := range m.Components {
+		sum += c.PromptTokens
+	}
+	if sum != 14 { // the happy-path provider reports inputTokens=14
+		t.Fatalf("meter prompt sum = %d, want 14 (provider total)", sum)
+	}
+}
+
+// newRealMeter returns a meter over an in-memory meter.db for the invariant test.
+func newRealMeter(t *testing.T) meter.Interface {
+	t.Helper()
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	if err := meter.Migrate(context.Background(), db); err != nil {
+		t.Fatal(err)
+	}
+	return meter.New(db, nil)
 }

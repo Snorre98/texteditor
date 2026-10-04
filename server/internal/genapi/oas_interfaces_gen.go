@@ -25,6 +25,10 @@ type PutCorpusRes interface {
 	putCorpusRes()
 }
 
+type PutSessionContextRes interface {
+	putSessionContextRes()
+}
+
 type SaveDocumentRes interface {
 	saveDocumentRes()
 }

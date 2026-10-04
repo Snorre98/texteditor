@@ -493,6 +493,48 @@ func (s *Capabilities) SetSupportsSystemPrompt(val bool) {
 	s.SupportsSystemPrompt = val
 }
 
+// A stable reference to one indexed chunk, used by the context tray for pin/exclude decisions
+// (ADR-0049 §8). `chunkKey` is path#index for corpus files and documentID#index for versioned
+// documents; `path` is the canonical absolute file path. When `chunkKey` is omitted the ref names
+// every chunk under `path`; `hash` optionally pins the chunk's content hash so a stale pin is
+// detectable (advisory in Phase C4).
+// Ref: #/components/schemas/ChunkRef
+type ChunkRef struct {
+	Path     string    `json:"path"`
+	ChunkKey OptString `json:"chunkKey"`
+	Hash     OptString `json:"hash"`
+}
+
+// GetPath returns the value of Path.
+func (s *ChunkRef) GetPath() string {
+	return s.Path
+}
+
+// GetChunkKey returns the value of ChunkKey.
+func (s *ChunkRef) GetChunkKey() OptString {
+	return s.ChunkKey
+}
+
+// GetHash returns the value of Hash.
+func (s *ChunkRef) GetHash() OptString {
+	return s.Hash
+}
+
+// SetPath sets the value of Path.
+func (s *ChunkRef) SetPath(val string) {
+	s.Path = val
+}
+
+// SetChunkKey sets the value of ChunkKey.
+func (s *ChunkRef) SetChunkKey(val OptString) {
+	s.ChunkKey = val
+}
+
+// SetHash sets the value of Hash.
+func (s *ChunkRef) SetHash(val OptString) {
+	s.Hash = val
+}
+
 // Optional accept options for `commitDocument` (ADR-0047 §3).
 // Ref: #/components/schemas/CommitRequest
 type CommitRequest struct {
@@ -522,6 +564,11 @@ type ContextChunk struct {
 	Source   OptString  `json:"source"`
 	Path     OptString  `json:"path"`
 	Heading  OptString  `json:"heading"`
+	// True when the chunk is a human-pinned override (Phase C4).
+	Pinned OptBool `json:"pinned"`
+	// True when the chunk is a human override (Phase C4; pins bypass the Phase F decision gate, never
+	// budgets).
+	HumanOverride OptBool `json:"humanOverride"`
 }
 
 // GetBlockId returns the value of BlockId.
@@ -559,6 +606,16 @@ func (s *ContextChunk) GetHeading() OptString {
 	return s.Heading
 }
 
+// GetPinned returns the value of Pinned.
+func (s *ContextChunk) GetPinned() OptBool {
+	return s.Pinned
+}
+
+// GetHumanOverride returns the value of HumanOverride.
+func (s *ContextChunk) GetHumanOverride() OptBool {
+	return s.HumanOverride
+}
+
 // SetBlockId sets the value of BlockId.
 func (s *ContextChunk) SetBlockId(val string) {
 	s.BlockId = val
@@ -594,6 +651,16 @@ func (s *ContextChunk) SetHeading(val OptString) {
 	s.Heading = val
 }
 
+// SetPinned sets the value of Pinned.
+func (s *ContextChunk) SetPinned(val OptBool) {
+	s.Pinned = val
+}
+
+// SetHumanOverride sets the value of HumanOverride.
+func (s *ContextChunk) SetHumanOverride(val OptBool) {
+	s.HumanOverride = val
+}
+
 // One labeled truncation/drop record. Truncation is never silent (ADR-0044 §3, failure-semantics
 // §4).
 // Ref: #/components/schemas/ContextDrop
@@ -602,6 +669,9 @@ type ContextDrop struct {
 	Reason    string               `json:"reason"`
 	Count     int                  `json:"count"`
 	Detail    OptString            `json:"detail"`
+	// True when the dropped item was a human override (a pinned chunk dropped by truncation, Phase C4);
+	// labels the override in the snapshot.
+	HumanOverride OptBool `json:"humanOverride"`
 }
 
 // GetComponent returns the value of Component.
@@ -624,6 +694,11 @@ func (s *ContextDrop) GetDetail() OptString {
 	return s.Detail
 }
 
+// GetHumanOverride returns the value of HumanOverride.
+func (s *ContextDrop) GetHumanOverride() OptBool {
+	return s.HumanOverride
+}
+
 // SetComponent sets the value of Component.
 func (s *ContextDrop) SetComponent(val ContextDropComponent) {
 	s.Component = val
@@ -642,6 +717,11 @@ func (s *ContextDrop) SetCount(val int) {
 // SetDetail sets the value of Detail.
 func (s *ContextDrop) SetDetail(val OptString) {
 	s.Detail = val
+}
+
+// SetHumanOverride sets the value of HumanOverride.
+func (s *ContextDrop) SetHumanOverride(val OptBool) {
+	s.HumanOverride = val
 }
 
 type ContextDropComponent string
@@ -869,6 +949,67 @@ func (s *ContextMessageRole) UnmarshalText(data []byte) error {
 	default:
 		return errors.Errorf("invalid value: %q", data)
 	}
+}
+
+// A session-level context policy (persisted) or a per-turn override (`Task.context`). All fields are
+// optional. Merge is replace-when-present per field: a present field replaces the lower layer
+// wholesale (an explicit empty `pinned`/`excluded` list clears that field), while an absent field
+// inherits it. Pins are human overrides that bypass the decision gate (Phase F) but never budgets;
+// auto-retrieved chunks remain gated. The client sends decisions, never payload text.
+// Ref: #/components/schemas/ContextPolicy
+type ContextPolicy struct {
+	// Chunks to include as human-pinned overrides, front-loaded deterministically and resolved through the
+	// index (works even when not in the retrieval top-k).
+	Pinned []ChunkRef `json:"pinned"`
+	// Retrieved chunks to drop from the payload, matched by `chunkKey` (or by canonical `path` when only a
+	// path is given); each removal is recorded as a labeled drop.
+	Excluded []ChunkRef `json:"excluded"`
+	// Whether auto-RAG retrieval runs. When absent the persisted session policy (or the default, true)
+	// applies. When false, retrieval is skipped but pins still apply.
+	AutoRag OptBool `json:"autoRag"`
+	// The query auto-RAG runs. When absent the persisted session policy, else `Task.userInput`, applies.
+	// Affects retrieval only, never the user message.
+	RetrievalQuery OptString `json:"retrievalQuery"`
+}
+
+// GetPinned returns the value of Pinned.
+func (s *ContextPolicy) GetPinned() []ChunkRef {
+	return s.Pinned
+}
+
+// GetExcluded returns the value of Excluded.
+func (s *ContextPolicy) GetExcluded() []ChunkRef {
+	return s.Excluded
+}
+
+// GetAutoRag returns the value of AutoRag.
+func (s *ContextPolicy) GetAutoRag() OptBool {
+	return s.AutoRag
+}
+
+// GetRetrievalQuery returns the value of RetrievalQuery.
+func (s *ContextPolicy) GetRetrievalQuery() OptString {
+	return s.RetrievalQuery
+}
+
+// SetPinned sets the value of Pinned.
+func (s *ContextPolicy) SetPinned(val []ChunkRef) {
+	s.Pinned = val
+}
+
+// SetExcluded sets the value of Excluded.
+func (s *ContextPolicy) SetExcluded(val []ChunkRef) {
+	s.Excluded = val
+}
+
+// SetAutoRag sets the value of AutoRag.
+func (s *ContextPolicy) SetAutoRag(val OptBool) {
+	s.AutoRag = val
+}
+
+// SetRetrievalQuery sets the value of RetrievalQuery.
+func (s *ContextPolicy) SetRetrievalQuery(val OptString) {
+	s.RetrievalQuery = val
 }
 
 // The engine-owned, persisted record of one turn's assembled context (ADR-0044 §4, ADR-0049 §7):
@@ -2525,8 +2666,9 @@ func (s *NotFound) SetID(val string) {
 	s.ID = val
 }
 
-func (*NotFound) getSessionMeterRes() {}
-func (*NotFound) getTurnContextRes()  {}
+func (*NotFound) getSessionMeterRes()   {}
+func (*NotFound) getTurnContextRes()    {}
+func (*NotFound) putSessionContextRes() {}
 
 type NotFoundError string
 
@@ -2750,6 +2892,52 @@ func (o OptCommitRequest) Get() (v CommitRequest, ok bool) {
 
 // Or returns value if set, or given parameter if does not.
 func (o OptCommitRequest) Or(d CommitRequest) CommitRequest {
+	if v, ok := o.Get(); ok {
+		return v
+	}
+	return d
+}
+
+// NewOptContextPolicy returns new OptContextPolicy with value set to v.
+func NewOptContextPolicy(v ContextPolicy) OptContextPolicy {
+	return OptContextPolicy{
+		Value: v,
+		Set:   true,
+	}
+}
+
+// OptContextPolicy is optional ContextPolicy.
+type OptContextPolicy struct {
+	Value ContextPolicy
+	Set   bool
+}
+
+// IsSet returns true if OptContextPolicy was set.
+func (o OptContextPolicy) IsSet() bool { return o.Set }
+
+// Reset unsets value.
+func (o *OptContextPolicy) Reset() {
+	var v ContextPolicy
+	o.Value = v
+	o.Set = false
+}
+
+// SetTo sets value to v.
+func (o *OptContextPolicy) SetTo(v ContextPolicy) {
+	o.Set = true
+	o.Value = v
+}
+
+// Get returns value and boolean that denotes whether value was set.
+func (o OptContextPolicy) Get() (v ContextPolicy, ok bool) {
+	if !o.Set {
+		return v, false
+	}
+	return o.Value, true
+}
+
+// Or returns value if set, or given parameter if does not.
+func (o OptContextPolicy) Or(d ContextPolicy) ContextPolicy {
 	if v, ok := o.Get(); ok {
 		return v
 	}
@@ -3396,13 +3584,14 @@ type Session struct {
 	DocumentId string `json:"documentId"`
 	// The workspace whose shard owns this session (ADR-0049 §5). Optional on the wire for backward
 	// compatibility; always populated by the engine on responses.
-	WorkspaceId   OptString `json:"workspaceId"`
-	AnchorBlockId OptString `json:"anchorBlockId"`
-	ModeType      OptString `json:"modeType"`
-	Title         OptString `json:"title"`
-	TokenBudget   OptInt    `json:"tokenBudget"`
-	CreatedAt     OptInt64  `json:"createdAt"`
-	UpdatedAt     OptInt64  `json:"updatedAt"`
+	WorkspaceId   OptString        `json:"workspaceId"`
+	AnchorBlockId OptString        `json:"anchorBlockId"`
+	ModeType      OptString        `json:"modeType"`
+	Title         OptString        `json:"title"`
+	TokenBudget   OptInt           `json:"tokenBudget"`
+	CreatedAt     OptInt64         `json:"createdAt"`
+	UpdatedAt     OptInt64         `json:"updatedAt"`
+	ContextPolicy OptContextPolicy `json:"contextPolicy"`
 }
 
 // GetID returns the value of ID.
@@ -3450,6 +3639,11 @@ func (s *Session) GetUpdatedAt() OptInt64 {
 	return s.UpdatedAt
 }
 
+// GetContextPolicy returns the value of ContextPolicy.
+func (s *Session) GetContextPolicy() OptContextPolicy {
+	return s.ContextPolicy
+}
+
 // SetID sets the value of ID.
 func (s *Session) SetID(val string) {
 	s.ID = val
@@ -3494,6 +3688,13 @@ func (s *Session) SetCreatedAt(val OptInt64) {
 func (s *Session) SetUpdatedAt(val OptInt64) {
 	s.UpdatedAt = val
 }
+
+// SetContextPolicy sets the value of ContextPolicy.
+func (s *Session) SetContextPolicy(val OptContextPolicy) {
+	s.ContextPolicy = val
+}
+
+func (*Session) putSessionContextRes() {}
 
 // A session's cumulative token meter, aggregated from the workspace shard's meter_events by component
 // (ADR-0026 §5, ADR-0044 §4). Newest session state is workspace-scoped; there is no global meter
@@ -3694,11 +3895,12 @@ type Task struct {
 	// The workspace whose shard owns this turn's sessions/meter/index (ADR-0049 §5). Optional: when
 	// absent the engine resolves-or-creates a workspace rooted at the canonical parent directory of the
 	// turn's document (keeps pre-workspace clients working).
-	WorkspaceId OptString      `json:"workspaceId"`
-	UserInput   string         `json:"userInput"`
-	Selection   OptSelection   `json:"selection"`
-	Mentions    []Mention      `json:"mentions"`
-	Options     OptTurnOptions `json:"options"`
+	WorkspaceId OptString        `json:"workspaceId"`
+	UserInput   string           `json:"userInput"`
+	Selection   OptSelection     `json:"selection"`
+	Mentions    []Mention        `json:"mentions"`
+	Options     OptTurnOptions   `json:"options"`
+	Context     OptContextPolicy `json:"context"`
 }
 
 // GetSessionId returns the value of SessionId.
@@ -3741,6 +3943,11 @@ func (s *Task) GetOptions() OptTurnOptions {
 	return s.Options
 }
 
+// GetContext returns the value of Context.
+func (s *Task) GetContext() OptContextPolicy {
+	return s.Context
+}
+
 // SetSessionId sets the value of SessionId.
 func (s *Task) SetSessionId(val string) {
 	s.SessionId = val
@@ -3779,6 +3986,11 @@ func (s *Task) SetMentions(val []Mention) {
 // SetOptions sets the value of Options.
 func (s *Task) SetOptions(val OptTurnOptions) {
 	s.Options = val
+}
+
+// SetContext sets the value of Context.
+func (s *Task) SetContext(val OptContextPolicy) {
+	s.Context = val
 }
 
 // Ref: #/components/schemas/ToolDef

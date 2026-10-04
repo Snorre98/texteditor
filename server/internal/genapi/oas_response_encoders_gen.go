@@ -502,6 +502,37 @@ func encodePutCorpusResponse(response PutCorpusRes, w http.ResponseWriter, span 
 	}
 }
 
+func encodePutSessionContextResponse(response PutSessionContextRes, w http.ResponseWriter, span trace.Span) error {
+	switch response := response.(type) {
+	case *Session:
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(200)
+
+		e := new(jx.Encoder)
+		response.Encode(e)
+		if _, err := e.WriteTo(w); err != nil {
+			return errors.Wrap(err, "write")
+		}
+
+		return nil
+
+	case *NotFound:
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(404)
+
+		e := new(jx.Encoder)
+		response.Encode(e)
+		if _, err := e.WriteTo(w); err != nil {
+			return errors.Wrap(err, "write")
+		}
+
+		return nil
+
+	default:
+		return errors.Errorf("unexpected response type: %T", response)
+	}
+}
+
 func encodeSaveDocumentResponse(response SaveDocumentRes, w http.ResponseWriter, span trace.Span) error {
 	switch response := response.(type) {
 	case *Revision:

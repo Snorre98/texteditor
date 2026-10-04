@@ -460,3 +460,129 @@ func TestAssemblePayloadPurity(t *testing.T) {
 		t.Fatalf("breakdown not deterministic")
 	}
 }
+
+// TestPinnedChunksFrontLoadedAndLabeled: pinned chunks are spliced immediately
+// after the system message, before history and the auto-retrieved chunks, and
+// their provenance rows carry the human-override label (ADR-0049 §7/§11/§14).
+func TestPinnedChunksFrontLoadedAndLabeled(t *testing.T) {
+	a := New()
+	p, _, err := a.Assemble(context.Background(), dto.AssemblerInput{
+		Mode:   dto.Mode{SystemPrompt: "sys"},
+		Policy: dto.PipelinePolicy{MaxRagTokens: 1000, MaxHistoryTokens: 1000},
+		Pinned: []dto.Chunk{
+			{ChunkKey: "p1", Path: "/v/p1.md", Text: "pin one"},
+			{ChunkKey: "p2", Path: "/v/p2.md", Text: "pin two"},
+		},
+		RAGChunks: []dto.Chunk{{ChunkKey: "a1", Path: "/v/a1.md", Text: "auto one"}},
+		History:   []dto.Message{{Role: "user", Content: "earlier"}},
+		UserInput: "u",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Order: system, pinned(p1,p2), history, auto(a1), user.
+	wantComponents := []string{"system", "rag", "rag", "history", "rag", "user"}
+	if len(p.Provenance) != len(wantComponents) {
+		t.Fatalf("provenance len = %d (%+v), want %d", len(p.Provenance), p.Provenance, len(wantComponents))
+	}
+	for i, want := range wantComponents {
+		if p.Provenance[i].Component != want {
+			t.Fatalf("provenance[%d].Component = %q, want %q", i, p.Provenance[i].Component, want)
+		}
+	}
+	if !p.Provenance[1].Pinned || !p.Provenance[2].Pinned {
+		t.Fatalf("pinned rows not labeled: %+v", p.Provenance)
+	}
+	if p.Provenance[4].Pinned {
+		t.Fatalf("auto chunk wrongly labeled pinned: %+v", p.Provenance[4])
+	}
+	if p.Provenance[1].Source != "/v/p1.md" || p.Provenance[4].Source != "/v/a1.md" {
+		t.Fatalf("sources = %+v", p.Provenance)
+	}
+	if !strings.Contains(p.Messages[1].Content, "pin one") || !strings.Contains(p.Messages[4].Content, "auto one") {
+		t.Fatalf("spliced content order wrong: %+v", p.Messages)
+	}
+}
+
+// TestPinnedChunksTruncateLabeledHumanOverride: pins share the RAG budget; an
+// over-budget pinned chunk is dropped and labeled as a human override, while the
+// auto drop stays unlabeled (ADR-0049 §11).
+func TestPinnedChunksTruncateLabeledHumanOverride(t *testing.T) {
+	a := New()
+	long := strings.Repeat("x", 400) // "Source: " + text ≈ 102 tokens
+	p, b, err := a.Assemble(context.Background(), dto.AssemblerInput{
+		Mode:   dto.Mode{SystemPrompt: "sys"},
+		Policy: dto.PipelinePolicy{MaxRagTokens: 120},
+		Pinned: []dto.Chunk{
+			{ChunkKey: "p1", Text: long},
+			{ChunkKey: "p2", Text: long},
+		},
+		RAGChunks: []dto.Chunk{{ChunkKey: "a1", Text: long}},
+		UserInput: "u",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var pinnedDrop, autoDrop *dto.ContextDrop
+	for i := range p.Drops {
+		if p.Drops[i].Reason != "rag-budget" {
+			continue
+		}
+		if p.Drops[i].HumanOverride {
+			pinnedDrop = &p.Drops[i]
+		} else {
+			autoDrop = &p.Drops[i]
+		}
+	}
+	if pinnedDrop == nil || pinnedDrop.Count != 1 {
+		t.Fatalf("pinned drop = %+v, want count 1 humanOverride", pinnedDrop)
+	}
+	if autoDrop == nil || autoDrop.Count != 1 {
+		t.Fatalf("auto drop = %+v, want count 1", autoDrop)
+	}
+	if b.Rag > 120 {
+		t.Fatalf("rag breakdown %d exceeds budget", b.Rag)
+	}
+	// Only the first pinned chunk survived; auto was dropped.
+	ragMessages := 0
+	for _, prov := range p.Provenance {
+		if prov.Component == "rag" {
+			ragMessages++
+			if !prov.Pinned {
+				t.Fatalf("auto chunk survived over-budget truncation: %+v", p.Provenance)
+			}
+		}
+	}
+	if ragMessages != 1 {
+		t.Fatalf("rag messages = %d, want 1", ragMessages)
+	}
+}
+
+// TestPinnedZeroBudgetDropsAllLabeled: a zero RAG budget drops pins too, all
+// labeled — pins never bypass budgets.
+func TestPinnedZeroBudgetDropsAllLabeled(t *testing.T) {
+	a := New()
+	p, b, err := a.Assemble(context.Background(), dto.AssemblerInput{
+		Mode:      dto.Mode{SystemPrompt: "sys"},
+		Policy:    dto.PipelinePolicy{MaxRagTokens: 0},
+		Pinned:    []dto.Chunk{{ChunkKey: "p1", Text: "pin"}},
+		RAGChunks: []dto.Chunk{{ChunkKey: "a1", Text: "auto"}},
+		UserInput: "u",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.Rag != 0 {
+		t.Fatalf("rag breakdown = %d, want 0", b.Rag)
+	}
+	var pinnedDrop *dto.ContextDrop
+	for i := range p.Drops {
+		if p.Drops[i].HumanOverride {
+			pinnedDrop = &p.Drops[i]
+		}
+	}
+	if pinnedDrop == nil || pinnedDrop.Count != 1 || pinnedDrop.Component != "rag" {
+		t.Fatalf("pinned drop = %+v, want labeled rag count 1", pinnedDrop)
+	}
+}

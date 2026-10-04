@@ -33,6 +33,7 @@ const (
 	OpenDocumentOperation        OperationName = "OpenDocument"
 	ProvisionModelOperation      OperationName = "ProvisionModel"
 	PutCorpusOperation           OperationName = "PutCorpus"
+	PutSessionContextOperation   OperationName = "PutSessionContext"
 	SaveDocumentOperation        OperationName = "SaveDocument"
 	StartModelOperation          OperationName = "StartModel"
 	StartTurnOperation           OperationName = "StartTurn"

@@ -321,6 +321,7 @@ export type Task = {
     selection?: Selection;
     mentions?: Array<Mention>;
     options?: TurnOptions;
+    context?: ContextPolicy;
 };
 
 export type Message = {
@@ -343,6 +344,7 @@ export type Session = {
     tokenBudget?: number;
     createdAt?: number;
     updatedAt?: number;
+    contextPolicy?: ContextPolicy;
 };
 
 export type CreateSessionRequest = {
@@ -456,13 +458,40 @@ export type RagEvent = {
 };
 
 /**
- * A stable reference to one indexed chunk, used by the context tray for pin/exclude decisions (ADR-0049 §8). `chunkKey` is path#index for corpus files and documentID#index for versioned documents; `path` is the canonical absolute file path. `hash` optionally pins the chunk's content hash so a stale pin is detectable.
+ * A stable reference to one indexed chunk, used by the context tray for pin/exclude decisions (ADR-0049 §8). `chunkKey` is path#index for corpus files and documentID#index for versioned documents; `path` is the canonical absolute file path. When `chunkKey` is omitted the ref names every chunk under `path`; `hash` optionally pins the chunk's content hash so a stale pin is detectable (advisory in Phase C4).
  *
  */
 export type ChunkRef = {
     path: string;
-    chunkKey: string;
+    chunkKey?: string;
     hash?: string;
+};
+
+/**
+ * A session-level context policy (persisted) or a per-turn override (`Task.context`). All fields are optional. Merge is replace-when-present per field: a present field replaces the lower layer wholesale (an explicit empty `pinned`/`excluded` list clears that field), while an absent field inherits it. Pins are human overrides that bypass the decision gate (Phase F) but never budgets; auto-retrieved chunks remain gated. The client sends decisions, never payload text.
+ *
+ */
+export type ContextPolicy = {
+    /**
+     * Chunks to include as human-pinned overrides, front-loaded deterministically and resolved through the index (works even when not in the retrieval top-k).
+     *
+     */
+    pinned?: Array<ChunkRef>;
+    /**
+     * Retrieved chunks to drop from the payload, matched by `chunkKey` (or by canonical `path` when only a path is given); each removal is recorded as a labeled drop.
+     *
+     */
+    excluded?: Array<ChunkRef>;
+    /**
+     * Whether auto-RAG retrieval runs. When absent the persisted session policy (or the default, true) applies. When false, retrieval is skipped but pins still apply.
+     *
+     */
+    autoRag?: boolean;
+    /**
+     * The query auto-RAG runs. When absent the persisted session policy, else `Task.userInput`, applies. Affects retrieval only, never the user message.
+     *
+     */
+    retrievalQuery?: string;
 };
 
 /**
@@ -524,6 +553,15 @@ export type ContextChunk = {
     source?: string;
     path?: string;
     heading?: string;
+    /**
+     * True when the chunk is a human-pinned override (Phase C4).
+     */
+    pinned?: boolean;
+    /**
+     * True when the chunk is a human override (Phase C4; pins bypass the Phase F decision gate, never budgets).
+     *
+     */
+    humanOverride?: boolean;
 };
 
 /**
@@ -535,6 +573,11 @@ export type ContextDrop = {
     reason: string;
     count: number;
     detail?: string;
+    /**
+     * True when the dropped item was a human override (a pinned chunk dropped by truncation, Phase C4); labels the override in the snapshot.
+     *
+     */
+    humanOverride?: boolean;
 };
 
 /**
@@ -1132,6 +1175,33 @@ export type GetSessionMessagesResponses = {
 };
 
 export type GetSessionMessagesResponse = GetSessionMessagesResponses[keyof GetSessionMessagesResponses];
+
+export type PutSessionContextData = {
+    body: ContextPolicy;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/sessions/{id}/context';
+};
+
+export type PutSessionContextErrors = {
+    /**
+     * no session exists with the id
+     */
+    404: NotFound;
+};
+
+export type PutSessionContextError = PutSessionContextErrors[keyof PutSessionContextErrors];
+
+export type PutSessionContextResponses = {
+    /**
+     * the session with its persisted policy
+     */
+    200: Session;
+};
+
+export type PutSessionContextResponse = PutSessionContextResponses[keyof PutSessionContextResponses];
 
 export type GetTurnContextData = {
     body?: never;

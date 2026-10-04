@@ -56,7 +56,7 @@ row: ADR-0001/0016 map to it and to §2/§5.2/§8.
 | 0046 | §3, §7 | client-swap | module-boundaries | — |
 | 0047 | §5.2, §6, §8 | versioning | interface, data-model, failure-semantics | Q4 |
 | 0048 | §4, §5.2, §6, §8 | locate-anchor | interface, data-model | Q4, Q6 |
-| 0049 | §4, §5.2, §8 | context-management | interface, data-model | Q1, Q6 |
+| 0049 | §4, §5.2, §8 | context-management | interface, data-model (precise contract: §7 `Task.context` + replace-when-present merge, §10 `Session.contextPolicy`/`SetContextPolicy`/`ContextPolicy`, §5 assembler `Pinned` + humanOverride labels, data-model §1.4 `sessions.context_policy`; Phase C4) | Q1, Q6 |
 | 0050 | §3, §7 | client-swap | module-boundaries | — |
 | 0051 | §4, §5.2, §8 | context-budgets | interface, failure-semantics, data-model | Q1, Q6 |
 

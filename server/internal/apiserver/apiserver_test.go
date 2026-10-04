@@ -150,6 +150,8 @@ func (stubSessions) SaveContext(string, string, json.RawMessage) error { return 
 func (stubSessions) TurnContext(string) (json.RawMessage, error) {
 	return json.RawMessage(`{"turnId":"t1","sessionId":"s1","workspaceId":"ws1","retrievalQuery":"q","autoRag":true,"messages":[{"role":"system","component":"system","tokens":1,"pinned":false}],"chunks":[],"drops":[],"budget":[],"createdAt":1}`), nil
 }
+func (stubSessions) SetContextPolicy(string, json.RawMessage) error { return nil }
+func (stubSessions) ContextPolicy(string) (json.RawMessage, error)  { return nil, nil }
 
 // stubMeter implements meter.Interface for the /sessions/{id}/meter route.
 type stubMeter struct{}
@@ -1236,5 +1238,200 @@ func TestContextSnapshotE2EMatchesEvent(t *testing.T) {
 	}
 	if !reflect.DeepEqual(fromEvent, fromRoute) {
 		t.Fatalf("route snapshot != context event:\n route: %+v\n event: %+v", fromRoute, fromEvent)
+	}
+}
+
+// --------------------- session context policy (ADR-0049 §8) ---------------------
+
+// captureContextLoop records the dto.Task.Context it is handed.
+type captureContextLoop struct {
+	bus    *fakeBus
+	mu     sync.Mutex
+	policy *dto.ContextPolicy
+}
+
+func (c *captureContextLoop) Run(_ context.Context, task dto.Task) (string, error) {
+	c.mu.Lock()
+	c.policy = task.Context
+	c.mu.Unlock()
+	id := "t1"
+	go func() {
+		c.bus.Emit(dto.Event{TurnID: id, Type: "done", Data: json.RawMessage(`{"degraded":false}`)})
+	}()
+	return id, nil
+}
+
+func TestStartTurnDecodesContext(t *testing.T) {
+	bus := &fakeBus{}
+	loop := &captureContextLoop{bus: bus}
+	srv, err := New(Deps{
+		Fleet:      stubFleet{},
+		Modes:      stubModes{},
+		Tools:      stubTools{},
+		Doc:        stubDoc{},
+		Filesystem: &stubFilesystem{},
+		Workspaces: stubWorkspaces{},
+		Shards:     stubShards{svc: &shard.Services{Sessions: stubSessions{}}},
+		Loop:       loop,
+	}, bus)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	body := `{"sessionId":"s1","modeName":"proofreader","documentId":"d1","userInput":"fix",` +
+		`"context":{"pinned":[{"path":"/v/a.md","chunkKey":"/v/a.md#0"}],"autoRag":false,"retrievalQuery":"rq"}}`
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/turn", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("turn = %d body %s", rec.Code, rec.Body.String())
+	}
+
+	loop.mu.Lock()
+	defer loop.mu.Unlock()
+	if loop.policy == nil {
+		t.Fatal("Task.context not decoded")
+	}
+	if len(loop.policy.Pinned) != 1 || loop.policy.Pinned[0].Path != "/v/a.md" || loop.policy.Pinned[0].ChunkKey != "/v/a.md#0" {
+		t.Fatalf("pinned = %+v", loop.policy.Pinned)
+	}
+	if loop.policy.AutoRag == nil || *loop.policy.AutoRag {
+		t.Fatalf("autoRag = %v, want false", loop.policy.AutoRag)
+	}
+	if loop.policy.RetrievalQuery == nil || *loop.policy.RetrievalQuery != "rq" {
+		t.Fatalf("retrievalQuery = %v", loop.policy.RetrievalQuery)
+	}
+}
+
+// TestStartTurnContextEmptyListPreserved: an explicit empty pinned list must
+// decode to a non-nil empty slice (replace-when-present clear), not nil.
+func TestStartTurnContextEmptyListPreserved(t *testing.T) {
+	bus := &fakeBus{}
+	loop := &captureContextLoop{bus: bus}
+	srv, err := New(Deps{
+		Fleet:      stubFleet{},
+		Modes:      stubModes{},
+		Tools:      stubTools{},
+		Doc:        stubDoc{},
+		Filesystem: &stubFilesystem{},
+		Workspaces: stubWorkspaces{},
+		Shards:     stubShards{svc: &shard.Services{Sessions: stubSessions{}}},
+		Loop:       loop,
+	}, bus)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := `{"sessionId":"s1","modeName":"proofreader","documentId":"d1","userInput":"fix","context":{"pinned":[]}}`
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/turn", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	srv.ServeHTTP(rec, req)
+
+	loop.mu.Lock()
+	defer loop.mu.Unlock()
+	if loop.policy == nil || loop.policy.Pinned == nil || len(loop.policy.Pinned) != 0 {
+		t.Fatalf("explicit empty pinned list not preserved: %+v", loop.policy)
+	}
+}
+
+// policySessions is a stateful session.Interface for the PUT context route.
+type policySessions struct {
+	stubSessions
+	mu     sync.Mutex
+	policy json.RawMessage
+}
+
+func (p *policySessions) Resume(id string) (dto.Session, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return dto.Session{ID: id, DocumentID: "d1", ContextPolicy: p.policy}, nil
+}
+
+func (p *policySessions) SetContextPolicy(_ string, policy json.RawMessage) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.policy = append(json.RawMessage(nil), policy...)
+	return nil
+}
+
+func (p *policySessions) ContextPolicy(string) (json.RawMessage, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.policy, nil
+}
+
+func TestPutSessionContextPersistsAndReadsBack(t *testing.T) {
+	bus := &fakeBus{}
+	ps := &policySessions{}
+	srv, err := New(Deps{
+		Fleet:      stubFleet{},
+		Modes:      stubModes{},
+		Tools:      stubTools{},
+		Doc:        stubDoc{},
+		Filesystem: &stubFilesystem{},
+		Workspaces: stubWorkspaces{},
+		Shards:     stubShards{svc: &shard.Services{Sessions: ps}},
+		Loop:       &stubLoopEmitter{bus: bus},
+	}, bus)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	body := `{"pinned":[{"path":"/v/a.md","chunkKey":"/v/a.md#0"}],"excluded":[{"path":"/v/b.md"}],"autoRag":false,"retrievalQuery":"rq"}`
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPut, "/sessions/s1/context", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("put context = %d body %s", rec.Code, rec.Body.String())
+	}
+	var got genapi.Session
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if !got.ContextPolicy.IsSet() {
+		t.Fatalf("response session lacks contextPolicy: %s", rec.Body.String())
+	}
+	cp := got.ContextPolicy.Value
+	if len(cp.Pinned) != 1 || cp.Pinned[0].Path != "/v/a.md" {
+		t.Fatalf("read-back pinned = %+v", cp.Pinned)
+	}
+	if v, ok := cp.AutoRag.Get(); !ok || v {
+		t.Fatalf("read-back autoRag = %v, want false", cp.AutoRag)
+	}
+	raw, err := ps.ContextPolicy("s1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"autoRag":false`) || !strings.Contains(string(raw), `"chunkKey":"/v/a.md#0"`) {
+		t.Fatalf("persisted policy = %s", raw)
+	}
+}
+
+func TestPutSessionContextUnknownIsTyped404(t *testing.T) {
+	bus := &fakeBus{}
+	srv, err := New(Deps{
+		Fleet:      stubFleet{},
+		Modes:      stubModes{},
+		Tools:      stubTools{},
+		Doc:        stubDoc{},
+		Filesystem: &stubFilesystem{},
+		Workspaces: emptyWorkspaces{},
+		Shards:     stubShards{svc: &shard.Services{Sessions: stubSessions{}}},
+		Loop:       &stubLoopEmitter{bus: bus},
+	}, bus)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPut, "/sessions/nope/context", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("unknown session = %d, want 404", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "not-found") || !strings.Contains(rec.Body.String(), "session") {
+		t.Fatalf("404 body = %s", rec.Body.String())
 	}
 }

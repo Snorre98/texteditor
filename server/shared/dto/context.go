@@ -66,6 +66,11 @@ type Chunk struct {
 	Source   string  `json:"source"` // citation/provenance marker
 	Path     string  `json:"path,omitempty"`
 	Heading  string  `json:"heading,omitempty"`
+	// Pinned/HumanOverride label a chunk the author explicitly pinned (ADR-0049
+	// §11): it bypasses the decision gate but never budgets. Set only on
+	// snapshot chunks; auto-retrieved `rag` event chunks stay unlabeled.
+	Pinned        bool `json:"pinned,omitempty"`
+	HumanOverride bool `json:"humanOverride,omitempty"`
 }
 
 // IndexedDocument is one indexed file's status row (Retriever.Status,
@@ -87,6 +92,20 @@ type ChunkRef struct {
 	Hash     string `json:"hash,omitempty"`
 }
 
+// ContextPolicy is the context-tray decision set (ADR-0049 §7/§8): pinned and
+// excluded chunk refs, an auto-RAG flag, and a retrieval query. The engine
+// persists one per session (Session.contextPolicy) and accepts per-turn
+// overrides (Task.Context). Merge is replace-when-present per field: a non-nil
+// slice / non-nil pointer replaces the lower layer wholesale (an explicit empty
+// list clears), and a nil field inherits. It carries no payload text — the
+// client sends decisions, the engine assembles.
+type ContextPolicy struct {
+	Pinned         []ChunkRef `json:"pinned,omitempty"`
+	Excluded       []ChunkRef `json:"excluded,omitempty"`
+	AutoRag        *bool      `json:"autoRag,omitempty"`
+	RetrievalQuery *string    `json:"retrievalQuery,omitempty"`
+}
+
 // ContextMessage is one assembled message's component and provenance in a
 // context snapshot (interface.md §5, ADR-0044 §4). It is the wire form of
 // MessageProvenance; the snapshot is engine-owned data clients render verbatim.
@@ -99,12 +118,14 @@ type ContextMessage struct {
 }
 
 // ContextDrop is one labeled truncation/drop record (interface.md §5,
-// ADR-0044 §3). Truncation is never silent.
+// ADR-0044 §3). Truncation is never silent. HumanOverride marks a dropped
+// human override (a pinned chunk truncated for budget, ADR-0049 §11).
 type ContextDrop struct {
-	Component string `json:"component"` // history | rag | mention
-	Reason    string `json:"reason"`
-	Count     int    `json:"count"`
-	Detail    string `json:"detail,omitempty"`
+	Component     string `json:"component"` // history | rag | mention
+	Reason        string `json:"reason"`
+	Count         int    `json:"count"`
+	Detail        string `json:"detail,omitempty"`
+	HumanOverride bool   `json:"humanOverride,omitempty"`
 }
 
 // BudgetUsage is one component's budget utilization (interface.md §5,

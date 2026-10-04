@@ -35,4 +35,8 @@ var sessionsSchema = []string{
 		created_at INTEGER NOT NULL
 	)`,
 	`CREATE INDEX turn_context_session_idx ON turn_context(session_id, created_at DESC)`,
+	// context_policy — the persisted session-level context policy (ADR-0049 §8)
+	// as opaque JSON. Empty string = no policy. Append-only: sqlmigrate tracks
+	// the applied statement count, so new migrations go at the end.
+	`ALTER TABLE sessions ADD COLUMN context_policy TEXT NOT NULL DEFAULT ''`,
 }

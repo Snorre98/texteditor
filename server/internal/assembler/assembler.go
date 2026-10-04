@@ -41,8 +41,18 @@ func (assembler) Assemble(_ context.Context, in dto.AssemblerInput) (dto.Payload
 	// (ADR-0015; one global policy since ADR-0045).
 	history, historyDropped := truncateHistory(in.History, in.Policy.MaxHistoryTokens)
 
-	// Truncate RAG chunks to the policy's RAG budget.
-	rag, ragDropped := truncateRag(in.RAGChunks, in.Policy.MaxRagTokens)
+	// Pinned chunks are human overrides (ADR-0049 §7/§11). They are front-loaded
+	// before the auto-retrieved chunks and share the RAG budget: pins never
+	// bypass budgets. Combined front-load order keeps the static pinned prefix
+	// deterministic (ADR-0049 §14).
+	combined := make([]ragItem, 0, len(in.Pinned)+len(in.RAGChunks))
+	for _, c := range in.Pinned {
+		combined = append(combined, ragItem{chunk: c, pinned: true})
+	}
+	for _, c := range in.RAGChunks {
+		combined = append(combined, ragItem{chunk: c, pinned: false})
+	}
+	keptRag, ragDroppedPinned, ragDropped := truncateRagItems(combined, in.Policy.MaxRagTokens)
 
 	// Splice mentions after history, before user input (ADR-0036 §3). Truncate
 	// over-budget mentions from the tail, with a labeled overflow line.
@@ -50,21 +60,34 @@ func (assembler) Assemble(_ context.Context, in dto.AssemblerInput) (dto.Payload
 
 	// Build the assembled message list and the per-message provenance
 	// (ADR-0044 §4). The two slices are positionally aligned: provenance[i]
-	// describes messages[i].
+	// describes messages[i]. Pinned chunks are spliced immediately after the
+	// system message, then history, then the auto-retrieved chunks.
 	messages := []dto.Message{{Role: "system", Content: system}}
 	provenance := []dto.MessageProvenance{{Role: "system", Component: "system", Tokens: systemTokens}}
 
 	var historyTokens, ragTokens, mentionTokens int
+	for _, it := range keptRag {
+		if !it.pinned {
+			continue
+		}
+		t := estimate(it.chunk.Text)
+		messages = append(messages, dto.Message{Role: "user", Content: "Source: " + it.chunk.Text})
+		provenance = append(provenance, dto.MessageProvenance{Role: "user", Component: "rag", Source: chunkSource(it.chunk), Tokens: t, Pinned: true})
+		ragTokens += t
+	}
 	for _, m := range history {
 		t := estimate(m.Content)
 		messages = append(messages, m)
 		provenance = append(provenance, dto.MessageProvenance{Role: m.Role, Component: "history", Tokens: t})
 		historyTokens += t
 	}
-	for _, c := range rag {
-		t := estimate(c.Text)
-		messages = append(messages, dto.Message{Role: "user", Content: "Source: " + c.Text})
-		provenance = append(provenance, dto.MessageProvenance{Role: "user", Component: "rag", Source: chunkSource(c), Tokens: t})
+	for _, it := range keptRag {
+		if it.pinned {
+			continue
+		}
+		t := estimate(it.chunk.Text)
+		messages = append(messages, dto.Message{Role: "user", Content: "Source: " + it.chunk.Text})
+		provenance = append(provenance, dto.MessageProvenance{Role: "user", Component: "rag", Source: chunkSource(it.chunk), Tokens: t})
 		ragTokens += t
 	}
 	for _, mc := range mentions {
@@ -104,13 +127,17 @@ func (assembler) Assemble(_ context.Context, in dto.AssemblerInput) (dto.Payload
 
 	// Labeled truncation records — history and RAG truncation were formerly
 	// silent; every dropped item is now labeled (ADR-0044 §3, context-inspector
-	// "Truncation is labeled, never silent").
+	// "Truncation is labeled, never silent"). Truncated pinned chunks are
+	// additionally labeled as human overrides (ADR-0049 §11).
 	drops := []dto.ContextDrop{}
 	if historyDropped > 0 {
 		drops = append(drops, dto.ContextDrop{Component: "history", Reason: "history-budget", Count: historyDropped, Detail: budgetDetail("maxHistoryTokens", in.Policy.MaxHistoryTokens)})
 	}
 	if ragDropped > 0 {
 		drops = append(drops, dto.ContextDrop{Component: "rag", Reason: "rag-budget", Count: ragDropped, Detail: budgetDetail("maxRagTokens", in.Policy.MaxRagTokens)})
+	}
+	if ragDroppedPinned > 0 {
+		drops = append(drops, dto.ContextDrop{Component: "rag", Reason: "rag-budget", Count: ragDroppedPinned, Detail: budgetDetail("maxRagTokens", in.Policy.MaxRagTokens), HumanOverride: true})
 	}
 	if mentionsDropped > 0 {
 		drops = append(drops, dto.ContextDrop{Component: "mention", Reason: "mention-budget", Count: mentionsDropped, Detail: budgetDetail("maxMentionTokens", in.Policy.MaxMentionTokens)})
@@ -161,23 +188,43 @@ func truncateHistory(hist []dto.Message, maxTokens int) ([]dto.Message, int) {
 	return out, len(hist) - len(out)
 }
 
-// truncateRag returns the RAG chunks that fit within maxTokens and the number
-// of trailing chunks dropped.
-func truncateRag(chunks []dto.Chunk, maxTokens int) ([]dto.Chunk, int) {
+// ragItem is one RAG-budget candidate: an auto-retrieved or pinned chunk.
+type ragItem struct {
+	chunk  dto.Chunk
+	pinned bool
+}
+
+// truncateRagItems returns the front items that fit within maxTokens and the
+// number of dropped pinned and auto items. Pins are front-loaded by the caller,
+// so over-budget truncation drops the tail (auto chunks first, then pinned).
+func truncateRagItems(items []ragItem, maxTokens int) (kept []ragItem, droppedPinned, droppedAuto int) {
 	if maxTokens <= 0 {
-		return nil, len(chunks)
+		for _, it := range items {
+			if it.pinned {
+				droppedPinned++
+			} else {
+				droppedAuto++
+			}
+		}
+		return nil, droppedPinned, droppedAuto
 	}
-	var out []dto.Chunk
 	total := 0
-	for _, c := range chunks {
-		t := estimate(c.Text)
-		if total+t > maxTokens && len(out) > 0 {
+	for i, it := range items {
+		t := estimate(it.chunk.Text)
+		if total+t > maxTokens && len(kept) > 0 {
+			for _, rest := range items[i:] {
+				if rest.pinned {
+					droppedPinned++
+				} else {
+					droppedAuto++
+				}
+			}
 			break
 		}
-		out = append(out, c)
+		kept = append(kept, it)
 		total += t
 	}
-	return out, len(chunks) - len(out)
+	return kept, droppedPinned, droppedAuto
 }
 
 // chunkSource is the provenance marker recorded for a retrieved chunk: the

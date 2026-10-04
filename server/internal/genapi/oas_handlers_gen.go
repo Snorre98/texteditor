@@ -3830,6 +3830,167 @@ func (s *Server) handlePutCorpusRequest(args [0]string, argsEscaped bool, w http
 	}
 }
 
+// handlePutSessionContextRequest handles putSessionContext operation.
+//
+// Replaces the session's persisted context policy (pins, excludes, auto-RAG flag, retrieval query) and
+// returns the session so the client reads back what was persisted. The policy carries the same shape
+// as the per-turn `Task.context` override; it survives turns, reconnects, and session resume. Per-turn
+// overrides are never persisted. An unknown session is the typed 404.
+//
+// PUT /sessions/{id}/context
+func (s *Server) handlePutSessionContextRequest(args [1]string, argsEscaped bool, w http.ResponseWriter, r *http.Request) {
+	statusWriter := &codeRecorder{ResponseWriter: w}
+	w = statusWriter
+	otelAttrs := []attribute.KeyValue{
+		otelogen.OperationID("putSessionContext"),
+		semconv.HTTPRequestMethodKey.String("PUT"),
+		semconv.HTTPRouteKey.String("/sessions/{id}/context"),
+	}
+	// Add attributes from config.
+	otelAttrs = append(otelAttrs, s.cfg.Attributes...)
+
+	// Start a span for this request.
+	ctx, span := s.cfg.Tracer.Start(r.Context(), PutSessionContextOperation,
+		trace.WithAttributes(otelAttrs...),
+		serverSpanKind,
+	)
+	defer span.End()
+
+	// Add Labeler to context.
+	labeler := &Labeler{attrs: otelAttrs}
+	ctx = contextWithLabeler(ctx, labeler)
+
+	// Run stopwatch.
+	startTime := time.Now()
+	defer func() {
+		elapsedDuration := time.Since(startTime)
+
+		attrSet := labeler.AttributeSet()
+		attrs := attrSet.ToSlice()
+		code := statusWriter.status
+		if code != 0 {
+			codeAttr := semconv.HTTPResponseStatusCode(code)
+			attrs = append(attrs, codeAttr)
+			span.SetAttributes(attrs...)
+		}
+		attrOpt := metric.WithAttributes(attrs...)
+
+		// Increment request counter.
+		s.requests.Add(ctx, 1, attrOpt)
+
+		// Use floating point division here for higher precision (instead of Millisecond method).
+		s.duration.Record(ctx, float64(elapsedDuration)/float64(time.Millisecond), attrOpt)
+	}()
+
+	var (
+		recordError = func(stage string, err error) {
+			span.RecordError(err)
+
+			// https://opentelemetry.io/docs/specs/semconv/http/http-spans/#status
+			// Span Status MUST be left unset if HTTP status code was in the 1xx, 2xx or 3xx ranges,
+			// unless there was another error (e.g., network error receiving the response body; or 3xx codes with
+			// max redirects exceeded), in which case status MUST be set to Error.
+			code := statusWriter.status
+			if code < 100 || code >= 500 {
+				span.SetStatus(codes.Error, stage)
+			}
+
+			attrSet := labeler.AttributeSet()
+			attrs := attrSet.ToSlice()
+			if code != 0 {
+				attrs = append(attrs, semconv.HTTPResponseStatusCode(code))
+			}
+
+			s.errors.Add(ctx, 1, metric.WithAttributes(attrs...))
+		}
+		err          error
+		opErrContext = ogenerrors.OperationContext{
+			Name: PutSessionContextOperation,
+			ID:   "putSessionContext",
+		}
+	)
+	params, err := decodePutSessionContextParams(args, argsEscaped, r)
+	if err != nil {
+		err = &ogenerrors.DecodeParamsError{
+			OperationContext: opErrContext,
+			Err:              err,
+		}
+		defer recordError("DecodeParams", err)
+		s.cfg.ErrorHandler(ctx, w, r, err)
+		return
+	}
+
+	var rawBody []byte
+	request, rawBody, close, err := s.decodePutSessionContextRequest(r)
+	if err != nil {
+		err = &ogenerrors.DecodeRequestError{
+			OperationContext: opErrContext,
+			Err:              err,
+		}
+		defer recordError("DecodeRequest", err)
+		s.cfg.ErrorHandler(ctx, w, r, err)
+		return
+	}
+	defer func() {
+		if err := close(); err != nil {
+			recordError("CloseRequest", err)
+		}
+	}()
+
+	var response PutSessionContextRes
+	if m := s.cfg.Middleware; m != nil {
+		mreq := middleware.Request{
+			Context:          ctx,
+			OperationName:    PutSessionContextOperation,
+			OperationSummary: "Persist a session's context policy (ADR-0049 §8)",
+			OperationID:      "putSessionContext",
+			Body:             request,
+			RawBody:          rawBody,
+			Params: middleware.Parameters{
+				{
+					Name: "id",
+					In:   "path",
+				}: params.ID,
+			},
+			Raw: r,
+		}
+
+		type (
+			Request  = *ContextPolicy
+			Params   = PutSessionContextParams
+			Response = PutSessionContextRes
+		)
+		response, err = middleware.HookMiddleware[
+			Request,
+			Params,
+			Response,
+		](
+			m,
+			mreq,
+			unpackPutSessionContextParams,
+			func(ctx context.Context, request Request, params Params) (response Response, err error) {
+				response, err = s.h.PutSessionContext(ctx, request, params)
+				return response, err
+			},
+		)
+	} else {
+		response, err = s.h.PutSessionContext(ctx, request, params)
+	}
+	if err != nil {
+		defer recordError("Internal", err)
+		s.cfg.ErrorHandler(ctx, w, r, err)
+		return
+	}
+
+	if err := encodePutSessionContextResponse(response, w, span); err != nil {
+		defer recordError("EncodeResponse", err)
+		if !errors.Is(err, ht.ErrInternalServerErrorResponse) {
+			s.cfg.ErrorHandler(ctx, w, r, err)
+		}
+		return
+	}
+}
+
 // handleSaveDocumentRequest handles saveDocument operation.
 //
 // The manual-edit wire path (ADR-0038): the client's whole block-tree snapshot. Array order =

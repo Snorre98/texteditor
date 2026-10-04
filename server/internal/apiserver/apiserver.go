@@ -730,6 +730,45 @@ func (h *handler) GetSessionMeter(ctx context.Context, p genapi.GetSessionMeterP
 	return sessionMeterToGen(m), nil
 }
 
+// PutSessionContext backs PUT /sessions/{id}/context (ADR-0049 §8): persist a
+// session-level context policy in the workspace shard and return the session so
+// the client reads back the persisted policy. An unknown session is the typed
+// 404.
+func (h *handler) PutSessionContext(ctx context.Context, req *genapi.ContextPolicy, p genapi.PutSessionContextParams) (genapi.PutSessionContextRes, error) {
+	workspaceID, ok, err := h.d.Workspaces.SessionWorkspace(p.ID)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return notFound("session", p.ID), nil
+	}
+	policyJSON, err := json.Marshal(contextPolicyFromGen(req))
+	if err != nil {
+		return nil, err
+	}
+	lease, err := h.d.Shards.Services(ctx, workspaceID)
+	if err != nil {
+		return nil, err
+	}
+	defer lease.Release()
+
+	if err := lease.Sessions.SetContextPolicy(p.ID, policyJSON); err != nil {
+		if errors.Is(err, session.ErrNotFound) {
+			return notFound("session", p.ID), nil
+		}
+		return nil, err
+	}
+	s, err := lease.Sessions.Resume(p.ID)
+	if err != nil {
+		if errors.Is(err, session.ErrNotFound) {
+			return notFound("session", p.ID), nil
+		}
+		return nil, err
+	}
+	o := sessionToGen(s, workspaceID)
+	return &o, nil
+}
+
 // notFound renders the typed routing refusal (api/openapi.yaml NotFound).
 func notFound(resource, id string) *genapi.NotFound {
 	return &genapi.NotFound{
@@ -737,9 +776,7 @@ func notFound(resource, id string) *genapi.NotFound {
 		Resource: genapi.NotFoundResource(resource),
 		ID:       id,
 	}
-}
-
-// sessionMeterToGen projects a dto.SessionMeter onto the wire schema.
+} // sessionMeterToGen projects a dto.SessionMeter onto the wire schema.
 func sessionMeterToGen(m dto.SessionMeter) *genapi.SessionMeter {
 	out := &genapi.SessionMeter{
 		SessionId:  m.SessionID,
@@ -793,6 +830,11 @@ func (h *handler) StartTurn(ctx context.Context, req *genapi.Task, w http.Respon
 		if m, ok := opts.Model.Get(); ok {
 			task.Options.Model = m
 		}
+	}
+	// Per-turn context overrides decode into the loop's Task (ADR-0049 §8). The
+	// override is ephemeral — never persisted.
+	if cp, ok := req.Context.Get(); ok {
+		task.Context = contextPolicyFromGen(&cp)
 	}
 
 	// Run returns a turnID synchronously, then the turn proceeds async; subscribe
@@ -950,5 +992,53 @@ func sessionToGen(s dto.Session, workspaceID string) genapi.Session {
 	}
 	o.CreatedAt = genapi.NewOptInt64(s.CreatedAt)
 	o.UpdatedAt = genapi.NewOptInt64(s.UpdatedAt)
+	if len(s.ContextPolicy) > 0 {
+		var cp genapi.ContextPolicy
+		if err := json.Unmarshal(s.ContextPolicy, &cp); err == nil {
+			o.ContextPolicy = genapi.NewOptContextPolicy(cp)
+		}
+	}
 	return o
+}
+
+// contextPolicyFromGen converts a wire ContextPolicy into the owner-free dto,
+// preserving the nil-vs-empty distinction on the ref slices (an explicit empty
+// list clears the lower layer; an absent slice inherits).
+func contextPolicyFromGen(p *genapi.ContextPolicy) *dto.ContextPolicy {
+	if p == nil {
+		return nil
+	}
+	out := &dto.ContextPolicy{}
+	if p.Pinned != nil {
+		out.Pinned = make([]dto.ChunkRef, 0, len(p.Pinned))
+		for _, r := range p.Pinned {
+			out.Pinned = append(out.Pinned, chunkRefFromGen(r))
+		}
+	}
+	if p.Excluded != nil {
+		out.Excluded = make([]dto.ChunkRef, 0, len(p.Excluded))
+		for _, r := range p.Excluded {
+			out.Excluded = append(out.Excluded, chunkRefFromGen(r))
+		}
+	}
+	if v, ok := p.AutoRag.Get(); ok {
+		out.AutoRag = &v
+	}
+	if v, ok := p.RetrievalQuery.Get(); ok {
+		out.RetrievalQuery = &v
+	}
+	return out
+}
+
+// chunkRefFromGen converts a wire ChunkRef; an absent chunkKey names every
+// chunk under the path.
+func chunkRefFromGen(r genapi.ChunkRef) dto.ChunkRef {
+	out := dto.ChunkRef{Path: r.Path}
+	if v, ok := r.ChunkKey.Get(); ok {
+		out.ChunkKey = v
+	}
+	if v, ok := r.Hash.Get(); ok {
+		out.Hash = v
+	}
+	return out
 }

@@ -169,12 +169,17 @@ Session store only.
 | `mode_type` | TEXT | persisted per-session persona |
 | `title` | TEXT | human label, auto-derived or user-edited |
 | `token_budget` | INTEGER NULL | optional per-session cumulative-token cap |
+| `context_policy` | TEXT NOT NULL DEFAULT '' | persisted session context policy JSON (ADR-0049 §8); `''` = none |
 | `created_at` | INTEGER | unix epoch seconds |
 | `updated_at` | INTEGER | unix epoch seconds |
 
 Many `sessions` rows may share one `document_id`. A `(document_id,
 anchor_block_id)` pair is create-or-resume: re-anchoring to the same block
-reopens the same session.
+reopens the same session. `context_policy` holds the opaque
+`ContextPolicy` JSON (pins/excludes/autoRag/retrievalQuery); the Session store
+validates it on set and never interprets it. It is added append-only as the
+last migration in `sessionsSchema` (`ALTER TABLE sessions ADD COLUMN`), so an
+existing `sessions.db` upgrades in place.
 
 #### `messages` — conversation history (many per session)
 

@@ -26,13 +26,16 @@ var (
 	rn3AllowedHeaders = map[string]string{
 		"POST": "Content-Type",
 	}
-	rn45AllowedHeaders = map[string]string{
+	rn47AllowedHeaders = map[string]string{
 		"PUT": "Content-Type",
 	}
 	rn7AllowedHeaders = map[string]string{
 		"POST": "Content-Type",
 	}
-	rn48AllowedHeaders = map[string]string{
+	rn46AllowedHeaders = map[string]string{
+		"PUT": "Content-Type",
+	}
+	rn50AllowedHeaders = map[string]string{
 		"POST": "Content-Type",
 	}
 	rn8AllowedHeaders = map[string]string{
@@ -493,7 +496,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 									default:
 										s.notAllowed(w, r, notAllowedParams{
 											allowedMethods: "PUT",
-											allowedHeaders: rn45AllowedHeaders,
+											allowedHeaders: rn47AllowedHeaders,
 											acceptPost:     "",
 											acceptPatch:    "",
 										})
@@ -845,9 +848,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 						break
 					}
 					switch elem[0] {
-					case '/': // Prefix: "/me"
+					case '/': // Prefix: "/"
 
-						if l := len("/me"); len(elem) >= l && elem[0:l] == "/me" {
+						if l := len("/"); len(elem) >= l && elem[0:l] == "/" {
 							elem = elem[l:]
 						} else {
 							break
@@ -857,9 +860,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 							break
 						}
 						switch elem[0] {
-						case 's': // Prefix: "ssages"
+						case 'c': // Prefix: "context"
 
-							if l := len("ssages"); len(elem) >= l && elem[0:l] == "ssages" {
+							if l := len("context"); len(elem) >= l && elem[0:l] == "context" {
 								elem = elem[l:]
 							} else {
 								break
@@ -868,14 +871,14 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 							if len(elem) == 0 {
 								// Leaf node.
 								switch r.Method {
-								case "GET":
-									s.handleGetSessionMessagesRequest([1]string{
+								case "PUT":
+									s.handlePutSessionContextRequest([1]string{
 										args[0],
 									}, elemIsEscaped, w, r)
 								default:
 									s.notAllowed(w, r, notAllowedParams{
-										allowedMethods: "GET",
-										allowedHeaders: nil,
+										allowedMethods: "PUT",
+										allowedHeaders: rn46AllowedHeaders,
 										acceptPost:     "",
 										acceptPatch:    "",
 									})
@@ -884,31 +887,72 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 								return
 							}
 
-						case 't': // Prefix: "ter"
+						case 'm': // Prefix: "me"
 
-							if l := len("ter"); len(elem) >= l && elem[0:l] == "ter" {
+							if l := len("me"); len(elem) >= l && elem[0:l] == "me" {
 								elem = elem[l:]
 							} else {
 								break
 							}
 
 							if len(elem) == 0 {
-								// Leaf node.
-								switch r.Method {
-								case "GET":
-									s.handleGetSessionMeterRequest([1]string{
-										args[0],
-									}, elemIsEscaped, w, r)
-								default:
-									s.notAllowed(w, r, notAllowedParams{
-										allowedMethods: "GET",
-										allowedHeaders: nil,
-										acceptPost:     "",
-										acceptPatch:    "",
-									})
+								break
+							}
+							switch elem[0] {
+							case 's': // Prefix: "ssages"
+
+								if l := len("ssages"); len(elem) >= l && elem[0:l] == "ssages" {
+									elem = elem[l:]
+								} else {
+									break
 								}
 
-								return
+								if len(elem) == 0 {
+									// Leaf node.
+									switch r.Method {
+									case "GET":
+										s.handleGetSessionMessagesRequest([1]string{
+											args[0],
+										}, elemIsEscaped, w, r)
+									default:
+										s.notAllowed(w, r, notAllowedParams{
+											allowedMethods: "GET",
+											allowedHeaders: nil,
+											acceptPost:     "",
+											acceptPatch:    "",
+										})
+									}
+
+									return
+								}
+
+							case 't': // Prefix: "ter"
+
+								if l := len("ter"); len(elem) >= l && elem[0:l] == "ter" {
+									elem = elem[l:]
+								} else {
+									break
+								}
+
+								if len(elem) == 0 {
+									// Leaf node.
+									switch r.Method {
+									case "GET":
+										s.handleGetSessionMeterRequest([1]string{
+											args[0],
+										}, elemIsEscaped, w, r)
+									default:
+										s.notAllowed(w, r, notAllowedParams{
+											allowedMethods: "GET",
+											allowedHeaders: nil,
+											acceptPost:     "",
+											acceptPatch:    "",
+										})
+									}
+
+									return
+								}
+
 							}
 
 						}
@@ -969,7 +1013,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 						default:
 							s.notAllowed(w, r, notAllowedParams{
 								allowedMethods: "POST",
-								allowedHeaders: rn48AllowedHeaders,
+								allowedHeaders: rn50AllowedHeaders,
 								acceptPost:     "application/json",
 								acceptPatch:    "",
 							})
@@ -1939,9 +1983,9 @@ func (s *Server) FindPath(method string, u *url.URL) (r Route, _ bool) {
 						break
 					}
 					switch elem[0] {
-					case '/': // Prefix: "/me"
+					case '/': // Prefix: "/"
 
-						if l := len("/me"); len(elem) >= l && elem[0:l] == "/me" {
+						if l := len("/"); len(elem) >= l && elem[0:l] == "/" {
 							elem = elem[l:]
 						} else {
 							break
@@ -1951,9 +1995,9 @@ func (s *Server) FindPath(method string, u *url.URL) (r Route, _ bool) {
 							break
 						}
 						switch elem[0] {
-						case 's': // Prefix: "ssages"
+						case 'c': // Prefix: "context"
 
-							if l := len("ssages"); len(elem) >= l && elem[0:l] == "ssages" {
+							if l := len("context"); len(elem) >= l && elem[0:l] == "context" {
 								elem = elem[l:]
 							} else {
 								break
@@ -1962,12 +2006,12 @@ func (s *Server) FindPath(method string, u *url.URL) (r Route, _ bool) {
 							if len(elem) == 0 {
 								// Leaf node.
 								switch method {
-								case "GET":
-									r.name = GetSessionMessagesOperation
-									r.summary = ""
-									r.operationID = "getSessionMessages"
+								case "PUT":
+									r.name = PutSessionContextOperation
+									r.summary = "Persist a session's context policy (ADR-0049 §8)"
+									r.operationID = "putSessionContext"
 									r.operationGroup = ""
-									r.pathPattern = "/sessions/{id}/messages"
+									r.pathPattern = "/sessions/{id}/context"
 									r.args = args
 									r.count = 1
 									return r, true
@@ -1976,29 +2020,68 @@ func (s *Server) FindPath(method string, u *url.URL) (r Route, _ bool) {
 								}
 							}
 
-						case 't': // Prefix: "ter"
+						case 'm': // Prefix: "me"
 
-							if l := len("ter"); len(elem) >= l && elem[0:l] == "ter" {
+							if l := len("me"); len(elem) >= l && elem[0:l] == "me" {
 								elem = elem[l:]
 							} else {
 								break
 							}
 
 							if len(elem) == 0 {
-								// Leaf node.
-								switch method {
-								case "GET":
-									r.name = GetSessionMeterOperation
-									r.summary = "Read a session's cumulative per-component token meter (ADR-0026, ADR-0044)"
-									r.operationID = "getSessionMeter"
-									r.operationGroup = ""
-									r.pathPattern = "/sessions/{id}/meter"
-									r.args = args
-									r.count = 1
-									return r, true
-								default:
-									return
+								break
+							}
+							switch elem[0] {
+							case 's': // Prefix: "ssages"
+
+								if l := len("ssages"); len(elem) >= l && elem[0:l] == "ssages" {
+									elem = elem[l:]
+								} else {
+									break
 								}
+
+								if len(elem) == 0 {
+									// Leaf node.
+									switch method {
+									case "GET":
+										r.name = GetSessionMessagesOperation
+										r.summary = ""
+										r.operationID = "getSessionMessages"
+										r.operationGroup = ""
+										r.pathPattern = "/sessions/{id}/messages"
+										r.args = args
+										r.count = 1
+										return r, true
+									default:
+										return
+									}
+								}
+
+							case 't': // Prefix: "ter"
+
+								if l := len("ter"); len(elem) >= l && elem[0:l] == "ter" {
+									elem = elem[l:]
+								} else {
+									break
+								}
+
+								if len(elem) == 0 {
+									// Leaf node.
+									switch method {
+									case "GET":
+										r.name = GetSessionMeterOperation
+										r.summary = "Read a session's cumulative per-component token meter (ADR-0026, ADR-0044)"
+										r.operationID = "getSessionMeter"
+										r.operationGroup = ""
+										r.pathPattern = "/sessions/{id}/meter"
+										r.args = args
+										r.count = 1
+										return r, true
+									default:
+										return
+									}
+								}
+
 							}
 
 						}

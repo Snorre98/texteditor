@@ -3,7 +3,9 @@ package session
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
+	"path/filepath"
 	"testing"
 
 	_ "modernc.org/sqlite"
@@ -217,4 +219,94 @@ func itoa(i int) string {
 		i /= 10
 	}
 	return string(b[p:])
+}
+
+func TestContextPolicyRoundTrip(t *testing.T) {
+	s := newTestStore(t)
+	sess, err := s.Create("doc1", nil, "editor")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sess.ContextPolicy != nil {
+		t.Fatalf("new session policy = %s, want none", sess.ContextPolicy)
+	}
+	policy := json.RawMessage(`{"pinned":[{"path":"/v/a.md","chunkKey":"/v/a.md#0"}],"autoRag":false}`)
+	if err := s.SetContextPolicy(sess.ID, policy); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.Resume(sess.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got.ContextPolicy) != string(policy) {
+		t.Fatalf("Resume policy = %s, want %s", got.ContextPolicy, policy)
+	}
+	raw, err := s.ContextPolicy(sess.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(raw) != string(policy) {
+		t.Fatalf("ContextPolicy = %s, want %s", raw, policy)
+	}
+	list, err := s.ListByWorkspace()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 1 || string(list[0].ContextPolicy) != string(policy) {
+		t.Fatalf("ListByWorkspace policy = %+v", list)
+	}
+}
+
+// TestContextPolicyReopenSurvives: the policy is durable across a store reopen
+// (file-backed sessions.db), so it survives resume/adr-0026 §5.
+func TestContextPolicyReopenSurvives(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sessions.db")
+	open := func() (*sql.DB, Interface) {
+		db, err := sql.Open("sqlite", path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := sqlmigrate.Migrate(context.Background(), db, sessionsSchema); err != nil {
+			t.Fatal(err)
+		}
+		return db, New(db)
+	}
+	db, st := open()
+	sess, err := st.Create("doc1", nil, "editor")
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy := json.RawMessage(`{"excluded":[{"path":"/v/b.md"}]}`)
+	if err := st.SetContextPolicy(sess.ID, policy); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+
+	db2, st2 := open()
+	defer db2.Close()
+	got, err := st2.Resume(sess.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got.ContextPolicy) != string(policy) {
+		t.Fatalf("reopened policy = %s, want %s", got.ContextPolicy, policy)
+	}
+}
+
+func TestContextPolicyInvalidIsTyped(t *testing.T) {
+	s := newTestStore(t)
+	sess, _ := s.Create("doc1", nil, "editor")
+	if err := s.SetContextPolicy(sess.ID, json.RawMessage(`{`)); !errors.Is(err, ErrInvalidContextPolicy) {
+		t.Fatalf("invalid policy error = %v, want ErrInvalidContextPolicy", err)
+	}
+}
+
+func TestContextPolicyUnknownSession(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.SetContextPolicy("nope", json.RawMessage(`{}`)); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("SetContextPolicy unknown = %v, want ErrNotFound", err)
+	}
+	if _, err := s.ContextPolicy("nope"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("ContextPolicy unknown = %v, want ErrNotFound", err)
+	}
 }

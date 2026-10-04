@@ -14,6 +14,10 @@ type AssemblerInput struct {
 	Params    SamplingParams // merged effective params (impact the rendered request)
 	Tools     []ToolDef      // all registered tools (global; ADR-0045 §2), in splice order
 	Policy    PipelinePolicy // the one global pipeline policy (budgets; ADR-0045 §3)
+	// Pinned are human-pinned chunks (ADR-0049 §7/§11), front-loaded before the
+	// auto-retrieved RAGChunks and labeled as human overrides. They share the
+	// RAG budget and truncation: pins never bypass budgets.
+	Pinned    []Chunk
 	RAGChunks []Chunk
 	History   []Message
 	Mentions  []MentionContent // spliced after history, before user input (ADR-0036)

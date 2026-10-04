@@ -76,6 +76,23 @@ needs a running engine + control daemon + a live model tagged `editor`):
 tools/smoke-write-through.sh   # ENGINE_URL defaults to http://127.0.0.1:9100
 ```
 
+Manual live smoke for the Phase C context engine (ADR-0044/0049; excluded from
+`go test` — it needs a running engine + control daemon + the `nomic-embed`
+model provisioned). It walks workspace → multi-root corpus → index → a turn
+asserting the `rag` + `context` SSE events → `GET /turns/{id}/context` →
+idempotent eviction → the typed `path-outside-allowed-roots` refusal:
+
+```sh
+tools/smoke-rag.sh             # ENGINE_URL defaults to http://127.0.0.1:9100
+SMOKE_BASE=/an/allowed/root tools/smoke-rag.sh  # temp vault dir (default $HOME)
+```
+
+`smoke-rag.sh` does not start the daemon or any model: it only preflights that
+the engine answers `/health` and that `nomic-embed` is in the `/models`
+projection, then refuses to run otherwise. Its temp vault must live under an
+`ALLOWED_ROOTS` entry (the engine's default is `$HOME`), so `mktemp`'s macOS
+`/var/folders` default is not usable — `SMOKE_BASE` sets the parent.
+
 ## Tauri client details (frozen, ADR-0044)
 
 The Tauri editor is landed but frozen — no new work. This section is retained

@@ -31,6 +31,14 @@ type SessionStore interface {
 	SaveContext(turnID, sessionID string, snapshot json.RawMessage) error
 	// TurnContext returns a persisted turn's context snapshot, or ErrNotFound.
 	TurnContext(turnID string) (json.RawMessage, error)
+	// SetContextPolicy persists a session's context policy (ADR-0049 §8) as
+	// opaque JSON, validating that it decodes into a dto.ContextPolicy. An
+	// invalid policy is ErrInvalidContextPolicy; an unknown session is
+	// ErrNotFound.
+	SetContextPolicy(sessionID string, policy json.RawMessage) error
+	// ContextPolicy returns a session's persisted context policy JSON, or nil
+	// when none. An unknown session is ErrNotFound.
+	ContextPolicy(sessionID string) (json.RawMessage, error)
 }
 
 // Interface is an alias for SessionStore (the contracted name, interface.md §10).
@@ -38,6 +46,10 @@ type Interface = SessionStore
 
 // ErrNotFound is returned when a look-up finds no matching row.
 var ErrNotFound = errors.New("session not found")
+
+// ErrInvalidContextPolicy is the typed refusal for a context policy that does
+// not decode (ADR-0049 §8).
+var ErrInvalidContextPolicy = errors.New("invalid-context-policy")
 
 // store is the concrete Session store. It is a leaf: no out-edges (ADR-0026).
 type store struct {
@@ -48,6 +60,27 @@ type store struct {
 func New(db *sql.DB) SessionStore {
 	return &store{db: db}
 }
+
+// scanSession scans one sessions row. The SELECT column order is fixed:
+// id, document_id, anchor_block_id, mode_type, title, token_budget,
+// context_policy, created_at, updated_at.
+func scanSession(row interface{ Scan(...any) error }) (dto.Session, error) {
+	var sess dto.Session
+	var rawPolicy string
+	if err := row.Scan(
+		&sess.ID, &sess.DocumentID, &sess.AnchorBlockID, &sess.ModeType, &sess.Title, &sess.TokenBudget,
+		&rawPolicy, &sess.CreatedAt, &sess.UpdatedAt,
+	); err != nil {
+		return dto.Session{}, err
+	}
+	if rawPolicy != "" {
+		sess.ContextPolicy = json.RawMessage(rawPolicy)
+	}
+	return sess, nil
+}
+
+// sessionColumns is the stable SELECT list shared by every session read.
+const sessionColumns = `id, document_id, anchor_block_id, mode_type, title, token_budget, context_policy, created_at, updated_at`
 
 // Migrate applies the sessions.db schema (exposed for the composition root).
 func Migrate(ctx context.Context, db *sql.DB) error {
@@ -88,21 +121,16 @@ func (s *store) Create(documentID string, anchorBlockID *string, modeType string
 // ErrNotFound. NULL anchor matching is handled so doc-level chats (nil anchor)
 // and block-anchored chats are distinct.
 func (s *store) findByAnchor(documentID string, anchorBlockID *string) (dto.Session, error) {
-	var sess dto.Session
 	var query string
 	var args []interface{}
 	if anchorBlockID == nil {
-		query = `SELECT id, document_id, anchor_block_id, mode_type, title, token_budget, created_at, updated_at
-		         FROM sessions WHERE document_id = ? AND anchor_block_id IS NULL`
+		query = `SELECT ` + sessionColumns + ` FROM sessions WHERE document_id = ? AND anchor_block_id IS NULL`
 		args = []interface{}{documentID}
 	} else {
-		query = `SELECT id, document_id, anchor_block_id, mode_type, title, token_budget, created_at, updated_at
-		         FROM sessions WHERE document_id = ? AND anchor_block_id = ?`
+		query = `SELECT ` + sessionColumns + ` FROM sessions WHERE document_id = ? AND anchor_block_id = ?`
 		args = []interface{}{documentID, *anchorBlockID}
 	}
-	err := s.db.QueryRow(query, args...).Scan(
-		&sess.ID, &sess.DocumentID, &sess.AnchorBlockID, &sess.ModeType, &sess.Title, &sess.TokenBudget, &sess.CreatedAt, &sess.UpdatedAt,
-	)
+	sess, err := scanSession(s.db.QueryRow(query, args...))
 	if errors.Is(err, sql.ErrNoRows) {
 		return dto.Session{}, ErrNotFound
 	}
@@ -114,13 +142,9 @@ func (s *store) findByAnchor(documentID string, anchorBlockID *string) (dto.Sess
 
 // Resume returns a session by id (find-or-open an anchored session).
 func (s *store) Resume(id string) (dto.Session, error) {
-	var sess dto.Session
-	err := s.db.QueryRow(
-		`SELECT id, document_id, anchor_block_id, mode_type, title, token_budget, created_at, updated_at
-		 FROM sessions WHERE id = ?`, id,
-	).Scan(
-		&sess.ID, &sess.DocumentID, &sess.AnchorBlockID, &sess.ModeType, &sess.Title, &sess.TokenBudget, &sess.CreatedAt, &sess.UpdatedAt,
-	)
+	sess, err := scanSession(s.db.QueryRow(
+		`SELECT `+sessionColumns+` FROM sessions WHERE id = ?`, id,
+	))
 	if errors.Is(err, sql.ErrNoRows) {
 		return dto.Session{}, ErrNotFound
 	}
@@ -133,8 +157,7 @@ func (s *store) Resume(id string) (dto.Session, error) {
 // ListByWorkspace returns every session in the shard, newest first.
 func (s *store) ListByWorkspace() ([]dto.Session, error) {
 	rows, err := s.db.Query(
-		`SELECT id, document_id, anchor_block_id, mode_type, title, token_budget, created_at, updated_at
-		 FROM sessions ORDER BY updated_at DESC`,
+		`SELECT ` + sessionColumns + ` FROM sessions ORDER BY updated_at DESC`,
 	)
 	if err != nil {
 		return nil, err
@@ -142,10 +165,8 @@ func (s *store) ListByWorkspace() ([]dto.Session, error) {
 	defer rows.Close()
 	var out []dto.Session
 	for rows.Next() {
-		var sess dto.Session
-		if err := rows.Scan(
-			&sess.ID, &sess.DocumentID, &sess.AnchorBlockID, &sess.ModeType, &sess.Title, &sess.TokenBudget, &sess.CreatedAt, &sess.UpdatedAt,
-		); err != nil {
+		sess, err := scanSession(rows)
+		if err != nil {
 			return nil, err
 		}
 		out = append(out, sess)
@@ -156,8 +177,7 @@ func (s *store) ListByWorkspace() ([]dto.Session, error) {
 // ListByDocument returns every session sharing a document id, newest first.
 func (s *store) ListByDocument(documentID string) ([]dto.Session, error) {
 	rows, err := s.db.Query(
-		`SELECT id, document_id, anchor_block_id, mode_type, title, token_budget, created_at, updated_at
-		 FROM sessions WHERE document_id = ? ORDER BY updated_at DESC`, documentID,
+		`SELECT `+sessionColumns+` FROM sessions WHERE document_id = ? ORDER BY updated_at DESC`, documentID,
 	)
 	if err != nil {
 		return nil, err
@@ -165,10 +185,8 @@ func (s *store) ListByDocument(documentID string) ([]dto.Session, error) {
 	defer rows.Close()
 	var out []dto.Session
 	for rows.Next() {
-		var sess dto.Session
-		if err := rows.Scan(
-			&sess.ID, &sess.DocumentID, &sess.AnchorBlockID, &sess.ModeType, &sess.Title, &sess.TokenBudget, &sess.CreatedAt, &sess.UpdatedAt,
-		); err != nil {
+		sess, err := scanSession(rows)
+		if err != nil {
 			return nil, err
 		}
 		out = append(out, sess)
@@ -256,4 +274,43 @@ func (s *store) TurnContext(turnID string) (json.RawMessage, error) {
 		return nil, err
 	}
 	return json.RawMessage(snap), nil
+}
+
+// SetContextPolicy persists a session's context policy (ADR-0049 §8). The JSON
+// is validated against dto.ContextPolicy; an unknown session is ErrNotFound.
+func (s *store) SetContextPolicy(sessionID string, policy json.RawMessage) error {
+	if len(policy) > 0 {
+		var probe dto.ContextPolicy
+		if err := json.Unmarshal(policy, &probe); err != nil {
+			return ErrInvalidContextPolicy
+		}
+	}
+	res, err := s.db.Exec(
+		`UPDATE sessions SET context_policy = ?, updated_at = ? WHERE id = ?`,
+		string(policy), time.Now().Unix(), sessionID,
+	)
+	if err != nil {
+		return err
+	}
+	if n, err := res.RowsAffected(); err == nil && n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// ContextPolicy returns a session's persisted context policy JSON, or nil when
+// none. An unknown session is ErrNotFound.
+func (s *store) ContextPolicy(sessionID string) (json.RawMessage, error) {
+	var raw string
+	err := s.db.QueryRow(`SELECT context_policy FROM sessions WHERE id = ?`, sessionID).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	if raw == "" {
+		return nil, nil
+	}
+	return json.RawMessage(raw), nil
 }

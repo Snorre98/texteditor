@@ -341,7 +341,21 @@ export const zTask = z.object({
     userInput: z.string(),
     selection: zSelection.optional(),
     mentions: z.array(zMention).optional(),
-    options: zTurnOptions.optional()
+    options: zTurnOptions.optional(),
+    context: z.object({
+        pinned: z.array(z.object({
+            path: z.string(),
+            chunkKey: z.string().optional(),
+            hash: z.string().optional()
+        })).optional(),
+        excluded: z.array(z.object({
+            path: z.string(),
+            chunkKey: z.string().optional(),
+            hash: z.string().optional()
+        })).optional(),
+        autoRag: z.boolean().optional(),
+        retrievalQuery: z.string().optional()
+    }).optional()
 });
 
 export const zMessage = z.object({
@@ -363,7 +377,21 @@ export const zSession = z.object({
     title: z.string().optional(),
     tokenBudget: z.number().int().optional(),
     createdAt: z.coerce.bigint().optional(),
-    updatedAt: z.coerce.bigint().optional()
+    updatedAt: z.coerce.bigint().optional(),
+    contextPolicy: z.object({
+        pinned: z.array(z.object({
+            path: z.string(),
+            chunkKey: z.string().optional(),
+            hash: z.string().optional()
+        })).optional(),
+        excluded: z.array(z.object({
+            path: z.string(),
+            chunkKey: z.string().optional(),
+            hash: z.string().optional()
+        })).optional(),
+        autoRag: z.boolean().optional(),
+        retrievalQuery: z.string().optional()
+    }).optional()
 });
 
 export const zCreateSessionRequest = z.object({
@@ -469,8 +497,15 @@ export const zRagEvent = z.object({
 
 export const zChunkRef = z.object({
     path: z.string(),
-    chunkKey: z.string(),
+    chunkKey: z.string().optional(),
     hash: z.string().optional()
+});
+
+export const zContextPolicy = z.object({
+    pinned: z.array(zChunkRef).optional(),
+    excluded: z.array(zChunkRef).optional(),
+    autoRag: z.boolean().optional(),
+    retrievalQuery: z.string().optional()
 });
 
 export const zContextSnapshot = z.object({
@@ -504,7 +539,9 @@ export const zContextSnapshot = z.object({
         score: z.number().optional(),
         source: z.string().optional(),
         path: z.string().optional(),
-        heading: z.string().optional()
+        heading: z.string().optional(),
+        pinned: z.boolean().optional(),
+        humanOverride: z.boolean().optional()
     })),
     drops: z.array(z.object({
         component: z.enum([
@@ -514,7 +551,8 @@ export const zContextSnapshot = z.object({
         ]),
         reason: z.string(),
         count: z.number().int(),
-        detail: z.string().optional()
+        detail: z.string().optional(),
+        humanOverride: z.boolean().optional()
     })),
     budget: z.array(z.object({
         component: z.enum([
@@ -560,7 +598,9 @@ export const zContextChunk = z.object({
     score: z.number().optional(),
     source: z.string().optional(),
     path: z.string().optional(),
-    heading: z.string().optional()
+    heading: z.string().optional(),
+    pinned: z.boolean().optional(),
+    humanOverride: z.boolean().optional()
 });
 
 export const zContextDrop = z.object({
@@ -571,7 +611,8 @@ export const zContextDrop = z.object({
     ]),
     reason: z.string(),
     count: z.number().int(),
-    detail: z.string().optional()
+    detail: z.string().optional(),
+    humanOverride: z.boolean().optional()
 });
 
 export const zBudgetUsage = z.object({
@@ -659,6 +700,8 @@ export const zListSessionsResponse = z.array(zSession);
 export const zCreateSessionResponse = zSession;
 
 export const zGetSessionMessagesResponse = z.array(zMessage);
+
+export const zPutSessionContextResponse = zSession;
 
 export const zGetTurnContextResponse = zContextSnapshot;
 

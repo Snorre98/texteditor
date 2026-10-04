@@ -262,15 +262,39 @@ func (l *loop) runTurn(ctx context.Context, turnID string, task dto.Task) {
 		}
 	}
 
-	// One fixed pipeline (ADR-0045 §2): auto-RAG always runs, with the policy's
-	// top-k; all registered tools are advertised.
+	// One fixed pipeline (ADR-0045 §2): auto-RAG runs under the effective policy
+	// (unless autoRag is off); all registered tools are advertised.
 	policy := l.d.Pipeline.Policy()
-	chunks, _ := svc.Retriever.Query(ctx, task.UserInput, policy.AutoRagTopK)
+
+	// Merge the persisted session policy with the per-turn Task.context override
+	// (ADR-0049 §8): replace-when-present per field, override never persisted.
+	eff := mergeContextPolicy(sess.ContextPolicy, task.Context, task.UserInput)
+
+	// auto-RAG retrieval — skipped when the effective autoRag flag is off; pins
+	// still apply below.
+	var autoChunks []dto.Chunk
+	if eff.AutoRag {
+		autoChunks, _ = svc.Retriever.Query(ctx, eff.Query, policy.AutoRagTopK)
+	}
+
+	// Apply tray exclusions to the auto-retrieved set (the rag event carries the
+	// post-exclude set, ADR-0049 §4); each removal is a labeled drop.
+	autoChunks, excludedDrops := applyExclusions(autoChunks, eff.Excluded)
+
+	// Resolve pins through the index (ADR-0049 §8): Retriever.Get works even when
+	// a pinned chunk is not in the retrieval top-k. Unresolved refs are labeled
+	// drops, never silent.
+	pinnedChunks, notFoundDrops, err := resolvePins(ctx, svc.Retriever, eff.Pinned)
+	if err != nil {
+		l.emit(turnID, dto.Event{Type: "error", Data: errorData(err)})
+		return
+	}
 
 	// Auto-RAG is visible: the same rag event shape as tool retrieval, emitted
 	// before assembly so clients can show what was retrieved even when no tool
-	// ran (ADR-0044 §3, "auto-retrieved chunks visible with provenance").
-	l.emitRag(turnID, chunks)
+	// ran (ADR-0044 §3, "auto-retrieved chunks visible with provenance"). It is
+	// the auto-retrieved set only — pins are human overrides (ADR-0049 §11).
+	l.emitRag(turnID, autoChunks)
 
 	tools := toolsFor(l.d.Tools)
 
@@ -280,7 +304,8 @@ func (l *loop) runTurn(ctx context.Context, turnID string, task dto.Task) {
 		Params:    res.EffectiveParams,
 		Tools:     tools,
 		Policy:    policy,
-		RAGChunks: chunks,
+		Pinned:    pinnedChunks,
+		RAGChunks: autoChunks,
 		History:   history,
 		Mentions:  mentions,
 		UserInput: task.UserInput,
@@ -292,9 +317,11 @@ func (l *loop) runTurn(ctx context.Context, turnID string, task dto.Task) {
 
 	// Build, persist, and emit the turn's context snapshot (ADR-0044 §4). The
 	// snapshot is engine-owned data: the loop wraps the assembler's provenance/
-	// drops/budget with the turn/session/workspace ids and the retrieved chunks;
-	// the assembler never knows about sessions or workspaces.
-	snapshot := buildSnapshot(turnID, task, wsID, chunks, payload)
+	// drops/budget with the turn/session/workspace ids, the effective retrieval
+	// metadata, and the retrieved/pinned chunks; the assembler never knows about
+	// sessions or workspaces.
+	loopDrops := append(excludedDrops, notFoundDrops...)
+	snapshot := buildSnapshot(turnID, task, wsID, eff.Query, eff.AutoRag, autoChunks, pinnedChunks, loopDrops, payload)
 	rawSnapshot, err := json.Marshal(snapshot)
 	if err != nil {
 		l.emit(turnID, dto.Event{Type: "error", Data: errorData(err)})
@@ -522,12 +549,13 @@ func (l *loop) emitRag(turnID string, chunks []dto.Chunk) {
 	l.emit(turnID, dto.Event{Type: "rag", Data: data})
 }
 
-// buildSnapshot wraps the assembler's provenance/drops/budget and the retrieved
-// chunks into the engine-owned ContextSnapshot for one turn (ADR-0044 §4). It
-// recomputes nothing: provenance, drops, and budget all come from the pure
-// assembler; only the turn/session/workspace envelope and retrieval metadata
-// are added here.
-func buildSnapshot(turnID string, task dto.Task, workspaceID string, chunks []dto.Chunk, payload dto.Payload) dto.ContextSnapshot {
+// buildSnapshot wraps the assembler's provenance/drops/budget, the effective
+// retrieval metadata, and the auto/pinned chunks into the engine-owned
+// ContextSnapshot for one turn (ADR-0044 §4, ADR-0049 §7/§8). It recomputes
+// nothing: provenance, drops, and budget all come from the pure assembler; only
+// the turn/session/workspace envelope, retrieval metadata, loop-level drops
+// (excluded/not-found), and the human-override labels are added here.
+func buildSnapshot(turnID string, task dto.Task, workspaceID, retrievalQuery string, autoRag bool, autoChunks, pinnedChunks []dto.Chunk, loopDrops []dto.ContextDrop, payload dto.Payload) dto.ContextSnapshot {
 	messages := make([]dto.ContextMessage, 0, len(payload.Provenance))
 	for _, p := range payload.Provenance {
 		messages = append(messages, dto.ContextMessage{
@@ -538,13 +566,18 @@ func buildSnapshot(turnID string, task dto.Task, workspaceID string, chunks []dt
 			Pinned:    p.Pinned,
 		})
 	}
-	if chunks == nil {
-		chunks = []dto.Chunk{}
+	// Pinned chunks are listed first (matching their front-loaded assembly
+	// order) and labeled as human overrides; auto chunks stay unlabeled.
+	chunks := make([]dto.Chunk, 0, len(pinnedChunks)+len(autoChunks))
+	for _, c := range pinnedChunks {
+		c.Pinned = true
+		c.HumanOverride = true
+		chunks = append(chunks, c)
 	}
-	drops := payload.Drops
-	if drops == nil {
-		drops = []dto.ContextDrop{}
-	}
+	chunks = append(chunks, autoChunks...)
+	drops := make([]dto.ContextDrop, 0, len(loopDrops)+len(payload.Drops))
+	drops = append(drops, loopDrops...)
+	drops = append(drops, payload.Drops...)
 	budget := payload.Budget
 	if budget == nil {
 		budget = []dto.BudgetUsage{}
@@ -553,14 +586,157 @@ func buildSnapshot(turnID string, task dto.Task, workspaceID string, chunks []dt
 		TurnID:         turnID,
 		SessionID:      task.SessionID,
 		WorkspaceID:    workspaceID,
-		RetrievalQuery: task.UserInput,
-		AutoRag:        true,
+		RetrievalQuery: retrievalQuery,
+		AutoRag:        autoRag,
 		Messages:       messages,
 		Chunks:         chunks,
 		Drops:          drops,
 		Budget:         budget,
 		CreatedAt:      time.Now().Unix(),
 	}
+}
+
+// effectiveContext is the resolved per-turn context policy: the persisted
+// session policy with the per-turn override merged replace-when-present per
+// field, plus defaults (autoRag true, query = the turn's user input).
+type effectiveContext struct {
+	Pinned   []dto.ChunkRef
+	Excluded []dto.ChunkRef
+	AutoRag  bool
+	Query    string
+}
+
+// mergeContextPolicy resolves the effective policy (ADR-0049 §8). The persisted
+// session policy is opaque JSON (nil/empty = none); the per-turn override is
+// optional. A field present in the override replaces the session field wholesale
+// (an explicit empty list clears it); an absent field inherits. Defaults apply
+// when neither layer sets a field. The override is never persisted.
+func mergeContextPolicy(sessionRaw json.RawMessage, override *dto.ContextPolicy, userInput string) effectiveContext {
+	eff := effectiveContext{AutoRag: true, Query: userInput}
+	var session *dto.ContextPolicy
+	if len(sessionRaw) > 0 {
+		var sp dto.ContextPolicy
+		if json.Unmarshal(sessionRaw, &sp) == nil {
+			session = &sp
+		}
+	}
+	apply := func(p *dto.ContextPolicy) {
+		if p == nil {
+			return
+		}
+		if p.Pinned != nil {
+			eff.Pinned = p.Pinned
+		}
+		if p.Excluded != nil {
+			eff.Excluded = p.Excluded
+		}
+		if p.AutoRag != nil {
+			eff.AutoRag = *p.AutoRag
+		}
+		if p.RetrievalQuery != nil {
+			eff.Query = *p.RetrievalQuery
+		}
+	}
+	apply(session)
+	apply(override)
+	return eff
+}
+
+// applyExclusions drops auto-retrieved chunks matching an excluded ref: by
+// chunkKey when present, else by canonical path. It returns the kept chunks and
+// a labeled drop for the removals (ADR-0049 §8, "Removing a chunk ... keeps it
+// out of the payload").
+func applyExclusions(chunks []dto.Chunk, excluded []dto.ChunkRef) ([]dto.Chunk, []dto.ContextDrop) {
+	if len(excluded) == 0 || len(chunks) == 0 {
+		return chunks, nil
+	}
+	keys := map[string]bool{}
+	paths := map[string]bool{}
+	for _, ref := range excluded {
+		if ref.ChunkKey != "" {
+			keys[ref.ChunkKey] = true
+		}
+		if ref.Path != "" {
+			if canonical, _ := pathutil.Canonical(ref.Path); canonical != "" {
+				paths[canonical] = true
+			}
+		}
+	}
+	out := make([]dto.Chunk, 0, len(chunks))
+	dropped := 0
+	detail := ""
+	for _, c := range chunks {
+		if keys[c.ChunkKey] || (c.Path != "" && paths[c.Path]) {
+			dropped++
+			if detail == "" {
+				if c.ChunkKey != "" {
+					detail = c.ChunkKey
+				} else {
+					detail = c.Path
+				}
+			}
+			continue
+		}
+		out = append(out, c)
+	}
+	if dropped == 0 {
+		return out, nil
+	}
+	return out, []dto.ContextDrop{{Component: "rag", Reason: "excluded", Count: dropped, Detail: detail}}
+}
+
+// chunkGetter is the sealed subset of the Retriever the pin resolution needs.
+type chunkGetter interface {
+	Get(ctx context.Context, refs []dto.ChunkRef) ([]dto.Chunk, error)
+}
+
+// resolvePins resolves pinned ChunkRefs to indexed chunks through Retriever.Get
+// (works after resume even when a pinned chunk is not in the top-k). Unresolved
+// refs become a labeled "not-found" drop marked as a human override; a
+// resolution failure is a typed error the caller turns into a turn error.
+func resolvePins(ctx context.Context, r chunkGetter, refs []dto.ChunkRef) ([]dto.Chunk, []dto.ContextDrop, error) {
+	if len(refs) == 0 {
+		return nil, nil, nil
+	}
+	chunks, err := r.Get(ctx, refs)
+	if err != nil {
+		return nil, nil, err
+	}
+	resolvedKeys := map[string]bool{}
+	resolvedPaths := map[string]bool{}
+	for _, c := range chunks {
+		if c.ChunkKey != "" {
+			resolvedKeys[c.ChunkKey] = true
+		}
+		if c.Path != "" {
+			resolvedPaths[c.Path] = true
+		}
+	}
+	var missing []dto.ChunkRef
+	for _, ref := range refs {
+		if ref.ChunkKey != "" {
+			if !resolvedKeys[ref.ChunkKey] {
+				missing = append(missing, ref)
+			}
+			continue
+		}
+		if ref.Path != "" {
+			canonical, _ := pathutil.Canonical(ref.Path)
+			if !resolvedPaths[canonical] {
+				missing = append(missing, ref)
+			}
+			continue
+		}
+		missing = append(missing, ref)
+	}
+	if len(missing) == 0 {
+		return chunks, nil, nil
+	}
+	detail := missing[0].ChunkKey
+	if detail == "" {
+		detail = missing[0].Path
+	}
+	return chunks, []dto.ContextDrop{{Component: "rag", Reason: "not-found", Count: len(missing), Detail: detail, HumanOverride: true}}, nil
 }
 
 // emitToken forwards one text token event (the answering phase; state-machine

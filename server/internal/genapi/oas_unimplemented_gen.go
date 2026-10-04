@@ -258,6 +258,18 @@ func (UnimplementedHandler) PutCorpus(ctx context.Context, req *PutCorpusRequest
 	return r, ht.ErrNotImplemented
 }
 
+// PutSessionContext implements putSessionContext operation.
+//
+// Replaces the session's persisted context policy (pins, excludes, auto-RAG flag, retrieval query) and
+// returns the session so the client reads back what was persisted. The policy carries the same shape
+// as the per-turn `Task.context` override; it survives turns, reconnects, and session resume. Per-turn
+// overrides are never persisted. An unknown session is the typed 404.
+//
+// PUT /sessions/{id}/context
+func (UnimplementedHandler) PutSessionContext(ctx context.Context, req *ContextPolicy, params PutSessionContextParams) (r PutSessionContextRes, _ error) {
+	return r, ht.ErrNotImplemented
+}
+
 // SaveDocument implements saveDocument operation.
 //
 // The manual-edit wire path (ADR-0038): the client's whole block-tree snapshot. Array order =
